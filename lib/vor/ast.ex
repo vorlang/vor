@@ -1,0 +1,81 @@
+defmodule Vor.AST do
+  @moduledoc """
+  AST node definitions for the Vor language.
+  """
+
+  defmodule Agent do
+    defstruct [:name, :body, :meta]
+  end
+
+  defmodule Protocol do
+    defstruct [:accepts, :emits, :meta]
+  end
+
+  defmodule MessageSpec do
+    defstruct [:tag, :fields, :meta]
+  end
+
+  defmodule Handler do
+    defstruct [:pattern, :guard, :body, :meta]
+  end
+
+  defmodule Pattern do
+    defstruct [:tag, :bindings, :meta]
+  end
+
+  defmodule Emit do
+    defstruct [:tag, :fields, :meta]
+  end
+
+  defmodule StateDecl do
+    defstruct [:field, :type_union, :meta]
+  end
+
+  defmodule Transition do
+    defstruct [:field, :value, :meta]
+  end
+
+  defmodule Relation do
+    defstruct [:name, :params, :facts, :meta]
+  end
+
+  defmodule Fact do
+    defstruct [:fields, :meta]
+  end
+
+  defmodule Safety do
+    defstruct [:name, :tier, :body, :meta]
+  end
+
+  defmodule Liveness do
+    defstruct [:name, :tier, :body, :meta]
+  end
+
+  defmodule Resilience do
+    defstruct [:handlers, :meta]
+  end
+
+  defmodule Guard do
+    defstruct [:field, :op, :value, :meta]
+  end
+
+  defmodule CompoundGuard do
+    defstruct [:op, :left, :right, :meta]
+  end
+
+  defmodule StartTimer do
+    defstruct [:name, :meta]
+  end
+
+  defmodule CancelTimer do
+    defstruct [:name, :meta]
+  end
+
+  defmodule RestartTimer do
+    defstruct [:name, :args, :meta]
+  end
+
+  defmodule FunctionCall do
+    defstruct [:name, :args, :meta]
+  end
+end

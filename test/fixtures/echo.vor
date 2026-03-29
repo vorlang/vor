@@ -1,0 +1,10 @@
+agent Echo do
+  protocol do
+    accepts {:ping, payload: term}
+    emits {:pong, payload: term}
+  end
+
+  on {:ping, payload: P} do
+    emit {:pong, payload: P}
+  end
+end
