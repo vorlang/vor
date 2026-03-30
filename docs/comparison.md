@@ -2,6 +2,8 @@
 
 ## Two approaches to building software
 
+The "Mainstream" column describes the dominant paradigm (Java, Python, TypeScript, Go). Erlang and Elixir already solve many of these problems — immutable data, process isolation, message passing, supervision. Vor builds on the same BEAM runtime and adds a verification layer that OTP doesn't provide.
+
 |  | **Mainstream** (Imperative/OOP) | **Vor** (Declarative, BEAM-native) |
 |---|---|---|
 | **Primary artifact** | Source code (functions, classes, modules) | Behavioral specification (.vor file). No separate implementation |
@@ -11,7 +13,7 @@
 | | | |
 | **Correctness approach** | Tests (unit, integration, e2e). Mostly after the fact | Three tiers: proven (compiler-verified), checked (synthesis-tested), monitored (runtime) |
 | **Invariants** | Implicit in code logic. Asserts, type checks | First-class temporal logic (TLA+-style). Safety + liveness. Each tagged with guarantee tier |
-| **Spec ↔ impl gap** | Large. Design docs drift from code immediately | Zero. The spec is the implementation. No drift possible |
+| **Spec vs. impl gap** | Large. Design docs drift from code immediately | Zero. The spec is the implementation. No drift possible |
 | | | |
 | **Concurrency model** | Threads, locks, async/await. Error-prone shared state | Agents as OTP processes. Topology inferred from protocol compatibility |
 | **Failure handling** | Try/catch, error codes. Ad-hoc per codebase | Declared resilience policies. Supervision derived from spec. Violations are observable events |
@@ -23,7 +25,15 @@
 | | | |
 | **Key difficulty** | Complexity scales with human cognitive limits. Concurrency bugs. Integration debt | AI synthesis is probabilistic. Performance bounds may be unsatisfiable. Re-synthesis risks |
 | **Escape hatches** | N/A — everything is manual | Drop to Erlang/Elixir for unconstrained effects, system integration, performance-critical paths |
-| **Maturity** | Decades of tooling, libraries, talent pool | Design phase. Compiler not yet built. Research-grade dependencies |
+| **Maturity** | Decades of tooling, libraries, talent pool | Early stage. Working compiler (Elixir-based, compiles to BEAM). Active development |
+
+### What about Erlang and Elixir?
+
+Erlang and Elixir already occupy a different position from the mainstream column above. They have immutable data, lightweight processes, message passing, "let it crash" supervision, and hot code reloading. If you're already on the BEAM, you've solved the concurrency and fault tolerance problems that plague mainstream languages.
+
+What Erlang and Elixir don't have is verification of the things that go wrong even on the BEAM: state machines with missing handlers or illegal transitions, stuck processes that never terminate, protocol mismatches between GenServers where one side sends a message the other doesn't expect, and invariants that exist only as comments or tests rather than as compiler-checked properties.
+
+Vor doesn't replace OTP — it compiles to OTP. A Vor agent is a gen_server or gen_statem at runtime, supervised and distributed like any other BEAM process. Vor adds the layer above: the state machine is declared and verified, the protocol is checked at compile time, and the invariants are enforced. Everything below that layer is the same BEAM you already trust.
 
 ---
 
