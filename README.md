@@ -46,7 +46,7 @@ agent RateLimiter do
 end
 ```
 
-The equivalent in Elixir would be a gen_statem with hand-written state machine clauses, manual rate tracking, and no way to express the invariant at all. The rate limit correctness property lives in your head or in a comment. In Vor, it's part of the program — tagged with its guarantee tier, checked by the compiler.
+The equivalent in Elixir would be a gen_statem with hand-written state machine clauses, manual rate tracking, and invariants that exist only as tests or comments — not as compiler-verified properties of the code. The rate limit correctness property lives in your head or in a comment. In Vor, it's part of the program — tagged with its guarantee tier, checked by the compiler.
 
 ## What's working
 
