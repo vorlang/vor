@@ -6,9 +6,9 @@ A programming language for the BEAM with relations, constraints, and verifiable 
 
 ## Why
 
-Programs should carry their own verification criteria. Vor is a declarative language where you write what must be true about your system — relations, protocols, invariants — and the compiler produces BEAM bytecode that satisfies those declarations. The spec is the program. There is no separate implementation to drift, review, or debug.
+The hardest bugs in distributed systems aren't logic errors — they're the ones where the code does something nobody intended because nobody wrote down what it should do. Design docs drift from code on day one. Formal specs sit in a separate repo that nobody updates after launch. The implementation becomes the only source of truth, and it's a source that can't answer "is this correct?"
 
-Vor compiles to Erlang/OTP, inheriting battle-tested concurrency, fault tolerance, and hot code reloading. At runtime, a Vor agent is indistinguishable from a hand-written gen_server or gen_statem.
+Vor is a language where you declare what must be true — state machines, message protocols, safety invariants — and the compiler produces BEAM bytecode that satisfies those declarations. One artifact. No drift. The spec is the program.
 
 ## Example
 
