@@ -9,6 +9,7 @@ defmodule Vor.IR do
       :name,
       :module,
       :behaviour,
+      :params,
       :state_fields,
       :protocol,
       :handlers,

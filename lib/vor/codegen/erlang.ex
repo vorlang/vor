@@ -53,18 +53,19 @@ defmodule Vor.Codegen.Erlang do
           [{:call, l, {:atom, l, :start_link}, [{:nil, l}]}]}
       ]},
       {:function, l, :start_link, 1, [
-        {:clause, l, [{:var, l, :_Opts}], [],
+        {:clause, l, [{:var, l, :Args}], [],
           [{:call, l,
             {:remote, l, {:atom, l, :gen_server}, {:atom, l, :start_link}},
-            [{:atom, l, agent.module}, {:map, l, []}, {:nil, l}]}]}
+            [{:atom, l, agent.module}, {:var, l, :Args}, {:nil, l}]}]}
       ]}
     ]
   end
 
-  defp gen_init_server(_agent, l) do
+  defp gen_init_server(agent, l) do
+    init_map = gen_params_map(agent.params, l)
     {:function, l, :init, 1, [
-      {:clause, l, [{:var, l, :_Args}], [],
-        [{:tuple, l, [{:atom, l, :ok}, {:map, l, []}]}]}
+      {:clause, l, [{:var, l, :Args}], [],
+        [{:tuple, l, [{:atom, l, :ok}, init_map]}]}
     ]}
   end
 
@@ -168,12 +169,14 @@ defmodule Vor.Codegen.Erlang do
       _ -> :idle
     end
 
+    init_map = gen_params_map(agent.params, l)
+
     {:function, l, :init, 1, [
-      {:clause, l, [{:var, l, :_Args}], [],
+      {:clause, l, [{:var, l, :Args}], [],
         [{:tuple, l, [
           {:atom, l, :ok},
           {:atom, l, initial_state},
-          {:map, l, []}
+          init_map
         ]}]}
     ]}
   end
@@ -292,6 +295,11 @@ defmodule Vor.Codegen.Erlang do
         {:map_field_assoc, l, {:atom, l, field}, {:var, l, erl_var(var)}}
       {field, {:atom, value}} ->
         {:map_field_assoc, l, {:atom, l, field}, {:atom, l, value}}
+      {field, {:param, name}} ->
+        # Lookup param from State map: maps:get(name, State)
+        {:map_field_assoc, l, {:atom, l, field},
+          {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+            [{:atom, l, name}, {:var, l, :State}]}}
     end)
 
     {:tuple, l, [{:atom, l, tag}, {:map, l, map_pairs}]}
@@ -340,6 +348,18 @@ defmodule Vor.Codegen.Erlang do
   end
 
   defp statem_guard_to_erl(_, _l), do: []
+
+  # Build init state map from params: #{param1 => proplists:get_value(param1, Args), ...}
+  defp gen_params_map(nil, l), do: {:map, l, []}
+  defp gen_params_map([], l), do: {:map, l, []}
+  defp gen_params_map(params, l) do
+    map_pairs = Enum.map(params, fn {name, _type} ->
+      {:map_field_assoc, l, {:atom, l, name},
+        {:call, l, {:remote, l, {:atom, l, :proplists}, {:atom, l, :get_value}},
+          [{:atom, l, name}, {:var, l, :Args}]}}
+    end)
+    {:map, l, map_pairs}
+  end
 
   defp erl_var(name) when is_atom(name) do
     name

@@ -9,14 +9,17 @@ defmodule Vor.Lowering do
   def lower(%AST.Agent{} = ast) do
     state_fields = extract_state_fields(ast.body)
     has_state = state_fields != []
+    params = extract_params(ast.params)
+    param_names = MapSet.new(params, fn {name, _type} -> name end)
 
     ir = %IR.Agent{
       name: ast.name,
       module: Module.concat([Vor, Agent, ast.name]),
       behaviour: if(has_state, do: :gen_statem, else: :gen_server),
+      params: params,
       state_fields: state_fields,
       protocol: extract_protocol(ast.body),
-      handlers: extract_handlers(ast.body),
+      handlers: extract_handlers(ast.body, param_names),
       relations: extract_relations(ast.body),
       invariants: extract_invariants(ast.body),
       resilience: nil,
@@ -24,6 +27,12 @@ defmodule Vor.Lowering do
     }
 
     {:ok, ir}
+  end
+
+  defp extract_params(nil), do: []
+  defp extract_params([]), do: []
+  defp extract_params(params) do
+    Enum.map(params, fn {name, type} -> {to_atom(name), to_atom(type)} end)
   end
 
   # Coerce string or atom to atom
@@ -58,17 +67,17 @@ defmodule Vor.Lowering do
     }
   end
 
-  defp extract_handlers(body) do
+  defp extract_handlers(body, param_names) do
     body
     |> Enum.filter(&match?(%AST.Handler{}, &1))
-    |> Enum.map(&lower_handler/1)
+    |> Enum.map(&lower_handler(&1, param_names))
   end
 
-  defp lower_handler(%AST.Handler{pattern: pattern, guard: guard, body: body}) do
+  defp lower_handler(%AST.Handler{pattern: pattern, guard: guard, body: body}, param_names) do
     %IR.Handler{
       pattern: lower_pattern(pattern),
       guard: lower_guard(guard),
-      actions: Enum.map(body, &lower_action/1)
+      actions: Enum.map(body, &lower_action(&1, param_names))
     }
   end
 
@@ -110,20 +119,26 @@ defmodule Vor.Lowering do
   defp lower_guard_value({:range, low, high}), do: {:range, low, high}
   defp lower_guard_value(other), do: other
 
-  defp lower_action(%AST.Emit{tag: tag, fields: fields}) do
+  defp lower_action(%AST.Emit{tag: tag, fields: fields}, param_names) do
     %IR.Action{
       type: :emit,
       data: %IR.EmitAction{
         tag: to_atom(tag),
         fields: Enum.map(fields, fn
-          {field, {:var, var}} -> {to_atom(field), {:bound_var, to_atom(var)}}
+          {field, {:var, var}} ->
+            var_atom = to_atom(var)
+            if MapSet.member?(param_names, var_atom) do
+              {to_atom(field), {:param, var_atom}}
+            else
+              {to_atom(field), {:bound_var, var_atom}}
+            end
           {field, {:atom, val}} -> {to_atom(field), {:atom, to_atom(val)}}
         end)
       }
     }
   end
 
-  defp lower_action(%AST.Transition{field: field, value: value}) do
+  defp lower_action(%AST.Transition{field: field, value: value}, _param_names) do
     %IR.Action{
       type: :transition,
       data: %IR.TransitionAction{
@@ -133,35 +148,35 @@ defmodule Vor.Lowering do
     }
   end
 
-  defp lower_action(%AST.StartTimer{name: name}) do
+  defp lower_action(%AST.StartTimer{name: name}, _param_names) do
     %IR.Action{
       type: :start_timer,
       data: %IR.TimerAction{op: :start, name: to_atom(name), args: []}
     }
   end
 
-  defp lower_action(%AST.CancelTimer{name: name}) do
+  defp lower_action(%AST.CancelTimer{name: name}, _param_names) do
     %IR.Action{
       type: :cancel_timer,
       data: %IR.TimerAction{op: :cancel, name: to_atom(name), args: []}
     }
   end
 
-  defp lower_action(%AST.RestartTimer{name: name, args: args}) do
+  defp lower_action(%AST.RestartTimer{name: name, args: args}, _param_names) do
     %IR.Action{
       type: :restart_timer,
       data: %IR.TimerAction{op: :restart, name: to_atom(name), args: args}
     }
   end
 
-  defp lower_action(%AST.FunctionCall{name: name, args: args}) do
+  defp lower_action(%AST.FunctionCall{name: name, args: args}, _param_names) do
     %IR.Action{
       type: :function_call,
       data: %IR.FunctionCallAction{name: to_atom(name), args: args}
     }
   end
 
-  defp lower_action(%AST.ExternCall{module: mod, function: func, args: args, bind: bind}) do
+  defp lower_action(%AST.ExternCall{module: mod, function: func, args: args, bind: bind}, _param_names) do
     %IR.Action{
       type: :extern_call,
       data: %IR.ExternCallAction{

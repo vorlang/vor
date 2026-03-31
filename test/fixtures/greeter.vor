@@ -1,0 +1,10 @@
+agent Greeter(greeting: binary) do
+  protocol do
+    accepts {:hello, name: binary}
+    emits {:reply, message: binary}
+  end
+
+  on {:hello, name: N} do
+    emit {:reply, message: greeting}
+  end
+end

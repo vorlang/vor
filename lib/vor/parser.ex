@@ -16,10 +16,25 @@ defmodule Vor.Parser do
 
   # --- Agent ---
 
+  # Parameterized: agent Name(param: type, ...) do
+  defp parse_agent([{:keyword, meta, :agent}, {:identifier, _, name}, {:delimiter, _, :open_paren} | rest]) do
+    case parse_typed_fields_paren(rest, []) do
+      {:ok, params, [{:keyword, _, :do} | rest]} ->
+        case parse_declarations(rest, []) do
+          {:ok, body, rest} ->
+            {:ok, %AST.Agent{name: name, params: params, body: body, meta: meta}, rest}
+          {:error, _} = err -> err
+        end
+      {:ok, _, [token | _]} -> {:error, {:expected_do, token}}
+      {:error, _} = err -> err
+    end
+  end
+
+  # Non-parameterized: agent Name do
   defp parse_agent([{:keyword, meta, :agent}, {:identifier, _, name}, {:keyword, _, :do} | rest]) do
     case parse_declarations(rest, []) do
       {:ok, body, rest} ->
-        {:ok, %AST.Agent{name: name, body: body, meta: meta}, rest}
+        {:ok, %AST.Agent{name: name, params: [], body: body, meta: meta}, rest}
       {:error, _} = err -> err
     end
   end

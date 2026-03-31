@@ -4,7 +4,7 @@ defmodule Vor.AST do
   """
 
   defmodule Agent do
-    defstruct [:name, :body, :meta]
+    defstruct [:name, :params, :body, :meta]
   end
 
   defmodule Protocol do
