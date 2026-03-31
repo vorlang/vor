@@ -55,7 +55,8 @@ The equivalent in Elixir would be a gen_statem with hand-written state machine c
 - Relations with facts, state declarations, protocols, handlers with guards
 - Safety and liveness invariant declarations with guarantee tiers (proven, checked, monitored)
 - Protocol conformance checking
-- 26 tests passing
+- Extern declarations for calling Erlang/Elixir from Vor agents
+- 25 tests passing
 
 ## What's coming
 
