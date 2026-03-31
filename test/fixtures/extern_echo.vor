@@ -1,0 +1,15 @@
+agent ExternEcho do
+  extern do
+    VorTest.Helpers.upcase(text: binary) :: binary
+  end
+
+  protocol do
+    accepts {:transform, text: binary}
+    emits {:result, text: binary}
+  end
+
+  on {:transform, text: T} do
+    upper = VorTest.Helpers.upcase(text: T)
+    emit {:result, text: upper}
+  end
+end

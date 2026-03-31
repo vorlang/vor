@@ -75,16 +75,18 @@ defmodule Vor.Codegen.Erlang do
         pattern_form = pattern_to_erl(handler.pattern, l)
         {pre_actions, emit_action} = split_actions(handler.actions)
 
-        body = case emit_action do
+        pre_exprs = Enum.flat_map(pre_actions, &action_to_erl(&1, l))
+
+        reply = case emit_action do
           nil ->
-            [{:tuple, l, [{:atom, l, :reply}, {:atom, l, :ok}, {:var, l, :State}]}]
+            {:tuple, l, [{:atom, l, :reply}, {:atom, l, :ok}, {:var, l, :State}]}
 
           %IR.EmitAction{} = emit ->
             reply_form = emit_to_erl(emit, l)
-            [{:tuple, l, [{:atom, l, :reply}, reply_form, {:var, l, :State}]}]
+            {:tuple, l, [{:atom, l, :reply}, reply_form, {:var, l, :State}]}
         end
 
-        _ = pre_actions  # For gen_server, pre-actions before emit are limited
+        body = pre_exprs ++ [reply]
 
         {:clause, l,
           [pattern_form, {:var, l, :_From}, {:var, l, :State}],
@@ -345,6 +347,55 @@ defmodule Vor.Codegen.Erlang do
     |> String.capitalize()
     |> String.to_atom()
   end
+
+  # --- Action codegen ---
+
+  # Generate Erlang expressions for pre-actions (extern calls, etc.)
+  defp action_to_erl(%IR.Action{type: :extern_call, data: %IR.ExternCallAction{} = ext}, l) do
+    # Resolve the module atom for the call
+    mod_atom = case ext.module do
+      {:erlang_mod, m} -> m
+      m -> m  # Elixir modules already have the Elixir. prefix from Module.concat
+    end
+
+    # Build argument list — extract values from keyword args
+    arg_forms = Enum.map(ext.args, fn
+      {_field, {:bound_var, var}} -> {:var, l, erl_var(var)}
+      {_field, {:atom, val}} -> {:atom, l, val}
+    end)
+
+    # The actual function call
+    call_form = {:call, l,
+      {:remote, l, {:atom, l, mod_atom}, {:atom, l, ext.function}},
+      arg_forms}
+
+    # Wrap in try/catch
+    try_form = {:try, l,
+      [call_form],  # body
+      [],           # case clauses (none)
+      [             # catch clauses
+        {:clause, l,
+          [{:tuple, l, [{:var, l, :Class}, {:var, l, :Reason}, {:var, l, :Stacktrace}]}],
+          [],
+          [{:tuple, l, [
+            {:atom, l, :vor_extern_error},
+            {:var, l, :Class},
+            {:var, l, :Reason},
+            {:var, l, :Stacktrace}
+          ]}]}
+      ],
+      []}           # after (none)
+
+    case ext.bind do
+      nil ->
+        [try_form]
+      bind_var ->
+        # Result = try ... catch ... end
+        [{:match, l, {:var, l, erl_var(bind_var)}, try_form}]
+    end
+  end
+
+  defp action_to_erl(_action, _l), do: []
 
   defp list_to_erl([], l), do: {:nil, l}
   defp list_to_erl([h | t], l), do: {:cons, l, h, list_to_erl(t, l)}

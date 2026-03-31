@@ -1,0 +1,15 @@
+agent ExternErlang do
+  extern do
+    :erlang.system_time() :: integer
+  end
+
+  protocol do
+    accepts {:get_time, req: term}
+    emits {:time, value: term}
+  end
+
+  on {:get_time, req: R} do
+    ts = :erlang.system_time()
+    emit {:time, value: ts}
+  end
+end

@@ -19,7 +19,8 @@ defmodule Vor.Lowering do
       handlers: extract_handlers(ast.body),
       relations: extract_relations(ast.body),
       invariants: extract_invariants(ast.body),
-      resilience: nil
+      resilience: nil,
+      externs: extract_externs(ast.body)
     }
 
     {:ok, ir}
@@ -159,6 +160,41 @@ defmodule Vor.Lowering do
       data: %IR.FunctionCallAction{name: to_atom(name), args: args}
     }
   end
+
+  defp lower_action(%AST.ExternCall{module: mod, function: func, args: args, bind: bind}) do
+    %IR.Action{
+      type: :extern_call,
+      data: %IR.ExternCallAction{
+        module: lower_extern_module(mod),
+        function: to_atom(func),
+        args: Enum.map(args, fn
+          {field, {:var, var}} -> {to_atom(field), {:bound_var, to_atom(var)}}
+          {field, {:atom, val}} -> {to_atom(field), {:atom, to_atom(val)}}
+        end),
+        bind: if(bind, do: to_atom(bind), else: nil),
+        trusted: false
+      }
+    }
+  end
+
+  defp extract_externs(body) do
+    body
+    |> Enum.filter(&match?(%AST.ExternBlock{}, &1))
+    |> Enum.flat_map(fn %AST.ExternBlock{declarations: decls} ->
+      Enum.map(decls, fn %AST.ExternDecl{module: mod, function: func, args: args, return_type: ret} ->
+        %IR.ExternDecl{
+          module: lower_extern_module(mod),
+          function: to_atom(func),
+          args: Enum.map(args, fn {n, t} -> {to_atom(n), to_atom(t)} end),
+          return_type: ret,
+          trusted: false
+        }
+      end)
+    end)
+  end
+
+  defp lower_extern_module({:erlang_mod, mod}), do: {:erlang_mod, to_atom(mod)}
+  defp lower_extern_module(mod), do: Module.concat([to_atom(mod)])
 
   defp extract_relations(body) do
     body

@@ -53,13 +53,25 @@ defmodule Vor.Analysis.ProtocolChecker do
   end
 
   defp check_handler_scoping(%IR.Handler{pattern: pattern, actions: actions}) do
-    bound_vars =
+    # Variables bound from pattern matching
+    pattern_vars =
       pattern.bindings
       |> Enum.filter(fn
         %IR.Binding{name: {:literal, _}} -> false
         _ -> true
       end)
       |> MapSet.new(& &1.name)
+
+    # Variables bound by extern calls
+    extern_vars =
+      actions
+      |> Enum.filter(fn
+        %IR.Action{type: :extern_call, data: %{bind: bind}} when not is_nil(bind) -> true
+        _ -> false
+      end)
+      |> MapSet.new(fn %IR.Action{data: %{bind: bind}} -> bind end)
+
+    bound_vars = MapSet.union(pattern_vars, extern_vars)
 
     for %IR.Action{type: :emit, data: %IR.EmitAction{fields: fields}} <- actions,
         {_field, {:bound_var, var}} <- fields,

@@ -36,7 +36,7 @@ defmodule Vor.Lexer do
                    safety liveness invariant monitored proven checked resilience
                    relation fact synthesize property never always eventually implies
                    forall where and or not in start_timer cancel_timer restart_timer
-                   retransmit_last_response)
+                   retransmit_last_response extern)
 
     type = if name in keywords, do: :keyword, else: :identifier
     {rest, [{type, {line, col}, String.to_atom(name)}], context}
@@ -92,16 +92,19 @@ defmodule Vor.Lexer do
   # Multi-char operators first (longest match)
   operator =
     choice([
+      string("::") |> replace(:double_colon),
       string("->") |> replace(:arrow),
       string("<=") |> replace(:<=),
       string(">=") |> replace(:>=),
       string("==") |> replace(:==),
       string("!=") |> replace(:!=),
       string("..") |> replace(:range),
+      string("=") |> replace(:equals),
       string("*") |> replace(:star),
       string("+") |> replace(:plus),
       string("-") |> replace(:minus),
-      string("/") |> replace(:slash)
+      string("/") |> replace(:slash),
+      string(".") |> replace(:dot)
     ])
     |> pre_traverse({:mark_position, []})
     |> post_traverse({:to_token, [:operator]})

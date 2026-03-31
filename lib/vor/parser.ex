@@ -89,6 +89,13 @@ defmodule Vor.Parser do
     end
   end
 
+  defp parse_declarations([{:keyword, _, :extern} | _] = tokens, acc) do
+    case parse_extern_block(tokens) do
+      {:ok, extern, rest} -> parse_declarations(rest, [extern | acc])
+      {:error, _} = err -> err
+    end
+  end
+
   defp parse_declarations([token | _], _acc), do: {:error, {:unexpected_token, token}}
   defp parse_declarations([], _acc), do: {:error, :unexpected_eof}
 
@@ -311,6 +318,60 @@ defmodule Vor.Parser do
     parse_handler_body(rest, [%AST.FunctionCall{name: :retransmit_last_response, args: [], meta: meta} | acc])
   end
 
+  # var = Mod.Sub.function(...) — extern call with binding (Elixir module)
+  defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                            {:identifier, _, first_seg}, {:operator, _, :dot} | rest], acc) do
+    case collect_dotted_name([first_seg], [{:operator, nil, :dot} | rest]) do
+      {:ok, segments, func, [{:delimiter, _, :open_paren} | rest]} ->
+        mod = Enum.join(Enum.map(segments, &Atom.to_string/1), ".")
+        case parse_extern_args(rest) do
+          {:ok, args, rest} ->
+            node = %AST.ExternCall{module: mod, function: func, args: args, bind: bind_var, meta: meta}
+            parse_handler_body(rest, [node | acc])
+          {:error, _} = err -> err
+        end
+      {:error, _} = err -> err
+    end
+  end
+
+  # var = :erlang.function(...) — extern call with binding (Erlang module)
+  defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                            {:atom, _, mod}, {:operator, _, :dot},
+                            {:identifier, _, func}, {:delimiter, _, :open_paren} | rest], acc) do
+    case parse_extern_args(rest) do
+      {:ok, args, rest} ->
+        node = %AST.ExternCall{module: {:erlang_mod, mod}, function: func, args: args, bind: bind_var, meta: meta}
+        parse_handler_body(rest, [node | acc])
+      {:error, _} = err -> err
+    end
+  end
+
+  # Mod.Sub.function(...) — extern call without binding (Elixir module)
+  defp parse_handler_body([{:identifier, meta, first_seg}, {:operator, _, :dot} | rest], acc) do
+    case collect_dotted_name([first_seg], [{:operator, nil, :dot} | rest]) do
+      {:ok, segments, func, [{:delimiter, _, :open_paren} | rest]} ->
+        mod = Enum.join(Enum.map(segments, &Atom.to_string/1), ".")
+        case parse_extern_args(rest) do
+          {:ok, args, rest} ->
+            node = %AST.ExternCall{module: mod, function: func, args: args, bind: nil, meta: meta}
+            parse_handler_body(rest, [node | acc])
+          {:error, _} = err -> err
+        end
+      {:error, _} = err -> err
+    end
+  end
+
+  # :erlang.function(...) — extern call without binding (Erlang module)
+  defp parse_handler_body([{:atom, meta, mod}, {:operator, _, :dot},
+                            {:identifier, _, func}, {:delimiter, _, :open_paren} | rest], acc) do
+    case parse_extern_args(rest) do
+      {:ok, args, rest} ->
+        node = %AST.ExternCall{module: {:erlang_mod, mod}, function: func, args: args, bind: nil, meta: meta}
+        parse_handler_body(rest, [node | acc])
+      {:error, _} = err -> err
+    end
+  end
+
   defp parse_handler_body([{:identifier, meta, name} | rest], acc) do
     # Bare function call
     parse_handler_body(rest, [%AST.FunctionCall{name: name, args: [], meta: meta} | acc])
@@ -318,6 +379,37 @@ defmodule Vor.Parser do
 
   defp parse_handler_body([token | _], _acc), do: {:error, {:unexpected_in_handler, token}}
   defp parse_handler_body([], _acc), do: {:error, :unexpected_eof}
+
+  # Parse extern call arguments — uses ) as terminator instead of }
+  defp parse_extern_args([{:delimiter, _, :close_paren} | rest]) do
+    {:ok, [], rest}
+  end
+
+  defp parse_extern_args(tokens) do
+    parse_extern_arg_fields(tokens, [])
+  end
+
+  defp parse_extern_arg_fields([{:delimiter, _, :close_paren} | rest], acc) do
+    {:ok, Enum.reverse(acc), rest}
+  end
+
+  defp parse_extern_arg_fields([{:delimiter, _, :comma} | rest], acc) do
+    parse_extern_arg_field(rest, acc)
+  end
+
+  defp parse_extern_arg_fields(tokens, []) do
+    parse_extern_arg_field(tokens, [])
+  end
+
+  defp parse_extern_arg_field([{:identifier, _, field}, {:delimiter, _, :colon}, {:identifier, _, var} | rest], acc) do
+    parse_extern_arg_fields(rest, [{field, {:var, var}} | acc])
+  end
+
+  defp parse_extern_arg_field([{:identifier, _, field}, {:delimiter, _, :colon}, {:atom, _, value} | rest], acc) do
+    parse_extern_arg_fields(rest, [{field, {:atom, value}} | acc])
+  end
+
+  defp parse_extern_arg_field([token | _], _acc), do: {:error, {:expected_extern_arg, token}}
 
   defp parse_restart_timer_args([{:delimiter, _, :open_paren}, {:atom, _, name}, {:delimiter, _, :comma} | rest]) do
     # Consume tokens until close paren — store as raw tokens for now
@@ -463,6 +555,121 @@ defmodule Vor.Parser do
   defp parse_simple_expr([{:atom, _, value} | rest]), do: {:ok, {:atom, value}, rest}
   defp parse_simple_expr([{:integer, _, value} | rest]), do: {:ok, {:integer, value}, rest}
   defp parse_simple_expr([token | _]), do: {:error, {:expected_expr, token}}
+
+  # --- Extern Block ---
+
+  defp parse_extern_block([{:keyword, meta, :extern}, {:keyword, _, :do} | rest]) do
+    case parse_extern_decls(rest, []) do
+      {:ok, decls, rest} ->
+        {:ok, %AST.ExternBlock{declarations: decls, meta: meta}, rest}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_extern_decls([{:keyword, _, :end} | rest], acc) do
+    {:ok, Enum.reverse(acc), rest}
+  end
+
+  # Elixir module: Mod.Sub.function(args) :: return_type
+  defp parse_extern_decls([{:identifier, meta, first_seg} | rest], acc) do
+    case collect_dotted_name([first_seg], rest) do
+      {:ok, segments, func, [{:delimiter, _, :open_paren} | rest]} ->
+        mod = Enum.join(Enum.map(segments, &Atom.to_string/1), ".")
+        case parse_typed_fields_paren(rest, []) do
+          {:ok, args, [{:operator, _, :double_colon} | rest]} ->
+            case parse_return_type(rest) do
+              {:ok, ret_type, rest} ->
+                decl = %AST.ExternDecl{module: mod, function: func, args: args, return_type: ret_type, meta: meta}
+                parse_extern_decls(rest, [decl | acc])
+              {:error, _} = err -> err
+            end
+          {:ok, _args, [token | _]} -> {:error, {:expected_double_colon, token}}
+          {:error, _} = err -> err
+        end
+      {:error, _} = err -> err
+    end
+  end
+
+  # Erlang module: :mod.function(args) :: return_type
+  defp parse_extern_decls([{:atom, meta, mod}, {:operator, _, :dot},
+                            {:identifier, _, func}, {:delimiter, _, :open_paren} | rest], acc) do
+    case parse_typed_fields_paren(rest, []) do
+      {:ok, args, [{:operator, _, :double_colon} | rest]} ->
+        case parse_return_type(rest) do
+          {:ok, ret_type, rest} ->
+            decl = %AST.ExternDecl{module: {:erlang_mod, mod}, function: func, args: args, return_type: ret_type, meta: meta}
+            parse_extern_decls(rest, [decl | acc])
+          {:error, _} = err -> err
+        end
+      {:ok, _args, [token | _]} -> {:error, {:expected_double_colon, token}}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_extern_decls([token | _], _acc), do: {:error, {:unexpected_in_extern, token}}
+
+  # Collect segments of a dotted name: A.B.C.func -> {[:A, :B, :C], :func}
+  defp collect_dotted_name(segments, [{:operator, _, :dot}, {:identifier, _, next} | rest]) do
+    # Could be more segments or this could be the function name
+    case rest do
+      [{:operator, _, :dot} | _] ->
+        collect_dotted_name(segments ++ [next], rest)
+      [{:delimiter, _, :open_paren} | _] ->
+        # next is the function name
+        {:ok, segments, next, rest}
+      _ ->
+        # next is the function name
+        {:ok, segments, next, rest}
+    end
+  end
+
+  defp collect_dotted_name(_segments, [token | _]), do: {:error, {:expected_dot, token}}
+
+  # Return type: identifier, or {:ok, type} | {:error, type} union
+  defp parse_return_type([{:identifier, _, type} | rest]) do
+    {:ok, type, rest}
+  end
+
+  defp parse_return_type([{:delimiter, _, :open_brace} | _] = tokens) do
+    # Parse tuple type like {:ok, term} | {:error, term}
+    case parse_return_type_union(tokens, []) do
+      {:ok, types, rest} -> {:ok, {:union, types}, rest}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_return_type([token | _]), do: {:error, {:expected_return_type, token}}
+
+  defp parse_return_type_union([{:delimiter, _, :open_brace} | rest], acc) do
+    case skip_until_close_brace(rest, []) do
+      {:ok, _inner, rest} ->
+        # Store as raw token representation for now
+        type_entry = :tuple_type
+        case rest do
+          [{:delimiter, _, :pipe} | rest] -> parse_return_type_union(rest, [type_entry | acc])
+          _ -> {:ok, Enum.reverse([type_entry | acc]), rest}
+        end
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_return_type_union(tokens, []) do
+    parse_return_type(tokens)
+    |> case do
+      {:ok, type, rest} -> {:ok, type, rest}
+      err -> err
+    end
+  end
+
+  defp skip_until_close_brace([{:delimiter, _, :close_brace} | rest], acc) do
+    {:ok, Enum.reverse(acc), rest}
+  end
+
+  defp skip_until_close_brace([t | rest], acc) do
+    skip_until_close_brace(rest, [t | acc])
+  end
+
+  defp skip_until_close_brace([], _acc), do: {:error, :unexpected_eof}
 
   # --- Safety ---
 

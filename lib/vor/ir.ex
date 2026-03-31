@@ -14,7 +14,8 @@ defmodule Vor.IR do
       :handlers,
       :relations,
       :invariants,
-      :resilience
+      :resilience,
+      :externs
     ]
   end
 
@@ -72,5 +73,13 @@ defmodule Vor.IR do
 
   defmodule Relation do
     defstruct [:name, :params, :facts]
+  end
+
+  defmodule ExternDecl do
+    defstruct [:module, :function, :args, :return_type, :trusted]
+  end
+
+  defmodule ExternCallAction do
+    defstruct [:module, :function, :args, :bind, :trusted]
   end
 end

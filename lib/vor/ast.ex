@@ -78,4 +78,16 @@ defmodule Vor.AST do
   defmodule FunctionCall do
     defstruct [:name, :args, :meta]
   end
+
+  defmodule ExternBlock do
+    defstruct [:declarations, :meta]
+  end
+
+  defmodule ExternDecl do
+    defstruct [:module, :function, :args, :return_type, :meta]
+  end
+
+  defmodule ExternCall do
+    defstruct [:module, :function, :args, :bind, :meta]
+  end
 end
