@@ -36,7 +36,7 @@ defmodule Vor.Lexer do
                    safety liveness invariant monitored proven checked resilience
                    relation fact synthesize property never always eventually implies
                    forall where and or not in start_timer cancel_timer restart_timer
-                   retransmit_last_response extern)
+                   retransmit_last_response extern if else)
 
     type = if name in keywords, do: :keyword, else: :identifier
     {rest, [{type, {line, col}, String.to_atom(name)}], context}

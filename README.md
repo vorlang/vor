@@ -12,52 +12,53 @@ Vor is a language where you declare what must be true — state machines, messag
 
 ## Example
 
-A rate limiter in Vor:
+A rate limiter in Vor ([full source](examples/rate_limiter.vor)):
 
 ```vor
-agent RateLimiter do
+agent RateLimiter(max_requests: integer, window_ms: integer) do
 
-  relation rate_limit(client: client_id, max_requests: integer) do
-    fact(client: :default, max_requests: 10)
+  extern do
+    Vor.Examples.RateStore.increment(client: binary, window_ms: integer) :: integer
   end
-
-  state phase: :accepting | :rejecting
 
   protocol do
-    accepts {:request, client: client_id, payload: term}
-    emits {:ok, payload: term}
-    emits {:rejected, client: client_id}
+    accepts {:request, client: binary, payload: term}
+    emits {:ok, payload: term, remaining: integer}
+    emits {:rejected, client: binary, retry_after: integer}
   end
 
-  on {:request, client: C, payload: P} when phase == :accepting do
-    emit {:ok, payload: P}
+  on {:request, client: C, payload: P} do
+    current = Vor.Examples.RateStore.increment(client: C, window_ms: window_ms)
+    if current <= max_requests do
+      emit {:ok, payload: P, remaining: max_requests - current}
+    else
+      emit {:rejected, client: C, retry_after: window_ms}
+    end
   end
 
-  on {:request, client: C, payload: P} when phase == :rejecting do
-    emit {:rejected, client: C}
-  end
-
-  invariant "rate limit respected" proven do
+  invariant "rate limit respected" monitored do
     forall C, Max
       where rate_limit(client: C, max_requests: Max)
-      -> count(requests(client: C)) <= Max
+      -> Vor.Examples.RateStore.count(client: C, window_ms: window_ms) <= Max
   end
 
 end
 ```
 
-The equivalent in Elixir would be a gen_statem with hand-written state machine clauses, manual rate tracking, and invariants that exist only as tests or comments — not as compiler-verified properties of the code. The rate limit correctness property lives in your head or in a comment. In Vor, it's part of the program — tagged with its guarantee tier, checked by the compiler.
+The equivalent in Elixir would be a gen_server with manual rate tracking, `proplists` configuration, try/catch around external calls, and invariants that exist only as tests or comments — not as compiler-verified properties of the code.
 
 ## What's working
 
 - Full compiler pipeline: `.vor` source -> Lexer -> Parser -> AST -> IR -> Erlang codegen -> BEAM binary
 - Agents compile to OTP `gen_server` and `gen_statem`
+- Parameterized agents with configuration passed at init
+- Extern declarations for calling Erlang/Elixir from Vor agents (untrusted, try/catch wrapped)
 - Relations with facts, state declarations, protocols, handlers with guards
+- Conditional logic (`if/else`) and arithmetic expressions in handlers
 - Safety and liveness invariant declarations with guarantee tiers (proven, checked, monitored)
 - Protocol conformance checking
-- Extern declarations for calling Erlang/Elixir from Vor agents
-- Parameterized agents with configuration passed at init
-- 29 tests passing
+- Working rate limiter example with ETS-backed storage
+- 34 tests passing
 
 ## What's coming
 
@@ -76,15 +77,15 @@ mix deps.get
 mix test
 ```
 
-Then in the interactive shell:
+Or run the rate limiter interactively:
 
 ```
 iex -S mix
 
-{:ok, result} = Vor.compile_and_load(File.read!("test/fixtures/rate_limiter.vor"))
-{:ok, pid} = :gen_statem.start_link(result.module, [], [])
-:sys.get_state(pid)
-# => {:accepting, %{}}
+{:ok, r} = Vor.compile_and_load(File.read!("examples/rate_limiter.vor"))
+{:ok, pid} = GenServer.start_link(r.module, [max_requests: 5, window_ms: 60_000])
+GenServer.call(pid, {:request, %{client: "alice", payload: "hello"}})
+# => {:ok, %{payload: "hello", remaining: 4}}
 ```
 
 ## Background

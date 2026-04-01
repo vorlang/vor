@@ -90,4 +90,20 @@ defmodule Vor.AST do
   defmodule ExternCall do
     defstruct [:module, :function, :args, :bind, :meta]
   end
+
+  defmodule IfElse do
+    defstruct [:condition, :then_body, :else_body, :meta]
+  end
+
+  defmodule Comparison do
+    defstruct [:left, :op, :right, :meta]
+  end
+
+  defmodule ArithExpr do
+    defstruct [:op, :left, :right, :meta]
+  end
+
+  defmodule VarRef do
+    defstruct [:name, :meta]
+  end
 end

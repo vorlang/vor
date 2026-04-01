@@ -1,0 +1,33 @@
+agent RateLimiter(max_requests: integer, window_ms: integer) do
+
+  extern do
+    Vor.Examples.RateStore.increment(client: binary, window_ms: integer) :: integer
+    Vor.Examples.RateStore.count(client: binary, window_ms: integer) :: integer
+  end
+
+  relation rate_limit(client: client_id, max_requests: integer) do
+    fact(client: :default, max_requests: max_requests)
+  end
+
+  protocol do
+    accepts {:request, client: binary, payload: term}
+    emits {:ok, payload: term, remaining: integer}
+    emits {:rejected, client: binary, retry_after: integer}
+  end
+
+  on {:request, client: C, payload: P} do
+    current = Vor.Examples.RateStore.increment(client: C, window_ms: window_ms)
+    if current <= max_requests do
+      emit {:ok, payload: P, remaining: max_requests - current}
+    else
+      emit {:rejected, client: C, retry_after: window_ms}
+    end
+  end
+
+  invariant "rate limit respected" monitored do
+    forall C, Max
+      where rate_limit(client: C, max_requests: Max)
+      -> Vor.Examples.RateStore.count(client: C, window_ms: window_ms) <= Max
+  end
+
+end

@@ -83,4 +83,12 @@ defmodule Vor.IR do
   defmodule ExternCallAction do
     defstruct [:module, :function, :args, :bind, :trusted]
   end
+
+  defmodule ConditionalAction do
+    defstruct [:condition, :then_actions, :else_actions]
+  end
+
+  defmodule Condition do
+    defstruct [:left, :op, :right]
+  end
 end

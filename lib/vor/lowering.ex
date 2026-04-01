@@ -126,14 +126,23 @@ defmodule Vor.Lowering do
         tag: to_atom(tag),
         fields: Enum.map(fields, fn
           {field, {:var, var}} ->
-            var_atom = to_atom(var)
-            if MapSet.member?(param_names, var_atom) do
-              {to_atom(field), {:param, var_atom}}
-            else
-              {to_atom(field), {:bound_var, var_atom}}
-            end
-          {field, {:atom, val}} -> {to_atom(field), {:atom, to_atom(val)}}
+            {to_atom(field), lower_value_ref(var, param_names)}
+          {field, {:atom, val}} ->
+            {to_atom(field), {:atom, to_atom(val)}}
+          {field, {:expr, %AST.ArithExpr{op: op, left: left, right: right}}} ->
+            {to_atom(field), {:arith, op, lower_expr_operand(left, param_names), lower_expr_operand(right, param_names)}}
         end)
+      }
+    }
+  end
+
+  defp lower_action(%AST.IfElse{condition: cond_ast, then_body: then_body, else_body: else_body}, param_names) do
+    %IR.Action{
+      type: :conditional,
+      data: %IR.ConditionalAction{
+        condition: lower_condition(cond_ast, param_names),
+        then_actions: Enum.map(then_body, &lower_action(&1, param_names)),
+        else_actions: Enum.map(else_body, &lower_action(&1, param_names))
       }
     }
   end
@@ -176,19 +185,40 @@ defmodule Vor.Lowering do
     }
   end
 
-  defp lower_action(%AST.ExternCall{module: mod, function: func, args: args, bind: bind}, _param_names) do
+  defp lower_action(%AST.ExternCall{module: mod, function: func, args: args, bind: bind}, param_names) do
     %IR.Action{
       type: :extern_call,
       data: %IR.ExternCallAction{
         module: lower_extern_module(mod),
         function: to_atom(func),
         args: Enum.map(args, fn
-          {field, {:var, var}} -> {to_atom(field), {:bound_var, to_atom(var)}}
+          {field, {:var, var}} -> {to_atom(field), lower_value_ref(var, param_names)}
           {field, {:atom, val}} -> {to_atom(field), {:atom, to_atom(val)}}
         end),
         bind: if(bind, do: to_atom(bind), else: nil),
         trusted: false
       }
+    }
+  end
+
+  defp lower_value_ref(var, param_names) do
+    var_atom = to_atom(var)
+    if MapSet.member?(param_names, var_atom) do
+      {:param, var_atom}
+    else
+      {:bound_var, var_atom}
+    end
+  end
+
+  defp lower_expr_operand({:var, var}, param_names), do: lower_value_ref(var, param_names)
+  defp lower_expr_operand({:integer, n}, _param_names), do: {:integer, n}
+  defp lower_expr_operand({:atom, a}, _param_names), do: {:atom, to_atom(a)}
+
+  defp lower_condition(%AST.Comparison{left: left, op: op, right: right}, param_names) do
+    %IR.Condition{
+      left: lower_expr_operand(left, param_names),
+      op: op,
+      right: lower_expr_operand(right, param_names)
     }
   end
 

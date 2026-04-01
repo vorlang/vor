@@ -228,6 +228,24 @@ defmodule Vor.Parser do
     parse_binding_fields(rest, [{field, :wildcard} | acc])
   end
 
+  # field: Var OP Var (arithmetic expression)
+  defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon},
+                             {:identifier, _, left}, {:operator, _, op},
+                             {:identifier, _, right} | rest], acc)
+       when op in [:minus, :plus, :star, :slash] do
+    expr = %AST.ArithExpr{op: op, left: {:var, left}, right: {:var, right}}
+    parse_binding_fields(rest, [{field, {:expr, expr}} | acc])
+  end
+
+  # field: Var OP Integer
+  defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon},
+                             {:identifier, _, left}, {:operator, _, op},
+                             {:integer, _, right} | rest], acc)
+       when op in [:minus, :plus, :star, :slash] do
+    expr = %AST.ArithExpr{op: op, left: {:var, left}, right: {:integer, right}}
+    parse_binding_fields(rest, [{field, {:expr, expr}} | acc])
+  end
+
   # field: Var
   defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon}, {:identifier, _, var} | rest], acc) do
     parse_binding_fields(rest, [{field, {:var, var}} | acc])
@@ -333,6 +351,14 @@ defmodule Vor.Parser do
     parse_handler_body(rest, [%AST.FunctionCall{name: :retransmit_last_response, args: [], meta: meta} | acc])
   end
 
+  # if EXPR do ... else ... end
+  defp parse_handler_body([{:keyword, meta, :if} | rest], acc) do
+    case parse_if_else(rest, meta) do
+      {:ok, if_node, rest} -> parse_handler_body(rest, [if_node | acc])
+      {:error, _} = err -> err
+    end
+  end
+
   # var = Mod.Sub.function(...) — extern call with binding (Elixir module)
   defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
                             {:identifier, _, first_seg}, {:operator, _, :dot} | rest], acc) do
@@ -425,6 +451,65 @@ defmodule Vor.Parser do
   end
 
   defp parse_extern_arg_field([token | _], _acc), do: {:error, {:expected_extern_arg, token}}
+
+  # --- If/Else ---
+
+  # if EXPR do BODY else BODY end
+  defp parse_if_else(tokens, meta) do
+    case parse_condition(tokens) do
+      {:ok, condition, [{:keyword, _, :do} | rest]} ->
+        case parse_if_body(rest, []) do
+          {:ok, then_body, :else, rest} ->
+            case parse_if_body(rest, []) do
+              {:ok, else_body, :end, rest} ->
+                {:ok, %AST.IfElse{condition: condition, then_body: then_body, else_body: else_body, meta: meta}, rest}
+              {:error, _} = err -> err
+            end
+          {:ok, then_body, :end, rest} ->
+            {:ok, %AST.IfElse{condition: condition, then_body: then_body, else_body: [], meta: meta}, rest}
+          {:error, _} = err -> err
+        end
+      {:ok, _, [token | _]} -> {:error, {:expected_do_after_if, token}}
+      {:error, _} = err -> err
+    end
+  end
+
+  # Parse handler body stopping at `else` or `end`, returning which was found
+  defp parse_if_body([{:keyword, _, :else} | rest], acc), do: {:ok, Enum.reverse(acc), :else, rest}
+  defp parse_if_body([{:keyword, _, :end} | rest], acc), do: {:ok, Enum.reverse(acc), :end, rest}
+
+  defp parse_if_body([{:keyword, meta, :emit} | rest], acc) do
+    case parse_emit(rest, meta) do
+      {:ok, emit, rest} -> parse_if_body(rest, [emit | acc])
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_if_body([{:keyword, meta, :transition} | rest], acc) do
+    case parse_transition(rest, meta) do
+      {:ok, trans, rest} -> parse_if_body(rest, [trans | acc])
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_if_body([token | _], _acc), do: {:error, {:unexpected_in_if, token}}
+  defp parse_if_body([], _acc), do: {:error, :unexpected_eof}
+
+  # Condition: expr OP expr (e.g., current <= max_requests)
+  defp parse_condition([{:identifier, _, left}, {:operator, _, op}, {:identifier, _, right} | rest])
+       when op in [:<=, :>=, :==, :!=] do
+    {:ok, %AST.Comparison{left: {:var, left}, op: op, right: {:var, right}}, rest}
+  end
+
+  defp parse_condition([{:identifier, _, left}, {:operator, _, op}, {:integer, _, right} | rest])
+       when op in [:<=, :>=, :==, :!=] do
+    {:ok, %AST.Comparison{left: {:var, left}, op: op, right: {:integer, right}}, rest}
+  end
+
+  defp parse_condition([token | _]), do: {:error, {:expected_condition, token}}
+
+  # --- Arithmetic expressions in emit fields ---
+  # Extends parse_binding_field to handle: field: EXPR - EXPR, field: EXPR + EXPR
 
   defp parse_restart_timer_args([{:delimiter, _, :open_paren}, {:atom, _, name}, {:delimiter, _, :comma} | rest]) do
     # Consume tokens until close paren — store as raw tokens for now
@@ -569,6 +654,7 @@ defmodule Vor.Parser do
 
   defp parse_simple_expr([{:atom, _, value} | rest]), do: {:ok, {:atom, value}, rest}
   defp parse_simple_expr([{:integer, _, value} | rest]), do: {:ok, {:integer, value}, rest}
+  defp parse_simple_expr([{:identifier, _, name} | rest]), do: {:ok, {:var, name}, rest}
   defp parse_simple_expr([token | _]), do: {:error, {:expected_expr, token}}
 
   # --- Extern Block ---

@@ -74,20 +74,7 @@ defmodule Vor.Codegen.Erlang do
       agent.handlers
       |> Enum.map(fn handler ->
         pattern_form = pattern_to_erl(handler.pattern, l)
-        {pre_actions, emit_action} = split_actions(handler.actions)
-
-        pre_exprs = Enum.flat_map(pre_actions, &action_to_erl(&1, l))
-
-        reply = case emit_action do
-          nil ->
-            {:tuple, l, [{:atom, l, :reply}, {:atom, l, :ok}, {:var, l, :State}]}
-
-          %IR.EmitAction{} = emit ->
-            reply_form = emit_to_erl(emit, l)
-            {:tuple, l, [{:atom, l, :reply}, reply_form, {:var, l, :State}]}
-        end
-
-        body = pre_exprs ++ [reply]
+        body = compile_handler_body(handler.actions, l)
 
         {:clause, l,
           [pattern_form, {:var, l, :_From}, {:var, l, :State}],
@@ -120,24 +107,64 @@ defmodule Vor.Codegen.Erlang do
   end
 
   # Split actions into pre-emit actions and the emit action
-  defp split_actions(actions) do
-    emit = Enum.find(actions, fn
-      %IR.Action{type: :emit} -> true
-      _ -> false
-    end)
+  # Compile a handler's action list into Erlang body expressions for gen_server
+  defp compile_handler_body(actions, l) do
+    {pre_actions, terminal} = split_terminal(actions)
 
-    pre = Enum.reject(actions, fn
-      %IR.Action{type: :emit} -> true
-      _ -> false
-    end)
+    pre_exprs = Enum.flat_map(pre_actions, &action_to_erl(&1, l))
 
-    emit_data = case emit do
-      %IR.Action{data: data} -> data
-      nil -> nil
+    terminal_expr = case terminal do
+      %IR.Action{type: :emit, data: emit} ->
+        reply_form = emit_to_erl(emit, l)
+        {:tuple, l, [{:atom, l, :reply}, reply_form, {:var, l, :State}]}
+
+      %IR.Action{type: :conditional, data: %IR.ConditionalAction{} = cond_action} ->
+        compile_conditional(cond_action, l)
+
+      nil ->
+        {:tuple, l, [{:atom, l, :reply}, {:atom, l, :ok}, {:var, l, :State}]}
     end
 
-    {pre, emit_data}
+    pre_exprs ++ [terminal_expr]
   end
+
+  defp split_terminal(actions) do
+    terminal_idx = Enum.find_index(actions, fn a -> a.type in [:emit, :conditional] end)
+    case terminal_idx do
+      nil -> {actions, nil}
+      idx -> {Enum.take(actions, idx), Enum.at(actions, idx)}
+    end
+  end
+
+  defp compile_conditional(%IR.ConditionalAction{condition: cond_ir, then_actions: then_acts, else_actions: else_acts}, l) do
+    cond_form = condition_to_erl(cond_ir, l)
+
+    then_body = compile_handler_body(then_acts, l)
+    else_body = compile_handler_body(else_acts, l)
+
+    {:case, l, cond_form, [
+      {:clause, l, [{:atom, l, true}], [], then_body},
+      {:clause, l, [{:atom, l, false}], [], else_body}
+    ]}
+  end
+
+  defp condition_to_erl(%IR.Condition{left: left, op: op, right: right}, l) do
+    erl_op = case op do
+      :<= -> :"=<"
+      :>= -> :>=
+      :== -> :==
+      :!= -> :"/="
+    end
+    {:op, l, erl_op, value_to_erl(left, l), value_to_erl(right, l)}
+  end
+
+  defp value_to_erl({:bound_var, var}, l), do: {:var, l, erl_var(var)}
+  defp value_to_erl({:param, name}, l) do
+    {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+      [{:atom, l, name}, {:var, l, :State}]}
+  end
+  defp value_to_erl({:integer, n}, l), do: {:integer, l, n}
+  defp value_to_erl({:atom, a}, l), do: {:atom, l, a}
 
   # ---- gen_statem codegen ----
 
@@ -296,10 +323,11 @@ defmodule Vor.Codegen.Erlang do
       {field, {:atom, value}} ->
         {:map_field_assoc, l, {:atom, l, field}, {:atom, l, value}}
       {field, {:param, name}} ->
-        # Lookup param from State map: maps:get(name, State)
+        {:map_field_assoc, l, {:atom, l, field}, value_to_erl({:param, name}, l)}
+      {field, {:arith, op, left, right}} ->
+        erl_op = arith_op(op)
         {:map_field_assoc, l, {:atom, l, field},
-          {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
-            [{:atom, l, name}, {:var, l, :State}]}}
+          {:op, l, erl_op, value_to_erl(left, l), value_to_erl(right, l)}}
     end)
 
     {:tuple, l, [{:atom, l, tag}, {:map, l, map_pairs}]}
@@ -361,6 +389,11 @@ defmodule Vor.Codegen.Erlang do
     {:map, l, map_pairs}
   end
 
+  defp arith_op(:minus), do: :-
+  defp arith_op(:plus), do: :+
+  defp arith_op(:star), do: :*
+  defp arith_op(:slash), do: :div
+
   defp erl_var(name) when is_atom(name) do
     name
     |> Atom.to_string()
@@ -380,8 +413,7 @@ defmodule Vor.Codegen.Erlang do
 
     # Build argument list — extract values from keyword args
     arg_forms = Enum.map(ext.args, fn
-      {_field, {:bound_var, var}} -> {:var, l, erl_var(var)}
-      {_field, {:atom, val}} -> {:atom, l, val}
+      {_field, ref} -> value_to_erl(ref, l)
     end)
 
     # The actual function call

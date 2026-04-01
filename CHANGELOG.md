@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-04-01
+- **Working rate limiter example** — Flagship example combining params, externs, conditionals, arithmetic, and invariants with ETS-backed storage.
+- **If/else conditionals** — Handler bodies support `if expr do ... else ... end` with comparison operators.
+- **Arithmetic expressions** — Emit fields support arithmetic (`remaining: max_requests - current`).
+
 ## 2026-03-30
 - **Parameterized agents** — Agents accept configuration parameters at init, available as immutable values in handlers.
 - **Extern declarations** — Vor agents can call Erlang/Elixir functions via `extern do` blocks with try/catch safety wrappers.
