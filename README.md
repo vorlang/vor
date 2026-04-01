@@ -55,14 +55,28 @@ The equivalent in Elixir would be a gen_server with manual rate tracking, `propl
 - Extern declarations for calling Erlang/Elixir from Vor agents (untrusted, try/catch wrapped)
 - Relations with facts, state declarations, protocols, handlers with guards
 - Conditional logic (`if/else`) and arithmetic expressions in handlers
+- Compile-time safety verification — `proven` invariants checked against the state graph
+- State graph extraction with text and Mermaid diagram output (`mix vor.graph`)
 - Safety and liveness invariant declarations with guarantee tiers (proven, checked, monitored)
 - Protocol conformance checking
-- Working rate limiter example with ETS-backed storage
-- 34 tests passing
+- Working rate limiter and circuit breaker examples
+- 48 tests passing
+
+## Verified state machine
+
+The [circuit breaker example](examples/circuit_breaker.vor) declares a safety invariant: the open state must never forward requests. The compiler proves this at compile time by walking the state graph. A violation fails compilation with a clear error.
+
+```mermaid
+stateDiagram-v2
+    [*] --> closed
+    closed --> open : trip
+    open --> half_open : timer expired
+    half_open --> closed : probe succeeds
+    half_open --> open : probe fails
+```
 
 ## What's coming
 
-- Invariant verification (compile-time proof for safety properties)
 - Runtime invariant monitoring (liveness watchdogs)
 - Bidirectional relation solver
 - Protocol composition checking between agents

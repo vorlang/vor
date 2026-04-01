@@ -1,0 +1,69 @@
+agent CircuitBreaker do
+
+  state phase: :closed | :open | :half_open
+
+  protocol do
+    accepts {:request, payload: term}
+    accepts {:trip, reason: term}
+    accepts {:reset, source: term}
+    accepts {:probe_success, result: term}
+    accepts {:probe_failure, reason: term}
+    emits {:ok, payload: term}
+    emits {:rejected, reason: atom}
+  end
+
+  %% Closed: forward requests normally
+  on {:request, payload: P} when phase == :closed do
+    emit {:ok, payload: P}
+  end
+
+  %% Open: reject all requests
+  on {:request, payload: P} when phase == :open do
+    emit {:rejected, reason: :circuit_open}
+  end
+
+  %% Half-open: reject while probing
+  on {:request, payload: P} when phase == :half_open do
+    emit {:rejected, reason: :probing}
+  end
+
+  %% Trip the breaker
+  on {:trip, reason: R} when phase == :closed do
+    transition phase: :open
+  end
+
+  %% Recovery timer fires — move to half-open
+  on :timer_recovery_fired when phase == :open do
+    transition phase: :half_open
+  end
+
+  %% Probe succeeded — close the circuit
+  on {:probe_success, result: R} when phase == :half_open do
+    transition phase: :closed
+  end
+
+  %% Probe failed — back to open
+  on {:probe_failure, reason: R} when phase == :half_open do
+    transition phase: :open
+  end
+
+  %% Reset from any state
+  on {:reset, source: S} when phase == :open do
+    transition phase: :closed
+  end
+
+  on {:reset, source: S} when phase == :half_open do
+    transition phase: :closed
+  end
+
+  %% SAFETY INVARIANTS — compiler-verified
+
+  safety "no forward when open" proven do
+    never(phase == :open and emitted({:ok, _}))
+  end
+
+  safety "no direct closed to half_open" proven do
+    never(transition from: :closed, to: :half_open)
+  end
+
+end

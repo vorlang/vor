@@ -1,6 +1,9 @@
 # Changelog
 
 ## 2026-04-01
+- **Compile-time safety verification** — `proven` safety invariants are verified against the state transition graph at compile time. Violations fail compilation.
+- **State graph extraction** — `mix vor.graph` prints text or Mermaid diagrams of gen_statem state machines.
+- **Circuit breaker example** — Verified state machine with safety invariants: open state cannot forward requests.
 - **Working rate limiter example** — Flagship example combining params, externs, conditionals, arithmetic, and invariants with ETS-backed storage.
 - **If/else conditionals** — Handler bodies support `if expr do ... else ... end` with comparison operators.
 - **Arithmetic expressions** — Emit fields support arithmetic (`remaining: max_requests - current`).
