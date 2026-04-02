@@ -65,7 +65,9 @@ The equivalent in Elixir would be a gen_server with manual rate tracking, `propl
 - Protocol composition checking — `system` blocks verify connected agents have compatible protocols
 - Protocol conformance checking
 - Working rate limiter and circuit breaker examples
-- 86 tests passing
+- Handler completeness checking — call handlers must emit on every code path
+- Multi-agent system runtime — supervisor, registry, inter-agent send tested end-to-end
+- 113 tests passing, zero compiler warnings
 
 ## Verified state machine
 
@@ -79,6 +81,13 @@ stateDiagram-v2
     half_open --> closed : probe succeeds
     half_open --> open : probe fails
 ```
+
+### Compiler verification
+
+The safety verifier and graph extraction modules have TLA+ specifications
+in `tla/` that formally define their correctness properties. TLC model
+checking exhaustively verifies these properties for all possible inputs
+within bounded size. See `tla/README.md` for details.
 
 ## What's coming
 - Synthesis obligations (AI-assisted implementation)

@@ -201,6 +201,21 @@ Safety invariants tagged `proven` are verified by walking the state transition g
 
 Invariant bodies that use unsupported constructs will produce a compile error when tagged `proven`. Change to `monitored` for properties the verifier cannot yet check.
 
+## TLA+ specifications
+
+The `tla/` directory contains TLA+ specs for the compiler's most critical
+modules:
+
+- `VorSafetyVerifier.tla` — correctness of safety invariant verification
+- `VorGraphExtraction.tla` — correctness of state graph extraction
+
+If you modify `lib/vor/verification/safety.ex` or `lib/vor/graph.ex`,
+review the corresponding TLA+ spec to ensure the algorithm still matches.
+Run TLC to verify if you have the TLA+ tools installed.
+
+These specs verify the algorithm, not the Elixir code directly. They
+define the contract; the Elixir code must satisfy it.
+
 ## Known limitations
 
 1. No list or collection operations native to the language — use extern calls

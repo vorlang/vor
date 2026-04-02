@@ -31,5 +31,8 @@ vor-*.tar
 # Audit reports (never push)
 /reports/
 
+# TLC binary (download separately)
+tla2tools.jar
+
 # Claude Code worktrees
 /.claude/
