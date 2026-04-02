@@ -806,25 +806,104 @@ defmodule Vor.Parser do
 
   defp parse_liveness([{:keyword, meta, :liveness}, {:string, _, name} | rest]) do
     case rest do
+      # monitored(within: EXPR) do ... end
+      [{:keyword, _, :monitored}, {:delimiter, _, :open_paren},
+       {:identifier, _, :within}, {:delimiter, _, :colon} | rest] ->
+        case parse_timeout_expr(rest) do
+          {:ok, timeout_expr, [{:delimiter, _, :close_paren}, {:keyword, _, :do} | rest]} ->
+            case skip_until_end(rest) do
+              {:ok, body_tokens, rest} ->
+                {:ok, %AST.Liveness{name: name, tier: :monitored, timeout_expr: timeout_expr, body: body_tokens, meta: meta}, rest}
+              {:error, _} = err -> err
+            end
+          {:ok, _, [token | _]} -> {:error, {:expected_close_paren, token}}
+          {:error, _} = err -> err
+        end
+
+      # Simple: monitored do ... end (no within — for backwards compat)
       [{:keyword, _, tier}, {:keyword, _, :do} | rest] when tier in [:proven, :checked, :monitored] ->
         case skip_until_end(rest) do
           {:ok, body_tokens, rest} ->
             {:ok, %AST.Liveness{name: name, tier: tier, body: body_tokens, meta: meta}, rest}
           {:error, _} = err -> err
         end
+
       [token | _] -> {:error, {:expected_tier, token}}
     end
   end
 
+  defp parse_timeout_expr([{:integer, _, value} | rest]), do: {:ok, {:integer, value}, rest}
+  defp parse_timeout_expr([{:identifier, _, name} | rest]), do: {:ok, {:param, name}, rest}
+  defp parse_timeout_expr([token | _]), do: {:error, {:expected_timeout_expr, token}}
+
   # --- Resilience ---
 
   defp parse_resilience([{:keyword, meta, :resilience}, {:keyword, _, :do} | rest]) do
-    case skip_until_end(rest) do
-      {:ok, body_tokens, rest} ->
-        {:ok, %AST.Resilience{handlers: body_tokens, meta: meta}, rest}
+    case parse_resilience_handlers(rest, []) do
+      {:ok, handlers, rest} ->
+        {:ok, %AST.Resilience{handlers: handlers, meta: meta}, rest}
       {:error, _} = err -> err
     end
   end
+
+  defp parse_resilience_handlers([{:keyword, _, :end} | rest], acc) do
+    {:ok, Enum.reverse(acc), rest}
+  end
+
+  # on_invariant_violation("name") -> actions
+  defp parse_resilience_handlers([{:identifier, meta, :on_invariant_violation},
+                                   {:delimiter, _, :open_paren}, {:string, _, name},
+                                   {:delimiter, _, :close_paren}, {:operator, _, :arrow} | rest], acc) do
+    case parse_resilience_actions(rest, []) do
+      {:ok, actions, rest} ->
+        handler = %AST.ResilienceHandler{invariant_name: name, actions: actions, meta: meta}
+        parse_resilience_handlers(rest, [handler | acc])
+      {:error, _} = err -> err
+    end
+  end
+
+  # on_crash -> actions (skip for now — store raw)
+  defp parse_resilience_handlers([{:identifier, _, :on_crash}, {:operator, _, :arrow} | rest], acc) do
+    case skip_resilience_action_line(rest) do
+      {:ok, rest} -> parse_resilience_handlers(rest, acc)
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_resilience_handlers([token | _], _acc), do: {:error, {:unexpected_in_resilience, token}}
+
+  # Parse comma-separated resilience actions until end or next handler
+  defp parse_resilience_actions([{:keyword, _, :transition} | rest], acc) do
+    case parse_transition(rest, nil) do
+      {:ok, trans, rest} ->
+        case rest do
+          [{:delimiter, _, :comma} | rest] -> parse_resilience_actions(rest, [trans | acc])
+          _ -> {:ok, Enum.reverse([trans | acc]), rest}
+        end
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_resilience_actions([{:keyword, _, :emit} | rest], acc) do
+    case parse_emit(rest, nil) do
+      {:ok, emit, rest} ->
+        case rest do
+          [{:delimiter, _, :comma} | rest] -> parse_resilience_actions(rest, [emit | acc])
+          _ -> {:ok, Enum.reverse([emit | acc]), rest}
+        end
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_resilience_actions(tokens, acc) do
+    {:ok, Enum.reverse(acc), tokens}
+  end
+
+  defp skip_resilience_action_line([{:keyword, _, :end} | _] = rest), do: {:ok, rest}
+  defp skip_resilience_action_line([{:identifier, _, :on_invariant_violation} | _] = rest), do: {:ok, rest}
+  defp skip_resilience_action_line([{:identifier, _, :on_crash} | _] = rest), do: {:ok, rest}
+  defp skip_resilience_action_line([_ | rest]), do: skip_resilience_action_line(rest)
+  defp skip_resilience_action_line([]), do: {:error, :unexpected_eof}
 
   # --- Utilities ---
 

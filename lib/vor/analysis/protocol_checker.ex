@@ -40,9 +40,10 @@ defmodule Vor.Analysis.ProtocolChecker do
     end
   end
 
-  # Timer-fired events are internal to the agent, not protocol messages
+  # Timer-fired and liveness timeout events are internal to the agent
   defp internal_event?(tag) do
-    tag |> Atom.to_string() |> String.ends_with?("_fired")
+    name = Atom.to_string(tag)
+    String.ends_with?(name, "_fired") or String.starts_with?(name, "liveness_timeout_")
   end
 
   defp check_variable_scoping(%IR.Agent{handlers: handlers}) do

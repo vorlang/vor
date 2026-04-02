@@ -12,6 +12,15 @@ defmodule Vor.Lowering do
     params = extract_params(ast.params)
     param_names = MapSet.new(params, fn {name, _type} -> name end)
 
+    all_states = case state_fields do
+      [%IR.StateField{values: vals} | _] -> vals
+      _ -> []
+    end
+
+    monitors = extract_monitors(ast.body, all_states, param_names)
+    handlers = extract_handlers(ast.body, param_names)
+    timeout_handlers = generate_timeout_handlers(monitors, param_names)
+
     ir = %IR.Agent{
       name: ast.name,
       module: Module.concat([Vor, Agent, ast.name]),
@@ -19,11 +28,12 @@ defmodule Vor.Lowering do
       params: params,
       state_fields: state_fields,
       protocol: extract_protocol(ast.body),
-      handlers: extract_handlers(ast.body, param_names),
+      handlers: handlers ++ timeout_handlers,
       relations: extract_relations(ast.body),
       invariants: extract_invariants(ast.body),
       resilience: nil,
-      externs: extract_externs(ast.body)
+      externs: extract_externs(ast.body),
+      monitors: monitors
     }
 
     {:ok, ir}
@@ -259,6 +269,96 @@ defmodule Vor.Lowering do
   defp lower_fact_value({:integer, v}), do: {:integer, v}
   defp lower_fact_value({:multiply, a, b}), do: {:multiply, lower_fact_value(a), lower_fact_value(b)}
   defp lower_fact_value(other), do: other
+
+  defp extract_monitors(body, all_states, _param_names) do
+    liveness_invariants =
+      body
+      |> Enum.filter(fn
+        %AST.Liveness{tier: :monitored, timeout_expr: expr} when not is_nil(expr) -> true
+        _ -> false
+      end)
+
+    resilience_map = extract_resilience_map(body)
+
+    Enum.flat_map(liveness_invariants, fn %AST.Liveness{name: name, timeout_expr: timeout_expr, body: body_tokens} ->
+      {excluded, target} = parse_liveness_states(body_tokens)
+      monitored = all_states -- ([target | excluded])
+      event_tag = :"liveness_timeout_#{String.replace(name, " ", "_")}"
+
+      resilience_actions = Map.get(resilience_map, name, [])
+
+      [%IR.LivenessMonitor{
+        name: name,
+        timeout_expr: timeout_expr,
+        excluded_states: excluded,
+        target_state: target,
+        monitored_states: monitored,
+        resilience_actions: resilience_actions,
+        event_tag: event_tag
+      }]
+    end)
+  end
+
+  defp extract_resilience_map(body) do
+    body
+    |> Enum.filter(&match?(%AST.Resilience{}, &1))
+    |> Enum.flat_map(fn %AST.Resilience{handlers: handlers} ->
+      case handlers do
+        handlers when is_list(handlers) ->
+          Enum.flat_map(handlers, fn
+            %AST.ResilienceHandler{invariant_name: name, actions: actions} ->
+              [{name, actions}]
+            _ -> []
+          end)
+        _ -> []
+      end
+    end)
+    |> Map.new()
+  end
+
+  # Parse liveness body tokens to extract excluded and target states
+  # Pattern: always(phase != :excluded implies eventually(phase == :target))
+  defp parse_liveness_states(tokens) when is_list(tokens) do
+    excluded = tokens
+    |> Enum.chunk_every(3, 1, :discard)
+    |> Enum.flat_map(fn
+      [{:identifier, _, :phase}, {:operator, _, :!=}, {:atom, _, state}] -> [String.to_atom(state)]
+      _ -> []
+    end)
+
+    target = tokens
+    |> Enum.chunk_every(3, 1, :discard)
+    |> Enum.find_value(fn
+      [{:identifier, _, :phase}, {:operator, _, :==}, {:atom, _, state}] -> String.to_atom(state)
+      _ -> nil
+    end)
+
+    {excluded, target || :terminated}
+  end
+
+  defp parse_liveness_states(_), do: {[], :terminated}
+
+  defp generate_timeout_handlers(monitors, param_names) do
+    Enum.map(monitors, fn %IR.LivenessMonitor{} = monitor ->
+      # Create a synthetic handler for the timeout event
+      actions = Enum.map(monitor.resilience_actions, &lower_action(&1, param_names))
+
+      # If no resilience actions specified, just transition to target
+      actions = if actions == [] do
+        [%IR.Action{type: :transition, data: %IR.TransitionAction{field: :phase, value: monitor.target_state}}]
+      else
+        actions
+      end
+
+      excluded = [monitor.target_state | monitor.excluded_states]
+
+      %IR.Handler{
+        pattern: %IR.MatchPattern{tag: monitor.event_tag, bindings: []},
+        guard: %IR.GuardExpr{field: :phase, op: :not_in, value: {:states, excluded}},
+        actions: actions
+      }
+    end)
+  end
 
   defp extract_invariants(body) do
     safety =

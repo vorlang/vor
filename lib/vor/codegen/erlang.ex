@@ -209,26 +209,27 @@ defmodule Vor.Codegen.Erlang do
   end
 
   defp gen_handle_event(agent, l) do
+    monitors = agent.monitors || []
+
     handler_clauses =
       agent.handlers
+      |> Enum.reject(fn h -> is_timeout_handler?(h, monitors) end)
       |> Enum.map(fn handler ->
         pattern_form = pattern_to_erl(handler.pattern, l)
         actions = handler.actions
         {statem_actions, new_state} = compile_statem_actions(actions, l)
+
+        # Inject state_timeout for transitions to monitored states
+        timeout_actions = state_timeout_actions(new_state, monitors, l)
+        all_actions = statem_actions ++ timeout_actions
 
         state_result = case new_state do
           nil -> {:var, l, :State}
           value -> {:atom, l, value}
         end
 
-        body = case statem_actions do
-          [] ->
-            [{:tuple, l, [{:atom, l, :next_state}, state_result, {:var, l, :Data}, {:nil, l}]}]
-
-          _ ->
-            actions_list = list_to_erl(statem_actions, l)
-            [{:tuple, l, [{:atom, l, :next_state}, state_result, {:var, l, :Data}, actions_list]}]
-        end
+        actions_list = list_to_erl(all_actions, l)
+        body = [{:tuple, l, [{:atom, l, :next_state}, state_result, {:var, l, :Data}, actions_list]}]
 
         guard_erl = statem_guard_to_erl(handler.guard, l)
 
@@ -241,13 +242,67 @@ defmodule Vor.Codegen.Erlang do
     # Timer fired events: :info handlers
     timer_clauses = gen_timer_info_clauses(agent, l)
 
+    # State timeout handlers (liveness monitoring)
+    timeout_clauses = gen_state_timeout_clauses(agent, monitors, l)
+
     # Catch-all
     catchall = {:clause, l,
       [{:var, l, :_Type}, {:var, l, :_Event}, {:var, l, :_State}, {:var, l, :_Data}],
       [],
       [{:atom, l, :keep_state_and_data}]}
 
-    {:function, l, :handle_event, 4, handler_clauses ++ timer_clauses ++ [catchall]}
+    {:function, l, :handle_event, 4, handler_clauses ++ timer_clauses ++ timeout_clauses ++ [catchall]}
+  end
+
+  defp is_timeout_handler?(handler, monitors) do
+    Enum.any?(monitors, fn m -> m.event_tag == handler.pattern.tag end)
+  end
+
+  # Generate {state_timeout, Duration, EventTag} actions for transitions to monitored states
+  defp state_timeout_actions(nil, _monitors, _l), do: []
+  defp state_timeout_actions(new_state, monitors, l) do
+    Enum.flat_map(monitors, fn monitor ->
+      if new_state in monitor.monitored_states do
+        duration = case monitor.timeout_expr do
+          {:integer, ms} -> {:integer, l, ms}
+          {:param, name} ->
+            {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+              [{:atom, l, name}, {:var, l, :Data}]}
+        end
+
+        [{:tuple, l, [{:atom, l, :state_timeout}, duration, {:atom, l, monitor.event_tag}]}]
+      else
+        []
+      end
+    end)
+  end
+
+  # Generate handle_event clauses for state timeout events
+  defp gen_state_timeout_clauses(agent, monitors, l) do
+    timeout_handlers = agent.handlers
+    |> Enum.filter(fn h -> is_timeout_handler?(h, monitors) end)
+
+    Enum.map(timeout_handlers, fn handler ->
+      monitor = Enum.find(monitors, fn m -> m.event_tag == handler.pattern.tag end)
+      {_statem_actions, new_state} = compile_statem_actions(handler.actions, l)
+
+      state_result = case new_state do
+        nil -> {:var, l, :State}
+        value -> {:atom, l, value}
+      end
+
+      # Guard: State is not in excluded states or target state
+      excluded = [monitor.target_state | monitor.excluded_states]
+      guard = excluded
+      |> Enum.map(fn s -> {:op, l, :"/=", {:var, l, :State}, {:atom, l, s}} end)
+
+      body = [{:tuple, l, [{:atom, l, :next_state}, state_result, {:var, l, :Data}]}]
+
+      {:clause, l,
+        [{:atom, l, :state_timeout}, {:atom, l, handler.pattern.tag}, {:var, l, :State}, {:var, l, :Data}],
+        [guard],
+        body}
+    end)
   end
 
   defp compile_statem_actions(actions, _l) do

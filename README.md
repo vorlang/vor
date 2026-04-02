@@ -57,10 +57,11 @@ The equivalent in Elixir would be a gen_server with manual rate tracking, `propl
 - Conditional logic (`if/else`) and arithmetic expressions in handlers
 - Compile-time safety verification — `proven` invariants checked against the state graph
 - State graph extraction with text and Mermaid diagram output (`mix vor.graph`)
+- Runtime liveness monitoring — stuck processes rescued by gen_statem state timeouts
 - Safety and liveness invariant declarations with guarantee tiers (proven, checked, monitored)
 - Protocol conformance checking
 - Working rate limiter and circuit breaker examples
-- 48 tests passing
+- 54 tests passing
 
 ## Verified state machine
 
@@ -77,7 +78,6 @@ stateDiagram-v2
 
 ## What's coming
 
-- Runtime invariant monitoring (liveness watchdogs)
 - Bidirectional relation solver
 - Protocol composition checking between agents
 - Synthesis obligations (AI-assisted implementation)

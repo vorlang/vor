@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-04-01
+- **Runtime liveness monitoring** — `monitored(within: duration)` liveness invariants generate gen_statem state timeouts that rescue stuck processes via resilience handlers.
 - **Compile-time safety verification** — `proven` safety invariants are verified against the state transition graph at compile time. Violations fail compilation.
 - **State graph extraction** — `mix vor.graph` prints text or Mermaid diagrams of gen_statem state machines.
 - **Circuit breaker example** — Verified state machine with safety invariants: open state cannot forward requests.

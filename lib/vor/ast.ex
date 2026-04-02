@@ -48,11 +48,15 @@ defmodule Vor.AST do
   end
 
   defmodule Liveness do
-    defstruct [:name, :tier, :body, :meta]
+    defstruct [:name, :tier, :timeout_expr, :body, :meta]
   end
 
   defmodule Resilience do
     defstruct [:handlers, :meta]
+  end
+
+  defmodule ResilienceHandler do
+    defstruct [:invariant_name, :actions, :meta]
   end
 
   defmodule Guard do

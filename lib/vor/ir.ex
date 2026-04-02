@@ -16,7 +16,8 @@ defmodule Vor.IR do
       :relations,
       :invariants,
       :resilience,
-      :externs
+      :externs,
+      :monitors
     ]
   end
 
@@ -90,5 +91,9 @@ defmodule Vor.IR do
 
   defmodule Condition do
     defstruct [:left, :op, :right]
+  end
+
+  defmodule LivenessMonitor do
+    defstruct [:name, :timeout_expr, :excluded_states, :target_state, :monitored_states, :resilience_actions, :event_tag]
   end
 end

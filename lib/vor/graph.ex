@@ -26,15 +26,24 @@ defmodule Vor.Graph do
     end
 
     transitions = extract_transitions(agent.handlers)
+    timeout_transitions = extract_timeout_transitions(agent.monitors || [])
     emit_map = extract_emit_map(agent.handlers, states)
 
     {:ok, %__MODULE__{
       agent: agent.name,
       states: states,
       initial_state: initial,
-      transitions: transitions,
+      transitions: transitions ++ timeout_transitions,
       emit_map: emit_map
     }}
+  end
+
+  defp extract_timeout_transitions(monitors) do
+    Enum.flat_map(monitors, fn monitor ->
+      Enum.map(monitor.monitored_states, fn from ->
+        %{from: from, to: monitor.target_state, trigger: :state_timeout}
+      end)
+    end)
   end
 
   defp extract_transitions(handlers) do
