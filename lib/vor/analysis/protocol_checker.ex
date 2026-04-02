@@ -10,6 +10,7 @@ defmodule Vor.Analysis.ProtocolChecker do
     errors =
       check_emit_types(agent) ++
       check_accept_coverage(agent) ++
+      check_broadcast_types(agent) ++
       check_variable_scoping(agent)
 
     warnings = check_unhandled_accepts(agent)
@@ -29,6 +30,23 @@ defmodule Vor.Analysis.ProtocolChecker do
       {:error, :emit_not_in_protocol, tag}
     end
   end
+
+  defp check_broadcast_types(%IR.Agent{protocol: proto, handlers: handlers}) do
+    send_tags = MapSet.new((proto.sends || []), & &1.tag)
+
+    for handler <- handlers,
+        action <- handler.actions,
+        tag <- extract_broadcast_tags(action),
+        not MapSet.member?(send_tags, tag) do
+      {:error, :broadcast_not_in_sends, tag}
+    end
+  end
+
+  defp extract_broadcast_tags(%IR.Action{type: :broadcast, data: %IR.BroadcastAction{tag: tag}}), do: [tag]
+  defp extract_broadcast_tags(%IR.Action{type: :conditional, data: %IR.ConditionalAction{then_actions: ta, else_actions: ea}}) do
+    Enum.flat_map(ta, &extract_broadcast_tags/1) ++ Enum.flat_map(ea, &extract_broadcast_tags/1)
+  end
+  defp extract_broadcast_tags(_), do: []
 
   defp check_accept_coverage(%IR.Agent{protocol: proto, handlers: handlers}) do
     accept_tags = MapSet.new(proto.accepts, & &1.tag)

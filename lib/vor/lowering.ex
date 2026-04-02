@@ -416,6 +416,22 @@ defmodule Vor.Lowering do
     }
   end
 
+  defp lower_action(%AST.Broadcast{tag: tag, fields: fields}, param_names) do
+    %IR.Action{
+      type: :broadcast,
+      data: %IR.BroadcastAction{
+        tag: to_atom(tag),
+        fields: Enum.map(fields, fn
+          {field, {:var, var}} -> {to_atom(field), lower_value_ref(var, param_names)}
+          {field, {:atom, val}} -> {to_atom(field), {:atom, to_atom(val)}}
+          {field, {:expr, %AST.ArithExpr{op: op, left: left, right: right}}} ->
+            {to_atom(field), {:arith, op, lower_expr_operand(left, param_names), lower_expr_operand(right, param_names)}}
+          {field, {:integer, n}} -> {to_atom(field), {:integer, n}}
+        end)
+      }
+    }
+  end
+
   defp lower_value_ref(var, known_names) do
     var_atom = to_atom(var)
     if MapSet.member?(known_names, var_atom) do

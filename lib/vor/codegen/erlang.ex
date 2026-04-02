@@ -276,18 +276,24 @@ defmodule Vor.Codegen.Erlang do
       {:remote, l, {:atom, l, :proplists}, {:atom, l, :get_value}},
       [{:atom, l, :__vor_name__}, {:var, l, :Args}]}
 
+    connections_lookup = {:call, l,
+      {:remote, l, {:atom, l, :proplists}, {:atom, l, :get_value}},
+      [{:atom, l, :__vor_connections__}, {:var, l, :Args}, {:nil, l}]}
+
     data_with_meta = {:map, l, {:var, l, :Data0}, [
       {:map_field_assoc, l, {:atom, l, :__vor_registry__}, {:var, l, :VorRegistry}},
-      {:map_field_assoc, l, {:atom, l, :__vor_name__}, {:var, l, :VorName}}
+      {:map_field_assoc, l, {:atom, l, :__vor_name__}, {:var, l, :VorName}},
+      {:map_field_assoc, l, {:atom, l, :__vor_connections__}, {:var, l, :VorConnections}}
     ]}
 
     name_bind = {:match, l, {:var, l, :VorName}, name_lookup}
+    connections_bind = {:match, l, {:var, l, :VorConnections}, connections_lookup}
 
     case_expr = {:case, l, registry_lookup, [
       {:clause, l, [{:atom, l, :undefined}], [],
         [{:var, l, :Data0}]},
       {:clause, l, [{:var, l, :VorRegistry}], [],
-        [name_bind, data_with_meta]}
+        [name_bind, connections_bind, data_with_meta]}
     ]}
 
     data_bind = {:match, l, {:var, l, :Data}, case_expr}
@@ -594,6 +600,10 @@ defmodule Vor.Codegen.Erlang do
           %IR.Action{type: :send, data: %IR.SendAction{}} = action ->
             send_exprs = action_to_erl(action, l, :Data)
             {exprs ++ send_exprs, state, updates, emit}
+
+          %IR.Action{type: :broadcast, data: %IR.BroadcastAction{}} = action ->
+            broadcast_exprs = action_to_erl(action, l, :Data)
+            {exprs ++ broadcast_exprs, state, updates, emit}
 
           %IR.Action{type: :extern_call, data: %IR.ExternCallAction{}} = action ->
             ext_exprs = action_to_erl(action, l, :Data)
@@ -1054,6 +1064,56 @@ defmodule Vor.Codegen.Erlang do
       [via, msg]}
 
     [cast_call]
+  end
+
+  defp action_to_erl(%IR.Action{type: :broadcast, data: %IR.BroadcastAction{tag: tag, fields: fields}}, l, map_var) do
+    # Build the message tuple
+    msg_pairs = Enum.map(fields, fn
+      {field, ref} -> {:map_field_assoc, l, {:atom, l, field}, value_to_erl(ref, l, map_var)}
+    end)
+    msg = {:tuple, l, [{:atom, l, tag}, {:map, l, msg_pairs}]}
+
+    # Get connections and registry from data map
+    connections_ref = {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+      [{:atom, l, :__vor_connections__}, {:var, l, map_var}, {:nil, l}]}
+    registry_ref = {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+      [{:atom, l, :__vor_registry__}, {:var, l, map_var}]}
+
+    # lists:foreach(fun(Peer) ->
+    #   case Registry:lookup(Registry, Peer) of
+    #     [{Pid, _}] -> gen_server:cast(Pid, Message);
+    #     [] -> ok
+    #   end
+    # end, Connections)
+    peer_var = {:var, l, :VorBroadcastPeer}
+    pid_var = {:var, l, :VorBroadcastPid}
+
+    lookup_call = {:call, l,
+      {:remote, l, {:atom, l, Registry}, {:atom, l, :lookup}},
+      [registry_ref, peer_var]}
+
+    cast_call = {:call, l,
+      {:remote, l, {:atom, l, :gen_server}, {:atom, l, :cast}},
+      [pid_var, msg]}
+
+    case_expr = {:case, l, lookup_call, [
+      {:clause, l,
+        [{:cons, l, {:tuple, l, [pid_var, {:var, l, :_}]}, {:var, l, :_}}],
+        [],
+        [cast_call]},
+      {:clause, l,
+        [{:var, l, :_}],
+        [],
+        [{:atom, l, :ok}]}
+    ]}
+
+    foreach_fun = {:fun, l, {:clauses, [{:clause, l, [peer_var], [], [case_expr]}]}}
+
+    foreach_call = {:call, l,
+      {:remote, l, {:atom, l, :lists}, {:atom, l, :foreach}},
+      [foreach_fun, connections_ref]}
+
+    [foreach_call]
   end
 
   defp action_to_erl(_action, _l, _map_var), do: []

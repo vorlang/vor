@@ -114,6 +114,10 @@ defmodule Vor.IR do
     defstruct [:target, :tag, :fields]
   end
 
+  defmodule BroadcastAction do
+    defstruct [:tag, :fields]
+  end
+
   defmodule SystemIR do
     defstruct [:name, :registry, :agents, :connections]
   end

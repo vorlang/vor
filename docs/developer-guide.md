@@ -124,6 +124,19 @@ The compiler verifies for each `connect :a -> :b`:
 `send :target {:msg, fields}` generates `gen_server:cast` via OTP Registry.
 System supervisor starts a Registry and all agents in dependency order.
 
+### Broadcast
+
+`broadcast {:msg, fields}` sends a message to all agents this agent has
+outbound connections to in the system block. The message must match a
+`sends` declaration in the protocol.
+
+- Always asynchronous (cast)
+- Works alongside `emit` (reply) and `send :target` (directed) in the same handler
+- Works in resilience handlers and if/else bodies
+- Requires a system block — compile error if used in a standalone agent
+- Generated code iterates `__vor_connections__` and sends via the registry
+- Gracefully handles missing peers (skips if not found in registry)
+
 ## Handler completeness checking
 
 ### Mandatory else for call handlers

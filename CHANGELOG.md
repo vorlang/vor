@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-04-02
+- **Broadcast** — `broadcast {:msg, fields}` sends a message to all outbound-connected agents in the system block. Always asynchronous (cast). Works alongside `emit` and `send` in the same handler. Checks against `sends` protocol declarations. Generated code iterates `__vor_connections__` and sends via the registry with graceful handling of missing peers.
 - **Soundness fix: proven invariant fail-closed** — Unsupported `proven` invariant bodies now produce compile errors instead of silently passing. The safety verifier also accepts any state field name, not just `phase`.
 - **Soundness fix: graph extraction uses declared state field** — State graph only extracts transitions for the declared enum state field, preventing non-state guards from corrupting the graph.
 - **System runtime fix: metadata propagation** — Agent init now extracts `__vor_registry__` and `__vor_name__` from system args, enabling `send` between agents at runtime. Tested end-to-end with two-agent send and three-agent pipeline.

@@ -45,7 +45,7 @@ defmodule Vor.Codegen.System do
     |> order_by_dependencies(system.connections)
     |> Enum.map(fn agent_inst ->
       agent_ir = Map.get(agent_irs, agent_inst.name)
-      gen_agent_child(agent_inst, agent_ir, registry, l)
+      gen_agent_child(agent_inst, agent_ir, registry, system.connections, l)
     end)
 
     children = list_to_erl([registry_child | agent_children], l)
@@ -80,9 +80,16 @@ defmodule Vor.Codegen.System do
     ]}
   end
 
-  defp gen_agent_child(agent_inst, agent_ir, registry, l) do
+  defp gen_agent_child(agent_inst, agent_ir, registry, connections, l) do
     agent_module = if agent_ir, do: agent_ir.module, else: Module.concat([Vor, Agent, agent_inst.type_name])
     behaviour = if agent_ir, do: agent_ir.behaviour, else: :gen_server
+
+    # Compute outbound connections for this agent
+    outbound = connections
+    |> Enum.filter(fn %{from: from} -> from == agent_inst.name end)
+    |> Enum.map(fn %{to: to} -> to end)
+
+    connections_list = list_to_erl(Enum.map(outbound, fn name -> {:atom, l, name} end), l)
 
     # Build init args: agent params + system metadata
     param_args = Enum.flat_map(agent_inst.params, fn {name, value} ->
@@ -91,7 +98,8 @@ defmodule Vor.Codegen.System do
 
     system_args = [
       {:tuple, l, [{:atom, l, :__vor_registry__}, {:atom, l, registry}]},
-      {:tuple, l, [{:atom, l, :__vor_name__}, {:atom, l, agent_inst.name}]}
+      {:tuple, l, [{:atom, l, :__vor_name__}, {:atom, l, agent_inst.name}]},
+      {:tuple, l, [{:atom, l, :__vor_connections__}, connections_list]}
     ]
 
     args_list = list_to_erl(param_args ++ system_args, l)

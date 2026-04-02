@@ -123,6 +123,10 @@ defmodule Vor.AST do
     defstruct [:target, :tag, :fields, :meta]
   end
 
+  defmodule Broadcast do
+    defstruct [:tag, :fields, :meta]
+  end
+
   defmodule System do
     defstruct [:name, :agents, :connections, :meta]
   end

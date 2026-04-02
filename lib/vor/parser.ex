@@ -503,6 +503,16 @@ defmodule Vor.Parser do
     end
   end
 
+  # broadcast {:tag, field: value, ...}
+  defp parse_handler_body([{:keyword, meta, :broadcast}, {:delimiter, _, :open_brace}, {:atom, _, tag} | rest], acc) do
+    case parse_binding_fields(rest, []) do
+      {:ok, fields, rest} ->
+        node = %AST.Broadcast{tag: tag, fields: fields, meta: meta}
+        parse_handler_body(rest, [node | acc])
+      {:error, _} = err -> err
+    end
+  end
+
   # solve relation_name(field: var, ...) do body end
   defp parse_handler_body([{:keyword, meta, :solve}, {:identifier, _, rel_name},
                             {:delimiter, _, :open_paren} | rest], acc) do
@@ -728,6 +738,16 @@ defmodule Vor.Parser do
           {:error, _} = err -> err
         end
       [token | _] -> {:error, {:expected_send_message, token}}
+    end
+  end
+
+  # broadcast inside if body
+  defp parse_if_body([{:keyword, meta, :broadcast}, {:delimiter, _, :open_brace}, {:atom, _, tag} | rest], acc) do
+    case parse_binding_fields(rest, []) do
+      {:ok, fields, rest} ->
+        node = %AST.Broadcast{tag: tag, fields: fields, meta: meta}
+        parse_if_body(rest, [node | acc])
+      {:error, _} = err -> err
     end
   end
 
