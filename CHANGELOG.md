@@ -1,7 +1,7 @@
 # Changelog
 
 ## 2026-04-01
-- **Multiple state fields** — First enum field becomes gen_statem State, others go in Data map with type defaults. Raft-like agents with `role`, `current_term`, `vote_count` work.
+- **Multiple state fields** — First enum field becomes gen_statem State, others go in Data map with type defaults.
 - **Gen_statem call support** — Handlers now respond to both `cast` and `call` events. Call replies include the emitted value.
 - **Richer expressions** — Standalone variable binding (`x = a + 1`), nested if/else, boolean `and`/`or` in conditions, comparison operators in guards (`>`, `<`, `>=`, `<=`), int-first arithmetic (`10 - V`).
 - **Transition with expressions** — `transition count: count + 1`, `transition voted_for: C`. Data field transitions generate map updates.
