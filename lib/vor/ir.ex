@@ -75,7 +75,7 @@ defmodule Vor.IR do
   end
 
   defmodule Relation do
-    defstruct [:name, :params, :facts]
+    defstruct [:name, :params, :facts, :equation]
   end
 
   defmodule ExternDecl do
@@ -104,6 +104,10 @@ defmodule Vor.IR do
 
   defmodule CompoundCondition do
     defstruct [:op, :left, :right]
+  end
+
+  defmodule SolveAction do
+    defstruct [:relation_name, :bindings, :bound_fields, :unbound_fields, :body_actions, :equation, :facts]
   end
 
   defmodule SendAction do

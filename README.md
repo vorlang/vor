@@ -55,6 +55,7 @@ The equivalent in Elixir would be a gen_server with manual rate tracking, `propl
 - Extern declarations for calling Erlang/Elixir from Vor agents (untrusted, try/catch wrapped)
 - Relations with facts, state declarations, protocols, handlers with guards
 - Multiple state fields — enum field as gen_statem State, others in Data map
+- Bidirectional relation solver — equations inverted at compile time, queryable from any direction
 - Richer expressions — variable binding, nested if/else, boolean conditions, comparison guards
 - Transition with expressions — `transition count: count + 1`
 - Compile-time safety verification — `proven` invariants checked against the state graph
@@ -64,7 +65,7 @@ The equivalent in Elixir would be a gen_server with manual rate tracking, `propl
 - Protocol composition checking — `system` blocks verify connected agents have compatible protocols
 - Protocol conformance checking
 - Working rate limiter and circuit breaker examples
-- 73 tests passing
+- 86 tests passing
 
 ## Verified state machine
 
@@ -80,8 +81,6 @@ stateDiagram-v2
 ```
 
 ## What's coming
-
-- Bidirectional relation solver
 - Synthesis obligations (AI-assisted implementation)
 
 ## Try it

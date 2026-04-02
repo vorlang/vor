@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-04-01
+- **Bidirectional relation solver** — Relations are queryable from any direction. Equation-based relations (`fahrenheit = celsius * 9 / 5 + 32`) support compile-time symbolic inversion. Forward and inverse solve in handlers via `solve` blocks.
 - **Gen_server data state** — Gen_server agents can declare mutable state fields (`state count: integer`). Fields stored in the GenServer state map with type defaults. Transition, read, and update in handlers.
 - **Protocol composition checking** — `system` blocks wire agents together with `connect`. The compiler verifies that connected agents' `sends` and `accepts` have matching tags and field names. Mismatches fail compilation.
 - **Multi-agent systems** — `sends` protocol declaration, `send :target {:msg, fields}` in handlers, `system` blocks with `agent` instances and `connect` topology.

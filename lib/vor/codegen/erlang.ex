@@ -131,6 +131,9 @@ defmodule Vor.Codegen.Erlang do
       %IR.Action{type: :conditional, data: %IR.ConditionalAction{} = cond_action} ->
         compile_conditional_genserver(cond_action, l, emit_map_var, state_var)
 
+      %IR.Action{type: :solve, data: %IR.SolveAction{} = solve} ->
+        compile_solve_genserver(solve, l, emit_map_var, state_var)
+
       nil ->
         {:tuple, l, [{:atom, l, :reply}, {:atom, l, :ok}, {:var, l, state_var}]}
     end
@@ -158,7 +161,7 @@ defmodule Vor.Codegen.Erlang do
   end
 
   defp split_terminal(actions) do
-    terminal_idx = Enum.find_index(actions, fn a -> a.type in [:emit, :conditional] end)
+    terminal_idx = Enum.find_index(actions, fn a -> a.type in [:emit, :conditional, :solve] end)
     case terminal_idx do
       nil -> {actions, nil}
       idx -> {Enum.take(actions, idx), Enum.at(actions, idx)}
@@ -698,6 +701,165 @@ defmodule Vor.Codegen.Erlang do
   # --- Action codegen ---
 
   # Generate Erlang expressions for pre-actions (extern calls, var bindings, etc.)
+  # --- Solve codegen ---
+
+  defp compile_solve_genserver(%IR.SolveAction{} = solve, l, map_var, state_var) do
+    # Determine which bindings are bound (from handler context) vs unbound
+    # For now, assume variables from handler pattern are bound, literal values are bound
+    bound_fields = Enum.filter(solve.bindings, fn
+      {_field, {:integer, _}} -> true
+      {_field, {:atom, _}} -> true
+      {_field, {:var, _}} -> true  # Variables from pattern are bound
+      _ -> false
+    end)
+
+    if solve.equation do
+      compile_equation_solve(solve, l, map_var, state_var)
+    else
+      compile_fact_solve(solve, l, map_var, state_var)
+    end
+  end
+
+  defp compile_fact_solve(%IR.SolveAction{} = solve, l, map_var, state_var) do
+    facts = solve.facts || []
+
+    if facts == [] do
+      {:tuple, l, [{:atom, l, :reply}, {:atom, l, :ok}, {:var, l, state_var}]}
+    else
+      field_names = Enum.map(solve.bindings, fn {field, _} -> field end)
+      bound_set = MapSet.new(solve.bound_fields || [])
+
+      # Build fact tuples
+      fact_forms = Enum.map(facts, fn fact ->
+        values = Enum.map(field_names, fn field ->
+          case Keyword.get(fact, field) do
+            {:atom, v} -> {:atom, l, v}
+            {:integer, v} -> {:integer, l, v}
+            {:var, v} -> value_to_erl({:param, v}, l, map_var)
+            v when is_atom(v) -> {:atom, l, v}
+            v when is_integer(v) -> {:integer, l, v}
+            nil -> {:atom, l, nil}
+          end
+        end)
+        {:tuple, l, values}
+      end)
+      facts_list = list_to_erl(fact_forms, l)
+
+      # Pattern for matching: {F0, F1, F2, ...}
+      match_fields = Enum.with_index(field_names) |> Enum.map(fn {_name, idx} ->
+        {:var, l, :"VorF#{idx}"}
+      end)
+      fact_pattern = {:tuple, l, match_fields}
+
+      # Filter condition: only compare BOUND fields
+      conditions = solve.bindings
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {{field, val}, idx} ->
+        if MapSet.member?(bound_set, field) do
+          var = {:var, l, :"VorF#{idx}"}
+          case val do
+            {:var, bound_var} -> [{:op, l, :==, var, {:var, l, erl_var(bound_var)}}]
+            {:integer, n} -> [{:op, l, :==, var, {:integer, l, n}}]
+            {:atom, a} -> [{:op, l, :==, var, {:atom, l, a}}]
+            _ -> []
+          end
+        else
+          []
+        end
+      end)
+
+      filter_cond = case conditions do
+        [] -> {:atom, l, true}
+        [c] -> c
+        [first | rest] -> Enum.reduce(rest, first, fn c, acc -> {:op, l, :andalso, acc, c} end)
+      end
+
+      filter_call = {:call, l,
+        {:remote, l, {:atom, l, :lists}, {:atom, l, :filter}},
+        [{:fun, l, {:clauses, [{:clause, l, [fact_pattern], [], [filter_cond]}]}}, facts_list]}
+
+      # On match: bind ALL fact fields as variables, then execute body
+      body_compiled = compile_handler_body(solve.body_actions, l, map_var)
+
+      # Bind unbound fields from the matching fact
+      match_binds = solve.bindings
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {{field, val}, idx} ->
+        if not MapSet.member?(bound_set, field) do
+          var_name = case val do
+            {:var, v} -> erl_var(v)
+            _ -> erl_var(field)
+          end
+          [{:match, l, {:var, l, var_name}, {:var, l, :"VorF#{idx}"}}]
+        else
+          []
+        end
+      end)
+
+      first_match_pattern = {:cons, l, fact_pattern, {:var, l, :_}}
+      match_clause = {:clause, l, [first_match_pattern], [], match_binds ++ body_compiled}
+      no_match_clause = {:clause, l, [{:nil, l}], [],
+        [{:tuple, l, [{:atom, l, :reply}, {:atom, l, :ok}, {:var, l, state_var}]}]}
+
+      {:case, l, filter_call, [match_clause, no_match_clause]}
+    end
+  end
+
+  defp compile_equation_solve(%IR.SolveAction{} = solve, l, map_var, _state_var) do
+    [bound_field] = solve.bound_fields
+    [unbound_field] = solve.unbound_fields
+
+    # Get the bound value from the bindings
+    {_, bound_val} = Enum.find(solve.bindings, fn {f, _} -> f == bound_field end)
+    bound_erl = case bound_val do
+      {:var, v} -> {:var, l, erl_var(v)}
+      {:integer, n} -> {:integer, l, n}
+      {:atom, a} -> {:atom, l, a}
+    end
+
+    # Invert the equation to solve for the unbound field
+    {:ok, {:assign, _, expr}} = Vor.Solver.invert(solve.equation, unbound_field)
+
+    # Generate the arithmetic expression, substituting the bound field
+    result_erl = solver_expr_to_erl(expr, l, bound_field, bound_erl)
+
+    # Bind the unbound variable
+    {_, unbound_val} = Enum.find(solve.bindings, fn {f, _} -> f == unbound_field end)
+    unbound_var_name = case unbound_val do
+      {:var, v} -> erl_var(v)
+      _ -> erl_var(unbound_field)
+    end
+
+    bind = {:match, l, {:var, l, unbound_var_name}, result_erl}
+
+    # Compile the solve body
+    body_compiled = compile_handler_body(solve.body_actions, l, map_var)
+
+    # Return a block: bind variable, then execute body
+    {:block, l, [bind | body_compiled]}
+  end
+
+  defp solver_expr_to_erl({:ref, name}, l, bound_field, bound_erl) do
+    if name == bound_field do
+      bound_erl
+    else
+      {:var, l, erl_var(name)}
+    end
+  end
+  defp solver_expr_to_erl({:add, left, right}, l, bf, be) do
+    {:op, l, :+, solver_expr_to_erl(left, l, bf, be), solver_expr_to_erl(right, l, bf, be)}
+  end
+  defp solver_expr_to_erl({:sub, left, right}, l, bf, be) do
+    {:op, l, :-, solver_expr_to_erl(left, l, bf, be), solver_expr_to_erl(right, l, bf, be)}
+  end
+  defp solver_expr_to_erl({:mul, left, right}, l, bf, be) do
+    {:op, l, :*, solver_expr_to_erl(left, l, bf, be), solver_expr_to_erl(right, l, bf, be)}
+  end
+  defp solver_expr_to_erl({:div, left, right}, l, bf, be) do
+    {:op, l, :div, solver_expr_to_erl(left, l, bf, be), solver_expr_to_erl(right, l, bf, be)}
+  end
+  defp solver_expr_to_erl(n, l, _bf, _be) when is_number(n), do: {:integer, l, n}
+
   defp action_to_erl(%IR.Action{type: :extern_call, data: %IR.ExternCallAction{} = ext}, l, map_var) do
     # Resolve the module atom for the call
     mod_atom = case ext.module do

@@ -20,8 +20,11 @@ defmodule Vor.Lowering do
       _ -> []
     end
 
+    relations = extract_relations(ast.body)
+    relation_map = Map.new(relations, fn r -> {r.name, r} end)
+
     monitors = extract_monitors(ast.body, all_states, known_names)
-    handlers = extract_handlers(ast.body, known_names)
+    handlers = extract_handlers(ast.body, known_names, relation_map)
     timeout_handlers = generate_timeout_handlers(monitors, known_names)
 
     ir = %IR.Agent{
@@ -33,7 +36,7 @@ defmodule Vor.Lowering do
       data_fields: data_fields,
       protocol: extract_protocol(ast.body),
       handlers: handlers ++ timeout_handlers,
-      relations: extract_relations(ast.body),
+      relations: relations,
       invariants: extract_invariants(ast.body),
       resilience: nil,
       externs: extract_externs(ast.body),
@@ -129,17 +132,72 @@ defmodule Vor.Lowering do
     }
   end
 
-  defp extract_handlers(body, param_names) do
+  defp extract_handlers(body, param_names, relation_map \\ %{}) do
     body
     |> Enum.filter(&match?(%AST.Handler{}, &1))
-    |> Enum.map(&lower_handler(&1, param_names))
+    |> Enum.map(&lower_handler(&1, param_names, relation_map))
   end
 
-  defp lower_handler(%AST.Handler{pattern: pattern, guard: guard, body: body}, param_names) do
+  defp lower_handler(%AST.Handler{pattern: pattern, guard: guard, body: body}, param_names, relation_map \\ %{}) do
+    # Collect bound variable names from the handler pattern
+    pattern_vars = case pattern do
+      %AST.Pattern{bindings: bindings} ->
+        Enum.flat_map(bindings, fn
+          {_field, {:var, var}} -> [to_atom(var)]
+          _ -> []
+        end)
+        |> MapSet.new()
+      _ -> MapSet.new()
+    end
+
+    # For solve calls, we need to resolve the relation and embed its data
+    actions = Enum.map(body, fn action ->
+      case action do
+        %AST.Solve{} -> lower_solve_action(action, param_names, relation_map, pattern_vars)
+        other -> lower_action(other, param_names)
+      end
+    end)
+
     %IR.Handler{
       pattern: lower_pattern(pattern),
       guard: lower_guard(guard),
-      actions: Enum.map(body, &lower_action(&1, param_names))
+      actions: actions
+    }
+  end
+
+  defp lower_solve_action(%AST.Solve{relation: rel_name, bindings: bindings, body: body}, param_names, relation_map, pattern_vars) do
+    rel_atom = to_atom(rel_name)
+    relation = Map.get(relation_map, rel_atom)
+    all_known = MapSet.union(param_names, pattern_vars)
+
+    bindings_lowered = Enum.map(bindings, fn
+      {field, {:var, var}} -> {to_atom(field), {:var, to_atom(var)}}
+      {field, {:integer, n}} -> {to_atom(field), {:integer, n}}
+      {field, {:atom, a}} -> {to_atom(field), {:atom, to_atom(a)}}
+    end)
+
+    # Determine bound vs unbound fields
+    {bound, unbound} = Enum.split_with(bindings_lowered, fn
+      {_field, {:var, var}} -> MapSet.member?(all_known, var)
+      {_field, {:integer, _}} -> true
+      {_field, {:atom, _}} -> true
+      _ -> false
+    end)
+
+    bound_fields = Enum.map(bound, fn {f, _} -> f end)
+    unbound_fields = Enum.map(unbound, fn {f, _} -> f end)
+
+    %IR.Action{
+      type: :solve,
+      data: %IR.SolveAction{
+        relation_name: rel_atom,
+        bindings: bindings_lowered,
+        bound_fields: bound_fields,
+        unbound_fields: unbound_fields,
+        body_actions: Enum.map(body, &lower_action(&1, param_names)),
+        equation: if(relation, do: relation.equation, else: nil),
+        facts: if(relation, do: relation.facts, else: [])
+      }
     }
   end
 
@@ -336,6 +394,11 @@ defmodule Vor.Lowering do
     }
   end
 
+  # Solve without relation_map — fallback (shouldn't normally be reached)
+  defp lower_action(%AST.Solve{} = solve, param_names) do
+    lower_solve_action(solve, param_names, %{}, MapSet.new())
+  end
+
   defp lower_action(%AST.Send{target: target, tag: tag, fields: fields}, param_names) do
     %IR.Action{
       type: :send,
@@ -405,16 +468,29 @@ defmodule Vor.Lowering do
   defp extract_relations(body) do
     body
     |> Enum.filter(&match?(%AST.Relation{}, &1))
-    |> Enum.map(fn %AST.Relation{name: name, params: params, facts: facts} ->
+    |> Enum.map(fn rel ->
+      equation = case Map.get(rel, :equation) do
+        %AST.RelationEquation{lhs: lhs, rhs: rhs} ->
+          {:assign, to_atom(lhs), lower_solver_expr(rhs)}
+        _ -> nil
+      end
+
       %IR.Relation{
-        name: to_atom(name),
-        params: Enum.map(params, fn {n, t} -> {to_atom(n), to_atom(t)} end),
-        facts: Enum.map(facts, fn %AST.Fact{fields: fields} ->
+        name: to_atom(rel.name),
+        params: Enum.map(rel.params, fn {n, t} -> {to_atom(n), to_atom(t)} end),
+        facts: Enum.map(rel.facts || [], fn %AST.Fact{fields: fields} ->
           Enum.map(fields, fn {k, v} -> {to_atom(k), lower_fact_value(v)} end)
-        end)
+        end),
+        equation: equation
       }
     end)
   end
+
+  defp lower_solver_expr({:ref, name}), do: {:ref, to_atom(name)}
+  defp lower_solver_expr({op, left, right}) when op in [:add, :sub, :mul, :div] do
+    {op, lower_solver_expr(left), lower_solver_expr(right)}
+  end
+  defp lower_solver_expr(n) when is_number(n), do: n
 
   defp lower_fact_value({:atom, v}), do: {:atom, to_atom(v)}
   defp lower_fact_value({:integer, v}), do: {:integer, v}

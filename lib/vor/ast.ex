@@ -36,7 +36,7 @@ defmodule Vor.AST do
   end
 
   defmodule Relation do
-    defstruct [:name, :params, :facts, :meta]
+    defstruct [:name, :params, :facts, :equation, :meta]
   end
 
   defmodule Fact do
@@ -133,5 +133,13 @@ defmodule Vor.AST do
 
   defmodule Connect do
     defstruct [:from, :to, :meta]
+  end
+
+  defmodule Solve do
+    defstruct [:relation, :bindings, :body, :meta]
+  end
+
+  defmodule RelationEquation do
+    defstruct [:lhs, :rhs, :meta]
   end
 end

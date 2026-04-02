@@ -499,6 +499,22 @@ defmodule Vor.Parser do
     end
   end
 
+  # solve relation_name(field: var, ...) do body end
+  defp parse_handler_body([{:keyword, meta, :solve}, {:identifier, _, rel_name},
+                            {:delimiter, _, :open_paren} | rest], acc) do
+    case parse_solve_bindings(rest) do
+      {:ok, bindings, [{:keyword, _, :do} | rest]} ->
+        case parse_handler_body(rest, []) do
+          {:ok, body, rest} ->
+            node = %AST.Solve{relation: rel_name, bindings: bindings, body: body, meta: meta}
+            parse_handler_body(rest, [node | acc])
+          {:error, _} = err -> err
+        end
+      {:ok, _, [token | _]} -> {:error, {:expected_do, token}}
+      {:error, _} = err -> err
+    end
+  end
+
   # var = Mod.Sub.function(...) — extern call with binding (Elixir module)
   defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
                             {:identifier, _, first_seg}, {:operator, _, :dot} | rest], acc) do
@@ -614,6 +630,25 @@ defmodule Vor.Parser do
   defp parse_extern_args(tokens) do
     parse_extern_arg_fields(tokens, [])
   end
+
+  # Parse solve call bindings — field: Var or field: literal, terminated by )
+  defp parse_solve_bindings([{:delimiter, _, :close_paren} | rest]), do: {:ok, [], rest}
+  defp parse_solve_bindings(tokens), do: parse_solve_binding_fields(tokens, [])
+
+  defp parse_solve_binding_fields([{:delimiter, _, :close_paren} | rest], acc), do: {:ok, Enum.reverse(acc), rest}
+  defp parse_solve_binding_fields([{:delimiter, _, :comma} | rest], acc), do: parse_solve_binding_field(rest, acc)
+  defp parse_solve_binding_fields(tokens, []), do: parse_solve_binding_field(tokens, [])
+
+  defp parse_solve_binding_field([{:identifier, _, field}, {:delimiter, _, :colon}, {:identifier, _, var} | rest], acc) do
+    parse_solve_binding_fields(rest, [{field, {:var, var}} | acc])
+  end
+  defp parse_solve_binding_field([{:identifier, _, field}, {:delimiter, _, :colon}, {:integer, _, val} | rest], acc) do
+    parse_solve_binding_fields(rest, [{field, {:integer, val}} | acc])
+  end
+  defp parse_solve_binding_field([{:identifier, _, field}, {:delimiter, _, :colon}, {:atom, _, val} | rest], acc) do
+    parse_solve_binding_fields(rest, [{field, {:atom, val}} | acc])
+  end
+  defp parse_solve_binding_field([token | _], _acc), do: {:error, {:expected_solve_binding, token}}
 
   defp parse_extern_arg_fields([{:delimiter, _, :close_paren} | rest], acc) do
     {:ok, Enum.reverse(acc), rest}
@@ -890,9 +925,12 @@ defmodule Vor.Parser do
   defp parse_relation([{:keyword, meta, :relation}, {:identifier, _, name}, {:delimiter, _, :open_paren} | rest]) do
     case parse_typed_fields_paren(rest, []) do
       {:ok, params, [{:keyword, _, :do} | rest]} ->
-        case parse_facts(rest, []) do
-          {:ok, facts, rest} ->
-            {:ok, %AST.Relation{name: name, params: params, facts: facts, meta: meta}, rest}
+        case parse_relation_body(rest, [], nil) do
+          {:ok, facts, equation, rest} ->
+            relation = %AST.Relation{name: name, params: params, facts: facts, meta: meta}
+            # Attach equation if present
+            relation = if equation, do: Map.put(relation, :equation, equation), else: relation
+            {:ok, relation, rest}
           {:error, _} = err -> err
         end
       {:ok, _, [token | _]} -> {:error, {:expected_do, token}}
@@ -916,20 +954,60 @@ defmodule Vor.Parser do
     parse_typed_fields_paren(rest, [{name, type} | acc])
   end
 
-  defp parse_facts([{:keyword, _, :end} | rest], acc), do: {:ok, Enum.reverse(acc), rest}
+  defp parse_relation_body([{:keyword, _, :end} | rest], facts, equation) do
+    {:ok, Enum.reverse(facts), equation, rest}
+  end
 
-  defp parse_facts([{:keyword, _, :fact} | rest], acc) do
+  defp parse_relation_body([{:keyword, _, :fact} | rest], facts, equation) do
     case rest do
       [{:delimiter, _, :open_paren} | rest] ->
         case parse_fact_fields(rest, []) do
-          {:ok, fields, rest} -> parse_facts(rest, [%AST.Fact{fields: fields} | acc])
+          {:ok, fields, rest} -> parse_relation_body(rest, [%AST.Fact{fields: fields} | facts], equation)
           {:error, _} = err -> err
         end
       [token | _] -> {:error, {:expected_open_paren, token}}
     end
   end
 
-  defp parse_facts([token | _], _acc), do: {:error, {:unexpected_in_relation, token}}
+  # Equation: field = expr (e.g., fahrenheit = celsius * 9 / 5 + 32)
+  defp parse_relation_body([{:identifier, meta, lhs}, {:operator, _, :equals} | rest], facts, _equation) do
+    case parse_solver_expr(rest) do
+      {:ok, rhs, rest} ->
+        eq = %AST.RelationEquation{lhs: lhs, rhs: rhs, meta: meta}
+        parse_relation_body(rest, facts, eq)
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_relation_body([token | _], _facts, _eq), do: {:error, {:unexpected_in_relation, token}}
+
+  # Parse arithmetic expression for solver equations
+  # Handles: ref OP ref, ref OP num, num OP ref, with left-to-right chaining
+  defp parse_solver_expr(tokens) do
+    case parse_solver_atom(tokens) do
+      {:ok, left, rest} -> parse_solver_chain(left, rest)
+      err -> err
+    end
+  end
+
+  defp parse_solver_chain(left, [{:operator, _, op} | rest]) when op in [:plus, :minus, :star, :slash] do
+    case parse_solver_atom(rest) do
+      {:ok, right, rest} ->
+        op_name = case op do
+          :plus -> :add
+          :minus -> :sub
+          :star -> :mul
+          :slash -> :div
+        end
+        parse_solver_chain({op_name, left, right}, rest)
+      err -> err
+    end
+  end
+  defp parse_solver_chain(expr, rest), do: {:ok, expr, rest}
+
+  defp parse_solver_atom([{:identifier, _, name} | rest]), do: {:ok, {:ref, name}, rest}
+  defp parse_solver_atom([{:integer, _, n} | rest]), do: {:ok, n, rest}
+  defp parse_solver_atom([token | _]), do: {:error, {:expected_solver_atom, token}}
 
   defp parse_fact_fields([{:delimiter, _, :close_paren} | rest], acc) do
     {:ok, Enum.reverse(acc), rest}
