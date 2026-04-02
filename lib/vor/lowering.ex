@@ -110,10 +110,11 @@ defmodule Vor.Lowering do
       nil ->
         %IR.Protocol{accepts: [], emits: []}
 
-      %AST.Protocol{accepts: accepts, emits: emits} ->
+      %AST.Protocol{accepts: accepts, emits: emits, sends: sends} ->
         %IR.Protocol{
           accepts: Enum.map(accepts, &lower_message_spec/1),
-          emits: Enum.map(emits, &lower_message_spec/1)
+          emits: Enum.map(emits, &lower_message_spec/1),
+          sends: Enum.map(sends || [], &lower_message_spec/1)
         }
     end
   end
@@ -328,6 +329,23 @@ defmodule Vor.Lowering do
         end),
         bind: if(bind, do: to_atom(bind), else: nil),
         trusted: false
+      }
+    }
+  end
+
+  defp lower_action(%AST.Send{target: target, tag: tag, fields: fields}, param_names) do
+    %IR.Action{
+      type: :send,
+      data: %IR.SendAction{
+        target: to_atom(target),
+        tag: to_atom(tag),
+        fields: Enum.map(fields, fn
+          {field, {:var, var}} -> {to_atom(field), lower_value_ref(var, param_names)}
+          {field, {:atom, val}} -> {to_atom(field), {:atom, to_atom(val)}}
+          {field, {:expr, %AST.ArithExpr{op: op, left: left, right: right}}} ->
+            {to_atom(field), {:arith, op, lower_expr_operand(left, param_names), lower_expr_operand(right, param_names)}}
+          {field, {:integer, n}} -> {to_atom(field), {:integer, n}}
+        end)
       }
     }
   end

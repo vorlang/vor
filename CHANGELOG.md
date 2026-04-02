@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-04-01
+- **Protocol composition checking** — `system` blocks wire agents together with `connect`. The compiler verifies that connected agents' `sends` and `accepts` have matching tags and field names. Mismatches fail compilation.
+- **Multi-agent systems** — `sends` protocol declaration, `send :target {:msg, fields}` in handlers, `system` blocks with `agent` instances and `connect` topology.
 - **Multiple state fields** — First enum field becomes gen_statem State, others go in Data map with type defaults.
 - **Gen_statem call support** — Handlers now respond to both `cast` and `call` events. Call replies include the emitted value.
 - **Richer expressions** — Standalone variable binding (`x = a + 1`), nested if/else, boolean `and`/`or` in conditions, comparison operators in guards (`>`, `<`, `>=`, `<=`), int-first arithmetic (`10 - V`).

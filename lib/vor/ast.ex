@@ -8,7 +8,7 @@ defmodule Vor.AST do
   end
 
   defmodule Protocol do
-    defstruct [:accepts, :emits, :meta]
+    defstruct [:accepts, :emits, :sends, :meta]
   end
 
   defmodule MessageSpec do
@@ -117,5 +117,21 @@ defmodule Vor.AST do
 
   defmodule CompoundComparison do
     defstruct [:op, :left, :right, :meta]
+  end
+
+  defmodule Send do
+    defstruct [:target, :tag, :fields, :meta]
+  end
+
+  defmodule System do
+    defstruct [:name, :agents, :connections, :meta]
+  end
+
+  defmodule AgentInstance do
+    defstruct [:name, :type, :params, :meta]
+  end
+
+  defmodule Connect do
+    defstruct [:from, :to, :meta]
   end
 end

@@ -410,6 +410,14 @@ defmodule Vor.Codegen.Erlang do
             cond_form = compile_statem_conditional(cond_action, l, state_field_name, data_field_names)
             {exprs ++ [cond_form], state, updates, emit}
 
+          %IR.Action{type: :send, data: %IR.SendAction{}} = action ->
+            send_exprs = action_to_erl(action, l, :Data)
+            {exprs ++ send_exprs, state, updates, emit}
+
+          %IR.Action{type: :extern_call, data: %IR.ExternCallAction{}} = action ->
+            ext_exprs = action_to_erl(action, l, :Data)
+            {exprs ++ ext_exprs, state, updates, emit}
+
           %IR.Action{type: :start_timer, data: %IR.TimerAction{}} ->
             {exprs, state, updates, emit}
 
@@ -690,6 +698,32 @@ defmodule Vor.Codegen.Erlang do
 
   defp action_to_erl(%IR.Action{type: :var_binding, data: %IR.VarBindingAction{name: name, expr: expr}}, l, map_var) do
     [{:match, l, {:var, l, erl_var(name)}, expr_to_erl(expr, l, map_var)}]
+  end
+
+  defp action_to_erl(%IR.Action{type: :send, data: %IR.SendAction{target: target, tag: tag, fields: fields}}, l, map_var) do
+    # Build the message tuple
+    msg_pairs = Enum.map(fields, fn
+      {field, ref} -> {:map_field_assoc, l, {:atom, l, field}, value_to_erl(ref, l, map_var)}
+    end)
+    msg = {:tuple, l, [{:atom, l, tag}, {:map, l, msg_pairs}]}
+
+    # Look up registry name from Data/State map
+    registry_ref = {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+      [{:atom, l, :__vor_registry__}, {:var, l, map_var}]}
+
+    # Via tuple: {:via, Registry, {RegistryName, target}}
+    via = {:tuple, l, [
+      {:atom, l, :via},
+      {:atom, l, Registry},
+      {:tuple, l, [registry_ref, {:atom, l, target}]}
+    ]}
+
+    # gen_server:cast(Via, Message)
+    cast_call = {:call, l,
+      {:remote, l, {:atom, l, :gen_server}, {:atom, l, :cast}},
+      [via, msg]}
+
+    [cast_call]
   end
 
   defp action_to_erl(_action, _l, _map_var), do: []

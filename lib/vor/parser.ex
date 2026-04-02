@@ -14,6 +14,95 @@ defmodule Vor.Parser do
     end
   end
 
+  @doc """
+  Parse a source with multiple agents and an optional system block.
+  Returns `{:ok, %{agents: [agents], system: system | nil}}`.
+  """
+  def parse_multi(tokens) do
+    parse_top_level(tokens, [], nil)
+  end
+
+  defp parse_top_level([], agents, system) do
+    {:ok, %{agents: Enum.reverse(agents), system: system}}
+  end
+
+  defp parse_top_level([{:keyword, _, :agent} | _] = tokens, agents, system) do
+    case parse_agent(tokens) do
+      {:ok, agent, rest} -> parse_top_level(rest, [agent | agents], system)
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_top_level([{:keyword, _, :system} | _] = tokens, agents, _system) do
+    case parse_system(tokens) do
+      {:ok, sys, rest} -> parse_top_level(rest, agents, sys)
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_top_level([token | _], _agents, _system), do: {:error, {:unexpected_top_level, token}}
+
+  # --- System block ---
+
+  defp parse_system([{:keyword, meta, :system}, {:identifier, _, name}, {:keyword, _, :do} | rest]) do
+    case parse_system_entries(rest, [], []) do
+      {:ok, agents, connections, rest} ->
+        {:ok, %AST.System{name: name, agents: agents, connections: connections, meta: meta}, rest}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_system_entries([{:keyword, _, :end} | rest], agents, connections) do
+    {:ok, Enum.reverse(agents), Enum.reverse(connections), rest}
+  end
+
+  # agent :name, Type(params)
+  defp parse_system_entries([{:keyword, _, :agent}, {:atom, meta, name}, {:delimiter, _, :comma},
+                              {:identifier, _, type}, {:delimiter, _, :open_paren} | rest], agents, connections) do
+    case parse_system_params(rest) do
+      {:ok, params, rest} ->
+        instance = %AST.AgentInstance{name: name, type: type, params: params, meta: meta}
+        parse_system_entries(rest, [instance | agents], connections)
+      {:error, _} = err -> err
+    end
+  end
+
+  # connect :from -> :to
+  defp parse_system_entries([{:keyword, meta, :connect}, {:atom, _, from}, {:operator, _, :arrow}, {:atom, _, to} | rest], agents, connections) do
+    conn = %AST.Connect{from: from, to: to, meta: meta}
+    parse_system_entries(rest, agents, [conn | connections])
+  end
+
+  defp parse_system_entries([token | _], _a, _c), do: {:error, {:unexpected_in_system, token}}
+
+  # Parse system agent params: either empty () or key: value pairs
+  defp parse_system_params([{:delimiter, _, :close_paren} | rest]), do: {:ok, [], rest}
+  defp parse_system_params(tokens) do
+    parse_system_param_fields(tokens, [])
+  end
+
+  defp parse_system_param_fields([{:delimiter, _, :close_paren} | rest], acc) do
+    {:ok, Enum.reverse(acc), rest}
+  end
+
+  defp parse_system_param_fields([{:delimiter, _, :comma} | rest], acc) do
+    parse_system_param_field(rest, acc)
+  end
+
+  defp parse_system_param_fields(tokens, []) do
+    parse_system_param_field(tokens, [])
+  end
+
+  defp parse_system_param_field([{:identifier, _, name}, {:delimiter, _, :colon}, {:integer, _, value} | rest], acc) do
+    parse_system_param_fields(rest, [{name, value} | acc])
+  end
+
+  defp parse_system_param_field([{:identifier, _, name}, {:delimiter, _, :colon}, {:atom, _, value} | rest], acc) do
+    parse_system_param_fields(rest, [{name, {:atom, value}} | acc])
+  end
+
+  defp parse_system_param_field([token | _], _acc), do: {:error, {:expected_system_param, token}}
+
   # --- Agent ---
 
   # Parameterized: agent Name(param: type, ...) do
@@ -117,33 +206,40 @@ defmodule Vor.Parser do
   # --- Protocol ---
 
   defp parse_protocol([{:keyword, meta, :protocol}, {:keyword, _, :do} | rest]) do
-    case parse_protocol_entries(rest, [], []) do
-      {:ok, accepts, emits, rest} ->
-        {:ok, %AST.Protocol{accepts: accepts, emits: emits, meta: meta}, rest}
+    case parse_protocol_entries(rest, [], [], []) do
+      {:ok, accepts, emits, sends, rest} ->
+        {:ok, %AST.Protocol{accepts: accepts, emits: emits, sends: sends, meta: meta}, rest}
       {:error, _} = err -> err
     end
   end
 
-  defp parse_protocol_entries([{:keyword, _, :end} | rest], accepts, emits) do
-    {:ok, Enum.reverse(accepts), Enum.reverse(emits), rest}
+  defp parse_protocol_entries([{:keyword, _, :end} | rest], accepts, emits, sends) do
+    {:ok, Enum.reverse(accepts), Enum.reverse(emits), Enum.reverse(sends), rest}
   end
 
-  defp parse_protocol_entries([{:keyword, _, :accepts} | rest], accepts, emits) do
+  defp parse_protocol_entries([{:keyword, _, :accepts} | rest], accepts, emits, sends) do
     case parse_message_spec(rest) do
-      {:ok, spec, rest} -> parse_protocol_entries(rest, [spec | accepts], emits)
+      {:ok, spec, rest} -> parse_protocol_entries(rest, [spec | accepts], emits, sends)
       {:error, _} = err -> err
     end
   end
 
-  defp parse_protocol_entries([{:keyword, _, :emits} | rest], accepts, emits) do
+  defp parse_protocol_entries([{:keyword, _, :emits} | rest], accepts, emits, sends) do
     case parse_message_spec(rest) do
-      {:ok, spec, rest} -> parse_protocol_entries(rest, accepts, [spec | emits])
+      {:ok, spec, rest} -> parse_protocol_entries(rest, accepts, [spec | emits], sends)
       {:error, _} = err -> err
     end
   end
 
-  defp parse_protocol_entries([token | _], _a, _e), do: {:error, {:unexpected_in_protocol, token}}
-  defp parse_protocol_entries([], _a, _e), do: {:error, :unexpected_eof}
+  defp parse_protocol_entries([{:keyword, _, :sends} | rest], accepts, emits, sends) do
+    case parse_message_spec(rest) do
+      {:ok, spec, rest} -> parse_protocol_entries(rest, accepts, emits, [spec | sends])
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_protocol_entries([token | _], _a, _e, _s), do: {:error, {:unexpected_in_protocol, token}}
+  defp parse_protocol_entries([], _a, _e, _s), do: {:error, :unexpected_eof}
 
   # --- Message Spec: {:tag, field1: type1, field2: type2} ---
 
@@ -389,6 +485,20 @@ defmodule Vor.Parser do
     end
   end
 
+  # send :target {:tag, field: value}
+  defp parse_handler_body([{:keyword, meta, :send}, {:atom, _, target} | rest], acc) do
+    case rest do
+      [{:delimiter, _, :open_brace}, {:atom, _, tag} | rest] ->
+        case parse_binding_fields(rest, []) do
+          {:ok, fields, rest} ->
+            node = %AST.Send{target: target, tag: tag, fields: fields, meta: meta}
+            parse_handler_body(rest, [node | acc])
+          {:error, _} = err -> err
+        end
+      [token | _] -> {:error, {:expected_send_message, token}}
+    end
+  end
+
   # var = Mod.Sub.function(...) — extern call with binding (Elixir module)
   defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
                             {:identifier, _, first_seg}, {:operator, _, :dot} | rest], acc) do
@@ -565,6 +675,20 @@ defmodule Vor.Parser do
     case parse_transition(rest, meta) do
       {:ok, trans, rest} -> parse_if_body(rest, [trans | acc])
       {:error, _} = err -> err
+    end
+  end
+
+  # send in if body
+  defp parse_if_body([{:keyword, meta, :send}, {:atom, _, target} | rest], acc) do
+    case rest do
+      [{:delimiter, _, :open_brace}, {:atom, _, tag} | rest] ->
+        case parse_binding_fields(rest, []) do
+          {:ok, fields, rest} ->
+            node = %AST.Send{target: target, tag: tag, fields: fields, meta: meta}
+            parse_if_body(rest, [node | acc])
+          {:error, _} = err -> err
+        end
+      [token | _] -> {:error, {:expected_send_message, token}}
     end
   end
 

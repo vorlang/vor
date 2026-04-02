@@ -23,7 +23,7 @@ defmodule Vor.IR do
   end
 
   defmodule Protocol do
-    defstruct [:accepts, :emits]
+    defstruct [:accepts, :emits, :sends]
   end
 
   defmodule MessageType do
@@ -104,6 +104,18 @@ defmodule Vor.IR do
 
   defmodule CompoundCondition do
     defstruct [:op, :left, :right]
+  end
+
+  defmodule SendAction do
+    defstruct [:target, :tag, :fields]
+  end
+
+  defmodule SystemIR do
+    defstruct [:name, :registry, :agents, :connections]
+  end
+
+  defmodule AgentInstanceIR do
+    defstruct [:name, :module, :type_name, :params, :behaviour]
   end
 
   defmodule LivenessMonitor do

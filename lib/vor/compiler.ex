@@ -89,4 +89,145 @@ defmodule Vor.Compiler do
     end)
     |> Enum.map(fn {:safety, name, :proven, body} -> {name, body} end)
   end
+
+  @doc """
+  Compile a source with multiple agents and a system block.
+  Returns `{:ok, %{agents: [...], system: system_module}}` or `{:error, ...}`.
+  """
+  def compile_system(source, opts \\ []) do
+    with {:ok, tokens} <- Vor.Lexer.tokenize(source),
+         {:ok, parsed} <- Vor.Parser.parse_multi(tokens),
+         {:ok, agent_irs, system_ir} <- lower_system(parsed),
+         :ok <- check_system_protocols(system_ir, agent_irs),
+         {:ok, agent_results} <- compile_agents(agent_irs, opts),
+         {:ok, system_result} <- compile_system_module(system_ir, agent_irs, opts) do
+      {:ok, %{
+        agents: agent_results,
+        system: system_result,
+        system_ir: system_ir
+      }}
+    end
+  end
+
+  def compile_system_and_load(source, opts \\ []) do
+    with {:ok, result} <- compile_system(source, opts) do
+      # Load all agent modules
+      for {_name, agent} <- result.agents do
+        Vor.Codegen.Beam.load(agent.module, agent.binary)
+      end
+
+      # Load system module
+      Vor.Codegen.Beam.load(result.system.module, result.system.binary)
+
+      {:ok, result}
+    end
+  end
+
+  defp lower_system(%{agents: agent_asts, system: system_ast}) do
+    # Lower each agent
+    agent_irs = Enum.reduce_while(agent_asts, {:ok, %{}}, fn agent_ast, {:ok, acc} ->
+      case Vor.Lowering.lower(agent_ast) do
+        {:ok, ir} ->
+          name = ir.name
+          {:cont, {:ok, Map.put(acc, name, ir)}}
+        {:error, _} = err ->
+          {:halt, err}
+      end
+    end)
+
+    case agent_irs do
+      {:ok, irs} ->
+        system_ir = if system_ast do
+          lower_system_block(system_ast, irs)
+        else
+          nil
+        end
+        {:ok, irs, system_ir}
+
+      {:error, _} = err -> err
+    end
+  end
+
+  defp lower_system_block(%Vor.AST.System{name: name, agents: agents, connections: connections}, agent_irs) do
+    %Vor.IR.SystemIR{
+      name: name,
+      registry: Module.concat([Vor, System, name, Registry]),
+      agents: Enum.map(agents, fn %Vor.AST.AgentInstance{name: inst_name, type: type, params: params} ->
+        type_atom = if is_atom(type), do: type, else: String.to_atom(to_string(type))
+        ir = Map.get(agent_irs, type_atom)
+        module = if ir, do: ir.module, else: Module.concat([Vor, Agent, type_atom])
+        behaviour = if ir, do: ir.behaviour, else: :gen_server
+
+        inst_name_atom = if is_atom(inst_name), do: inst_name, else: String.to_atom(inst_name)
+        params_normalized = Enum.map(params || [], fn
+          {k, v} when is_atom(k) -> {k, v}
+          {k, v} -> {String.to_atom(to_string(k)), v}
+        end)
+
+        %Vor.IR.AgentInstanceIR{
+          name: inst_name_atom,
+          module: module,
+          type_name: type_atom,
+          params: params_normalized,
+          behaviour: behaviour
+        }
+      end),
+      connections: Enum.map(connections, fn %Vor.AST.Connect{from: from, to: to} ->
+        from_atom = if is_atom(from), do: from, else: String.to_atom(from)
+        to_atom = if is_atom(to), do: to, else: String.to_atom(to)
+        %{from: from_atom, to: to_atom}
+      end)
+    }
+  end
+
+  defp check_system_protocols(nil, _agent_irs), do: :ok
+  defp check_system_protocols(system_ir, agent_irs) do
+    # Map instance names to their agent IRs
+    instance_to_ir = Map.new(system_ir.agents, fn a ->
+      {a.name, Map.get(agent_irs, a.type_name)}
+    end)
+
+    case Vor.Verification.Protocol.check(system_ir, instance_to_ir) do
+      {:ok, _warnings} -> :ok
+      {:error, errors} ->
+        first = hd(errors)
+        {:error, %{type: first.type, details: errors}}
+    end
+  end
+
+  defp compile_agents(agent_irs, opts) do
+    results = Enum.reduce_while(agent_irs, {:ok, %{}}, fn {name, ir}, {:ok, acc} ->
+      with {:ok, _warnings} <- Vor.Analysis.ProtocolChecker.check(ir),
+           :ok <- verify_safety(ir),
+           {:ok, forms} <- Vor.Codegen.Erlang.generate(ir),
+           {:ok, module, binary, warnings} <- Vor.Codegen.Beam.compile(forms, opts) do
+        graph = extract_graph_from_ir(ir)
+        result = %{module: module, binary: binary, warnings: warnings, ir: ir, graph: graph}
+        {:cont, {:ok, Map.put(acc, name, result)}}
+      else
+        err -> {:halt, err}
+      end
+    end)
+
+    results
+  end
+
+  defp compile_system_module(nil, _agent_irs, _opts), do: {:ok, nil}
+  defp compile_system_module(system_ir, agent_irs, opts) do
+    # Map instance names to agent IRs for the system codegen
+    instance_ir_map = Map.new(system_ir.agents, fn a ->
+      {a.name, Map.get(agent_irs, a.type_name)}
+    end)
+
+    case Vor.Codegen.System.generate(system_ir, instance_ir_map) do
+      {:ok, forms, meta} ->
+        case Vor.Codegen.Beam.compile(forms, opts) do
+          {:ok, module, binary, warnings} ->
+            {:ok, %{module: module, binary: binary, warnings: warnings,
+                     registry: meta.registry, start_link: fn -> apply(module, :start_link, []) end}}
+          err -> err
+        end
+      err -> err
+    end
+  end
 end

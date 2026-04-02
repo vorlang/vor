@@ -93,6 +93,33 @@ Key files:
 - Immutable after init
 - Stored in Data map alongside data fields
 
+## Multi-agent systems
+
+### Protocol declarations
+- `accepts` — messages this agent can receive
+- `emits` — replies to the caller (synchronous)
+- `sends` — forwards to connected agents (asynchronous, via Registry)
+
+### System blocks
+```vor
+system Pipeline do
+  agent :source, Source(batch_size: 10)
+  agent :sink, Sink()
+  connect :source -> :sink
+end
+```
+
+### Protocol composition checking
+The compiler verifies for each `connect :a -> :b`:
+- Every `sends` tag in A matches an `accepts` tag in B
+- Field names must be identical (type mismatch is a warning)
+- Send targets in handlers must reference connected agents
+- Dead accepts (no connected sender) produce warnings
+
+### Send codegen
+`send :target {:msg, fields}` generates `gen_server:cast` via OTP Registry.
+System supervisor starts a Registry and all agents in dependency order.
+
 ## Known limitations
 
 1. No list or collection operations native to the language — use extern calls
@@ -101,3 +128,4 @@ Key files:
 4. No explicit default values for data fields (`state x: integer = 5`) — uses implicit type defaults
 5. No pattern matching on extern return values beyond simple comparison
 6. No `match`/`case` expressions — only if/else
+7. Runtime system integration (supervisor + registry startup) is generated but not yet fully tested end-to-end
