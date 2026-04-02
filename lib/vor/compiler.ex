@@ -9,6 +9,7 @@ defmodule Vor.Compiler do
          {:ok, ast} <- Vor.Parser.parse(tokens),
          {:ok, ir} <- Vor.Lowering.lower(ast),
          {:ok, _warnings} <- Vor.Analysis.ProtocolChecker.check(ir),
+         {:ok, _completeness_warnings} <- Vor.Analysis.Completeness.check(ir),
          :ok <- verify_safety(ir),
          {:ok, forms} <- Vor.Codegen.Erlang.generate(ir),
          {:ok, module, binary, compile_warnings} <- Vor.Codegen.Beam.compile(forms, opts) do
@@ -61,18 +62,33 @@ defmodule Vor.Compiler do
           {name, result}
         end)
 
-        violations = Enum.filter(results, fn
-          {_name, {:violated, _reason}} -> true
+        # Check for unsupported invariants first (soundness: fail closed)
+        unsupported = Enum.filter(results, fn
+          {_name, {:error, {:unsupported_invariant, _}}} -> true
           _ -> false
         end)
 
-        case violations do
+        case unsupported do
+          [{name, {:error, {:unsupported_invariant, msg}}} | _] ->
+            {:error, %{type: :unsupported_invariant, name: name, message: msg}}
           [] -> :ok
-          _ ->
-            error_details = Enum.map(violations, fn {name, {:violated, reason}} ->
-              %{name: name, reason: reason}
+        end
+        |> case do
+          {:error, _} = err -> err
+          :ok ->
+            violations = Enum.filter(results, fn
+              {_name, {:violated, _reason}} -> true
+              _ -> false
             end)
-            {:error, %{type: :invariant_violation, violations: error_details}}
+
+            case violations do
+              [] -> :ok
+              _ ->
+                error_details = Enum.map(violations, fn {name, {:violated, reason}} ->
+                  %{name: name, reason: reason}
+                end)
+                {:error, %{type: :invariant_violation, violations: error_details}}
+            end
         end
 
       :no_graph ->
@@ -125,27 +141,19 @@ defmodule Vor.Compiler do
 
   defp lower_system(%{agents: agent_asts, system: system_ast}) do
     # Lower each agent
-    agent_irs = Enum.reduce_while(agent_asts, {:ok, %{}}, fn agent_ast, {:ok, acc} ->
-      case Vor.Lowering.lower(agent_ast) do
-        {:ok, ir} ->
-          name = ir.name
-          {:cont, {:ok, Map.put(acc, name, ir)}}
-        {:error, _} = err ->
-          {:halt, err}
-      end
-    end)
+    agent_irs =
+      Enum.reduce(agent_asts, %{}, fn agent_ast, acc ->
+        {:ok, ir} = Vor.Lowering.lower(agent_ast)
+        Map.put(acc, ir.name, ir)
+      end)
 
-    case agent_irs do
-      {:ok, irs} ->
-        system_ir = if system_ast do
-          lower_system_block(system_ast, irs)
-        else
-          nil
-        end
-        {:ok, irs, system_ir}
-
-      {:error, _} = err -> err
+    system_ir = if system_ast do
+      lower_system_block(system_ast, agent_irs)
+    else
+      nil
     end
+
+    {:ok, agent_irs, system_ir}
   end
 
   defp lower_system_block(%Vor.AST.System{name: name, agents: agents, connections: connections}, agent_irs) do
@@ -198,6 +206,7 @@ defmodule Vor.Compiler do
   defp compile_agents(agent_irs, opts) do
     results = Enum.reduce_while(agent_irs, {:ok, %{}}, fn {name, ir}, {:ok, acc} ->
       with {:ok, _warnings} <- Vor.Analysis.ProtocolChecker.check(ir),
+           {:ok, _completeness_warnings} <- Vor.Analysis.Completeness.check(ir),
            :ok <- verify_safety(ir),
            {:ok, forms} <- Vor.Codegen.Erlang.generate(ir),
            {:ok, module, binary, warnings} <- Vor.Codegen.Beam.compile(forms, opts) do

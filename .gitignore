@@ -28,5 +28,8 @@ vor-*.tar
 # Internal directions (never push)
 /directions/
 
+# Audit reports (never push)
+/reports/
+
 # Claude Code worktrees
 /.claude/

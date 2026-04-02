@@ -1,6 +1,16 @@
 # Changelog
 
+## 2026-04-02
+- **Soundness fix: proven invariant fail-closed** — Unsupported `proven` invariant bodies now produce compile errors instead of silently passing. The safety verifier also accepts any state field name, not just `phase`.
+- **Soundness fix: graph extraction uses declared state field** — State graph only extracts transitions for the declared enum state field, preventing non-state guards from corrupting the graph.
+- **System runtime fix: metadata propagation** — Agent init now extracts `__vor_registry__` and `__vor_name__` from system args, enabling `send` between agents at runtime. Tested end-to-end with two-agent send and three-agent pipeline.
+- **Gen_server cast handlers** — Gen_server handlers now generate both `handle_call` and `handle_cast` clauses, so `send` (which uses `gen_server:cast`) reaches the correct handler.
+- **Zero compiler warnings** — Removed dead code (`compile_conditional/3`, `gen_params_map/2`), fixed unused variables, removed unreachable clauses.
+
 ## 2026-04-01
+- **Handler completeness checking** — Call handlers (those with emit) must emit on every code path. Missing else branches on if/emit blocks produce compile errors. Recursive analysis handles nested if/else. Cast handlers without else remain valid.
+- **Handler coverage enforcement** — Every `accepts` in the protocol must have at least one handler. Missing handlers produce compile errors with suggestions.
+- **Catch-all handler generation** — Guarded handlers automatically get catch-all clauses. Calls return `{:error, :no_matching_handler}` instead of crashing. Casts are silently ignored.
 - **Bidirectional relation solver** — Relations are queryable from any direction. Equation-based relations (`fahrenheit = celsius * 9 / 5 + 32`) support compile-time symbolic inversion. Forward and inverse solve in handlers via `solve` blocks.
 - **Gen_server data state** — Gen_server agents can declare mutable state fields (`state count: integer`). Fields stored in the GenServer state map with type defaults. Transition, read, and update in handlers.
 - **Protocol composition checking** — `system` blocks wire agents together with `connect`. The compiler verifies that connected agents' `sends` and `accepts` have matching tags and field names. Mismatches fail compilation.

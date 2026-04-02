@@ -65,9 +65,14 @@ defmodule Vor.Codegen.Erlang do
     param_pairs = gen_params_map_pairs(agent.params, l)
     data_field_pairs = gen_data_field_pairs(agent.data_fields || [], l)
     init_map = {:map, l, param_pairs ++ data_field_pairs}
+
+    # Build init body that extracts system metadata if present
+    body = gen_init_with_metadata(init_map, l, fn data_var ->
+      {:tuple, l, [{:atom, l, :ok}, {:var, l, data_var}]}
+    end)
+
     {:function, l, :init, 1, [
-      {:clause, l, [{:var, l, :Args}], [],
-        [{:tuple, l, [{:atom, l, :ok}, init_map]}]}
+      {:clause, l, [{:var, l, :Args}], [], body}
     ]}
   end
 
@@ -91,14 +96,49 @@ defmodule Vor.Codegen.Erlang do
                      {:tuple, l, [{:atom, l, :error}, {:atom, l, :unhandled}]},
                      {:var, l, :State}]}]}
 
-    {:function, l, :handle_call, 3, handler_clauses ++ [catchall]}
+    # Generate catch-all clauses for guarded message tags
+    guarded_catchalls = gen_guarded_catchall_call_clauses(agent, l)
+
+    {:function, l, :handle_call, 3, handler_clauses ++ guarded_catchalls ++ [catchall]}
   end
 
-  defp gen_handle_cast(_agent, l) do
-    {:function, l, :handle_cast, 2, [
-      {:clause, l, [{:var, l, :_Msg}, {:var, l, :State}], [],
-        [{:tuple, l, [{:atom, l, :noreply}, {:var, l, :State}]}]}
-    ]}
+  defp gen_handle_cast(agent, l) do
+    handler_clauses =
+      agent.handlers
+      |> Enum.map(fn handler ->
+        pattern_form = pattern_to_erl(handler.pattern, l)
+        {pre_actions, terminal} = split_terminal(handler.actions)
+
+        # Separate transitions from other pre-actions
+        {transitions, other_pre} = Enum.split_with(pre_actions, fn a -> a.type == :transition end)
+        pre_exprs = Enum.flat_map(other_pre, &action_to_erl(&1, l, :State))
+
+        # Generate state update from transitions
+        {state_update_exprs, state_var} = gen_server_state_updates(transitions, l)
+
+        # For cast, ignore emit value — just update state
+        terminal_exprs = case terminal do
+          %IR.Action{type: :conditional, data: %IR.ConditionalAction{} = cond_action} ->
+            # Execute conditional for side effects (state updates inside branches)
+            [compile_conditional_genserver(cond_action, l, (if transitions != [], do: :NewState, else: :State), state_var)]
+          _ ->
+            []
+        end
+
+        result = {:tuple, l, [{:atom, l, :noreply}, {:var, l, state_var}]}
+
+        {:clause, l,
+          [pattern_form, {:var, l, :State}],
+          guard_to_erl(handler.guard, l),
+          pre_exprs ++ state_update_exprs ++ terminal_exprs ++ [result]}
+      end)
+
+    catchall = {:clause, l,
+      [{:var, l, :_Msg}, {:var, l, :State}],
+      [],
+      [{:tuple, l, [{:atom, l, :noreply}, {:var, l, :State}]}]}
+
+    {:function, l, :handle_cast, 2, handler_clauses ++ [catchall]}
   end
 
   defp gen_handle_info(l) do
@@ -151,7 +191,7 @@ defmodule Vor.Codegen.Erlang do
     {[update_expr], :NewState}
   end
 
-  defp transition_value_to_erl(value, l, map_var) when is_atom(value), do: {:atom, l, value}
+  defp transition_value_to_erl(value, l, _map_var) when is_atom(value), do: {:atom, l, value}
   defp transition_value_to_erl({:integer, n}, l, _map_var), do: {:integer, l, n}
   defp transition_value_to_erl({:atom, a}, l, _map_var), do: {:atom, l, a}
   defp transition_value_to_erl({:bound_var, var}, l, _map_var), do: {:var, l, erl_var(var)}
@@ -169,18 +209,6 @@ defmodule Vor.Codegen.Erlang do
   end
 
   defp compile_conditional_genserver(%IR.ConditionalAction{condition: cond_ir, then_actions: then_acts, else_actions: else_acts}, l, map_var, _state_var) do
-    cond_form = condition_to_erl(cond_ir, l, map_var)
-
-    then_body = compile_handler_body(then_acts, l, map_var)
-    else_body = compile_handler_body(else_acts, l, map_var)
-
-    {:case, l, cond_form, [
-      {:clause, l, [{:atom, l, true}], [], then_body},
-      {:clause, l, [{:atom, l, false}], [], else_body}
-    ]}
-  end
-
-  defp compile_conditional(%IR.ConditionalAction{condition: cond_ir, then_actions: then_acts, else_actions: else_acts}, l, map_var) do
     cond_form = condition_to_erl(cond_ir, l, map_var)
 
     then_body = compile_handler_body(then_acts, l, map_var)
@@ -224,6 +252,67 @@ defmodule Vor.Codegen.Erlang do
   end
   defp value_to_erl({:integer, n}, l, _map_var), do: {:integer, l, n}
   defp value_to_erl({:atom, a}, l, _map_var), do: {:atom, l, a}
+  defp value_to_erl({:arith, op, left, right}, l, map_var) do
+    {:op, l, arith_op(op), value_to_erl(left, l, map_var), value_to_erl(right, l, map_var)}
+  end
+
+  # Generate init body that extracts system metadata (__vor_registry__, __vor_name__) if present.
+  # This makes standalone agents (no system) work unchanged, while system agents get registry info.
+  defp gen_init_with_metadata(init_map, l, result_fn) do
+    # Data0 = #{params..., fields...}
+    data0_bind = {:match, l, {:var, l, :Data0}, init_map}
+
+    # case proplists:get_value('__vor_registry__', Args) of
+    #   undefined -> Data0;
+    #   Registry ->
+    #     Name = proplists:get_value('__vor_name__', Args),
+    #     Data0#{'__vor_registry__' => Registry, '__vor_name__' => Name}
+    # end
+    registry_lookup = {:call, l,
+      {:remote, l, {:atom, l, :proplists}, {:atom, l, :get_value}},
+      [{:atom, l, :__vor_registry__}, {:var, l, :Args}]}
+
+    name_lookup = {:call, l,
+      {:remote, l, {:atom, l, :proplists}, {:atom, l, :get_value}},
+      [{:atom, l, :__vor_name__}, {:var, l, :Args}]}
+
+    data_with_meta = {:map, l, {:var, l, :Data0}, [
+      {:map_field_assoc, l, {:atom, l, :__vor_registry__}, {:var, l, :VorRegistry}},
+      {:map_field_assoc, l, {:atom, l, :__vor_name__}, {:var, l, :VorName}}
+    ]}
+
+    name_bind = {:match, l, {:var, l, :VorName}, name_lookup}
+
+    case_expr = {:case, l, registry_lookup, [
+      {:clause, l, [{:atom, l, :undefined}], [],
+        [{:var, l, :Data0}]},
+      {:clause, l, [{:var, l, :VorRegistry}], [],
+        [name_bind, data_with_meta]}
+    ]}
+
+    data_bind = {:match, l, {:var, l, :Data}, case_expr}
+
+    [data0_bind, data_bind, result_fn.(:Data)]
+  end
+
+  # Generate catch-all handle_call clauses for guarded message tags in gen_server
+  defp gen_guarded_catchall_call_clauses(agent, l) do
+    guarded_tags =
+      agent.handlers
+      |> Enum.filter(fn h -> h.guard != nil end)
+      |> Enum.map(fn h -> h.pattern.tag end)
+      |> Enum.uniq()
+
+    Enum.map(guarded_tags, fn tag ->
+      pattern = {:tuple, l, [{:atom, l, tag}, {:var, l, :_Fields}]}
+      {:clause, l,
+        [pattern, {:var, l, :_From}, {:var, l, :State}],
+        [],
+        [{:tuple, l, [{:atom, l, :reply},
+          {:tuple, l, [{:atom, l, :error}, {:atom, l, :no_matching_handler}]},
+          {:var, l, :State}]}]}
+    end)
+  end
 
   # ---- gen_statem codegen ----
 
@@ -260,13 +349,17 @@ defmodule Vor.Codegen.Erlang do
     data_field_pairs = gen_data_field_pairs(agent.data_fields || [], l)
     init_map = {:map, l, param_pairs ++ data_field_pairs}
 
+    # Build init body that extracts system metadata if present
+    body = gen_init_with_metadata(init_map, l, fn data_var ->
+      {:tuple, l, [
+        {:atom, l, :ok},
+        {:atom, l, initial_state},
+        {:var, l, data_var}
+      ]}
+    end)
+
     {:function, l, :init, 1, [
-      {:clause, l, [{:var, l, :Args}], [],
-        [{:tuple, l, [
-          {:atom, l, :ok},
-          {:atom, l, initial_state},
-          init_map
-        ]}]}
+      {:clause, l, [{:var, l, :Args}], [], body}
     ]}
   end
 
@@ -371,7 +464,11 @@ defmodule Vor.Codegen.Erlang do
       [],
       [{:atom, l, :keep_state_and_data}]}
 
-    {:function, l, :handle_event, 4, cast_clauses ++ call_clauses ++ timer_clauses ++ timeout_clauses ++ [catchall]}
+    # Generate catch-all handlers for guarded message tags
+    # These prevent crashes when no guard matches — return error for calls, ignore for casts
+    guarded_catchalls = gen_guarded_catchall_clauses(agent, l)
+
+    {:function, l, :handle_event, 4, cast_clauses ++ call_clauses ++ guarded_catchalls ++ timer_clauses ++ timeout_clauses ++ [catchall]}
   end
 
   defp has_nested_emits?(actions) do
@@ -425,6 +522,45 @@ defmodule Vor.Codegen.Erlang do
         [{:atom, l, :state_timeout}, {:atom, l, handler.pattern.tag}, {:var, l, :State}, {:var, l, :Data}],
         [guard],
         [{:tuple, l, [{:atom, l, :next_state}, {:atom, l, target}, {:var, l, :Data}]}]}
+    end)
+  end
+
+  # Generate catch-all clauses for message tags that have guarded handlers.
+  # When no guard matches: calls get {:error, :no_matching_handler}, casts are silently ignored.
+  defp gen_guarded_catchall_clauses(agent, l) do
+    monitors = agent.monitors || []
+
+    # Find message tags that have at least one guarded handler
+    guarded_tags =
+      agent.handlers
+      |> Enum.reject(fn h -> is_timeout_handler?(h, monitors) end)
+      |> Enum.filter(fn h -> h.guard != nil end)
+      |> Enum.map(fn h -> h.pattern.tag end)
+      |> Enum.uniq()
+
+    # For each guarded tag, generate a cast catch-all and a call catch-all
+    Enum.flat_map(guarded_tags, fn tag ->
+      # Build a pattern that matches the tag with any fields: {tag, #{}}
+      pattern = {:tuple, l, [{:atom, l, tag}, {:var, l, :_Fields}]}
+
+      # Cast catch-all: silently ignore
+      cast_clause = {:clause, l,
+        [{:atom, l, :cast}, pattern, {:var, l, :_State}, {:var, l, :_Data}],
+        [],
+        [{:atom, l, :keep_state_and_data}]}
+
+      # Call catch-all: reply with error
+      call_clause = {:clause, l,
+        [{:tuple, l, [{:atom, l, :call}, {:var, l, :From}]},
+         pattern, {:var, l, :_State}, {:var, l, :_Data}],
+        [],
+        [{:tuple, l, [
+          {:atom, l, :keep_state_and_data},
+          list_to_erl([{:tuple, l, [{:atom, l, :reply}, {:var, l, :From},
+            {:tuple, l, [{:atom, l, :error}, {:atom, l, :no_matching_handler}]}]}], l)
+        ]}]}
+
+      [cast_clause, call_clause]
     end)
   end
 
@@ -656,10 +792,6 @@ defmodule Vor.Codegen.Erlang do
   defp statem_guard_to_erl(_, _l), do: []
 
   # Build init state map from params: #{param1 => proplists:get_value(param1, Args), ...}
-  defp gen_params_map(nil, l), do: {:map, l, []}
-  defp gen_params_map([], l), do: {:map, l, []}
-  defp gen_params_map(params, l), do: {:map, l, gen_params_map_pairs(params, l)}
-
   defp gen_params_map_pairs(nil, _l), do: []
   defp gen_params_map_pairs([], _l), do: []
   defp gen_params_map_pairs(params, l) do
@@ -672,7 +804,7 @@ defmodule Vor.Codegen.Erlang do
 
   defp gen_data_field_pairs([], _l), do: []
   defp gen_data_field_pairs(data_fields, l) do
-    Enum.map(data_fields, fn %IR.DataField{name: name, type: type, default: default} ->
+    Enum.map(data_fields, fn %IR.DataField{name: name, type: _type, default: default} ->
       default_form = case default do
         :__empty_map__ -> {:map, l, []}
         :__empty_list__ -> {:nil, l}
@@ -704,15 +836,6 @@ defmodule Vor.Codegen.Erlang do
   # --- Solve codegen ---
 
   defp compile_solve_genserver(%IR.SolveAction{} = solve, l, map_var, state_var) do
-    # Determine which bindings are bound (from handler context) vs unbound
-    # For now, assume variables from handler pattern are bound, literal values are bound
-    bound_fields = Enum.filter(solve.bindings, fn
-      {_field, {:integer, _}} -> true
-      {_field, {:atom, _}} -> true
-      {_field, {:var, _}} -> true  # Variables from pattern are bound
-      _ -> false
-    end)
-
     if solve.equation do
       compile_equation_solve(solve, l, map_var, state_var)
     else

@@ -132,13 +132,13 @@ defmodule Vor.Lowering do
     }
   end
 
-  defp extract_handlers(body, param_names, relation_map \\ %{}) do
+  defp extract_handlers(body, param_names, relation_map) do
     body
     |> Enum.filter(&match?(%AST.Handler{}, &1))
     |> Enum.map(&lower_handler(&1, param_names, relation_map))
   end
 
-  defp lower_handler(%AST.Handler{pattern: pattern, guard: guard, body: body}, param_names, relation_map \\ %{}) do
+  defp lower_handler(%AST.Handler{pattern: pattern, guard: guard, body: body}, param_names, relation_map) do
     # Collect bound variable names from the handler pattern
     pattern_vars = case pattern do
       %AST.Pattern{bindings: bindings} ->

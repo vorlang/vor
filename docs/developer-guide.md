@@ -2,7 +2,7 @@
 
 This document describes the current state of the Vor compiler. It is an internal reference for anyone working on the compiler, including AI coding agents. Update this document as features are added.
 
-Last updated after: features 1-8 (externs, params, rate limiter, graph extraction, safety verification, circuit breaker, runtime monitoring, expressions & data map)
+Last updated after: critical fixes (soundness, graph extraction, system runtime, dead code cleanup)
 
 ## Architecture
 
@@ -14,6 +14,8 @@ Key files:
 - `lib/vor/lowering.ex` — AST → IR transformation
 - `lib/vor/codegen/erlang.ex` — IR → Erlang abstract format
 - `lib/vor/compiler.ex` — Pipeline orchestrator
+- `lib/vor/analysis/completeness.ex` — Emit path analysis and handler coverage
+- `lib/vor/analysis/protocol_checker.ex` — Protocol conformance validation
 - `lib/vor/graph.ex` — State graph extraction
 - `lib/vor/verification/safety.ex` — Safety invariant verification
 
@@ -122,12 +124,97 @@ The compiler verifies for each `connect :a -> :b`:
 `send :target {:msg, fields}` generates `gen_server:cast` via OTP Registry.
 System supervisor starts a Registry and all agents in dependency order.
 
+## Handler completeness checking
+
+### Mandatory else for call handlers
+If a handler contains any `emit`, every code path through that handler must reach an emit. Specifically:
+- If an `if` block contains an emit, the `else` block is mandatory and must also emit
+- A default emit after an if block satisfies this (the if can lack an else if the emit follows it)
+- Nested if/else is checked recursively — each level must have complete coverage
+- Cast handlers (no emit) are exempt — else is optional
+
+Produces `{:error, %{type: :incomplete_handler}}` on failure.
+
+### Handler coverage for protocol accepts
+Every `accepts` declaration in the protocol must have at least one handler with a matching message tag. Guards may restrict which messages are handled, but the base pattern must exist.
+
+Produces `{:error, %{type: :missing_handler}}` on failure.
+
+### Catch-all handler generation
+For message tags that have guarded handlers, the compiler automatically generates catch-all clauses:
+- Call messages: reply with `{:error, :no_matching_handler}` instead of crashing
+- Cast messages: silently ignored (`keep_state_and_data`)
+
+This prevents process crashes when no guard matches at runtime.
+
+### Pattern matching depth
+Vor handlers match one level deep: message tag + named fields. Nested destructuring is not supported. To inspect nested data, bind the field and use an extern call:
+
+```vor
+on {:msg, entries: E} do
+  first = ListHelper.head(list: E)
+end
+```
+
+## Bidirectional relations
+
+Relations support forward lookup, reverse lookup, and arithmetic inversion.
+
+**Fact-based relations** can be queried from any field:
+- Forward: `solve tier(client: C, max: M)` with C bound fills M
+- Reverse: `solve tier(client: C, max: 100)` with max bound fills C
+
+**Equation-based relations** are automatically inverted at compile time:
+- `relation temp(celsius: C, fahrenheit: F) do F = C * 9 / 5 + 32 end`
+- Forward: provide C, get F
+- Inverse: provide F, get C (compiler generates C = (F - 32) * 5 / 9)
+- Limited to linear arithmetic (+, -, *, /)
+
+## Resilience blocks
+
+Declare what happens when a liveness invariant is violated:
+
+```vor
+resilience do
+  on_invariant_violation("transaction terminates") ->
+    transition phase: :terminated
+end
+```
+
+Resilience handlers are generated as regular handler clauses and included in the state graph. The safety verifier checks them.
+
+## Transition ordering
+
+Transitions are applied before emits in the same handler. An emit after a transition reads the post-transition state.
+
+## Guard asymmetry
+
+Gen_statem handlers support full guard expressions: ==, in, >, <, >=, <=, and/or.
+Gen_server handlers only support equality guards: `when field == :atom`.
+For gen_server agents, use if/else in the handler body for comparisons.
+
+## Invariant verification scope
+
+Safety invariants tagged `proven` are verified by walking the state transition graph. The verifier currently supports:
+- `never(phase == :state and emitted({:tag, _}))` — no emit of a message type in a given state
+- `never(transition from: :a, to: :b)` — no direct transition between two states
+
+Invariant bodies that use unsupported constructs will produce a compile error when tagged `proven`. Change to `monitored` for properties the verifier cannot yet check.
+
 ## Known limitations
 
 1. No list or collection operations native to the language — use extern calls
 2. No string operations native to the language — use extern calls
-3. No `solve` blocks for relation queries — use params directly
-4. No explicit default values for data fields (`state x: integer = 5`) — uses implicit type defaults
-5. No pattern matching on extern return values beyond simple comparison
-6. No `match`/`case` expressions — only if/else
-7. Runtime system integration (supervisor + registry startup) is generated but not yet fully tested end-to-end
+3. No explicit default values for data fields (`state x: integer = 5`) — uses implicit type defaults
+4. No pattern matching on extern return values beyond simple comparison
+5. No `match`/`case` expressions — only if/else
+6. No nested pattern matching in handler patterns — match tag + top-level fields only, use externs for deeper destructuring
+7. No guard coverage analysis (whether guards partition the input space) — catch-all handlers cover this at runtime
+
+## Known design debt
+
+### Atom interning
+
+The lexer and lowering phases use `String.to_atom/1` on source-derived identifiers. On the BEAM, atoms are not garbage collected, so compiling large or untrusted source files can grow the atom table permanently. This is acceptable for the current prototype stage but must be addressed before the compiler runs in a long-lived service or accepts untrusted input.
+
+Future fix: keep source names as binaries through lexer/parser/lowering, convert to atoms only at codegen for the final Erlang abstract format.

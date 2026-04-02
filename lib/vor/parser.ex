@@ -101,6 +101,10 @@ defmodule Vor.Parser do
     parse_system_param_fields(rest, [{name, {:atom, value}} | acc])
   end
 
+  defp parse_system_param_field([{:identifier, _, name}, {:delimiter, _, :colon}, {:string, _, value} | rest], acc) do
+    parse_system_param_fields(rest, [{name, value} | acc])
+  end
+
   defp parse_system_param_field([token | _], _acc), do: {:error, {:expected_system_param, token}}
 
   # --- Agent ---

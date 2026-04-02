@@ -25,9 +25,14 @@ defmodule Vor.Graph do
       _ -> nil
     end
 
-    transitions = extract_transitions(agent.handlers)
+    state_field_name = case agent.state_fields do
+      [%IR.StateField{name: name} | _] -> name
+      _ -> :phase
+    end
+
+    transitions = extract_transitions(agent.handlers, state_field_name)
     timeout_transitions = extract_timeout_transitions(agent.monitors || [])
-    emit_map = extract_emit_map(agent.handlers, states)
+    emit_map = extract_emit_map(agent.handlers, states, state_field_name)
 
     {:ok, %__MODULE__{
       agent: agent.name,
@@ -46,9 +51,9 @@ defmodule Vor.Graph do
     end)
   end
 
-  defp extract_transitions(handlers) do
+  defp extract_transitions(handlers, state_field_name) do
     Enum.flat_map(handlers, fn handler ->
-      from_state = guard_state(handler.guard)
+      from_state = guard_state(handler.guard, state_field_name)
       extract_handler_transitions(handler.actions, from_state, handler.pattern.tag)
     end)
   end
@@ -66,11 +71,11 @@ defmodule Vor.Graph do
     end)
   end
 
-  defp extract_emit_map(handlers, states) do
+  defp extract_emit_map(handlers, states, state_field_name) do
     base = Map.new(states, fn s -> {s, []} end)
 
     Enum.reduce(handlers, base, fn handler, map ->
-      from_state = guard_state(handler.guard)
+      from_state = guard_state(handler.guard, state_field_name)
       emits = extract_handler_emits(handler.actions)
 
       case from_state do
@@ -92,11 +97,15 @@ defmodule Vor.Graph do
     |> Enum.uniq()
   end
 
-  # Extract which state a handler's guard constrains
-  # Match any guard that checks a field == atom (the state field name may vary)
-  defp guard_state(%IR.GuardExpr{op: :==, value: {:atom, state}}), do: state
-  defp guard_state(%IR.CompoundGuardExpr{left: left}), do: guard_state(left)
-  defp guard_state(_), do: nil
+  # Extract which state a handler's guard constrains.
+  # Only match guards on the declared state field — ignore other fields.
+  defp guard_state(%IR.GuardExpr{field: field, op: :==, value: {:atom, state}}, state_field_name)
+       when field == state_field_name, do: state
+  defp guard_state(%IR.GuardExpr{}, _state_field_name), do: nil
+  defp guard_state(%IR.CompoundGuardExpr{left: left, right: right}, state_field_name) do
+    guard_state(left, state_field_name) || guard_state(right, state_field_name)
+  end
+  defp guard_state(_, _), do: nil
 
   @doc """
   Format the graph as human-readable text.

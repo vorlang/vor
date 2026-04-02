@@ -81,8 +81,11 @@ defmodule Vor.Verification.Safety do
           {:proven}
         end
 
-      {:unknown} ->
-        {:proven}
+      {:unknown, _raw} ->
+        {:error, {:unsupported_invariant,
+          "Cannot verify invariant — the property uses " <>
+          "constructs the verifier does not yet support. " <>
+          "Change the tier from 'proven' to 'monitored', or simplify the property."}}
     end
   end
 
@@ -94,7 +97,7 @@ defmodule Vor.Verification.Safety do
       :no_match ->
         case find_never_transition_pattern(tokens) do
           {:ok, from, to} -> {:never_transition, from, to}
-          :no_match -> {:unknown}
+          :no_match -> {:unknown, tokens}
         end
     end
   end
@@ -129,10 +132,13 @@ defmodule Vor.Verification.Safety do
   end
 
   defp find_phase_eq(tokens) do
+    # Match any identifier == :atom pattern (not just :phase)
+    # The verifier checks against the graph's emit_map, which only contains
+    # declared states, so this is safe for any state field name.
     tokens
     |> Enum.chunk_every(3, 1, :discard)
     |> Enum.find_value(fn
-      [{:identifier, _, :phase}, {:operator, _, :==}, {:atom, _, state}] ->
+      [{:identifier, _, _field}, {:operator, _, :==}, {:atom, _, state}] ->
         String.to_atom(state)
       _ -> nil
     end)

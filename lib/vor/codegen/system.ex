@@ -140,6 +140,7 @@ defmodule Vor.Codegen.System do
 
   defp value_literal(value, l) when is_integer(value), do: {:integer, l, value}
   defp value_literal(value, l) when is_atom(value), do: {:atom, l, value}
+  defp value_literal(value, l) when is_binary(value), do: {:bin, l, [{:bin_element, l, {:string, l, String.to_charlist(value)}, :default, :default}]}
   defp value_literal({:atom, value}, l), do: {:atom, l, String.to_atom(value)}
 
   defp list_to_erl([], l), do: {:nil, l}
