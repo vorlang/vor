@@ -102,7 +102,12 @@ defmodule Vor.Verification.Protocol do
     end)
   end
 
-  defp check_action_sends(%IR.Action{type: :send, data: %IR.SendAction{target: target}}, agent_name, agent_names, connection_map) do
+  defp check_action_sends(%IR.Action{type: :send, data: %IR.SendAction{target: {:bound_var, _}}}, _agent_name, _agent_names, _connection_map) do
+    # Variable target — can't check at compile time, skip
+    []
+  end
+
+  defp check_action_sends(%IR.Action{type: :send, data: %IR.SendAction{target: target}}, agent_name, agent_names, connection_map) when is_atom(target) do
     cond do
       not MapSet.member?(agent_names, target) ->
         [%{type: :unknown_agent, agent: target, in: agent_name}]

@@ -503,6 +503,20 @@ defmodule Vor.Parser do
     end
   end
 
+  # send with variable target: send VarName {:tag, fields}
+  defp parse_handler_body([{:keyword, meta, :send}, {:identifier, _, target} | rest], acc) do
+    case rest do
+      [{:delimiter, _, :open_brace}, {:atom, _, tag} | rest] ->
+        case parse_binding_fields(rest, []) do
+          {:ok, fields, rest} ->
+            node = %AST.Send{target: {:var, target}, tag: tag, fields: fields, meta: meta}
+            parse_handler_body(rest, [node | acc])
+          {:error, _} = err -> err
+        end
+      [token | _] -> {:error, {:expected_send_message, token}}
+    end
+  end
+
   # broadcast {:tag, field: value, ...}
   defp parse_handler_body([{:keyword, meta, :broadcast}, {:delimiter, _, :open_brace}, {:atom, _, tag} | rest], acc) do
     case parse_binding_fields(rest, []) do
@@ -727,13 +741,27 @@ defmodule Vor.Parser do
     end
   end
 
-  # send in if body
+  # send in if body (literal target)
   defp parse_if_body([{:keyword, meta, :send}, {:atom, _, target} | rest], acc) do
     case rest do
       [{:delimiter, _, :open_brace}, {:atom, _, tag} | rest] ->
         case parse_binding_fields(rest, []) do
           {:ok, fields, rest} ->
             node = %AST.Send{target: target, tag: tag, fields: fields, meta: meta}
+            parse_if_body(rest, [node | acc])
+          {:error, _} = err -> err
+        end
+      [token | _] -> {:error, {:expected_send_message, token}}
+    end
+  end
+
+  # send in if body (variable target)
+  defp parse_if_body([{:keyword, meta, :send}, {:identifier, _, target} | rest], acc) do
+    case rest do
+      [{:delimiter, _, :open_brace}, {:atom, _, tag} | rest] ->
+        case parse_binding_fields(rest, []) do
+          {:ok, fields, rest} ->
+            node = %AST.Send{target: {:var, target}, tag: tag, fields: fields, meta: meta}
             parse_if_body(rest, [node | acc])
           {:error, _} = err -> err
         end
@@ -822,6 +850,11 @@ defmodule Vor.Parser do
   defp parse_single_condition([{:integer, _, left}, {:operator, _, op}, {:identifier, _, right} | rest])
        when op in [:<=, :>=, :==, :!=, :>, :<] do
     {:ok, %AST.Comparison{left: {:integer, left}, op: op, right: {:var, right}}, rest}
+  end
+
+  defp parse_single_condition([{:identifier, _, left}, {:operator, _, op}, {:atom, _, right} | rest])
+       when op in [:<=, :>=, :==, :!=, :>, :<] do
+    {:ok, %AST.Comparison{left: {:var, left}, op: op, right: {:atom, right}}, rest}
   end
 
   defp parse_single_condition([token | _]), do: {:error, {:expected_condition, token}}
@@ -1280,7 +1313,7 @@ defmodule Vor.Parser do
       {:ok, trans, rest} ->
         case rest do
           [{:delimiter, _, :comma} | rest] -> parse_resilience_actions(rest, [trans | acc])
-          _ -> {:ok, Enum.reverse([trans | acc]), rest}
+          _ -> parse_resilience_actions(rest, [trans | acc])
         end
       {:error, _} = err -> err
     end
@@ -1291,7 +1324,7 @@ defmodule Vor.Parser do
       {:ok, emit, rest} ->
         case rest do
           [{:delimiter, _, :comma} | rest] -> parse_resilience_actions(rest, [emit | acc])
-          _ -> {:ok, Enum.reverse([emit | acc]), rest}
+          _ -> parse_resilience_actions(rest, [emit | acc])
         end
       {:error, _} = err -> err
     end

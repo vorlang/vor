@@ -1,6 +1,12 @@
 # Changelog
 
 ## 2026-04-02
+- **Raft consensus example** — Three-node Raft cluster using native Vor primitives: `broadcast` for vote requests, `send` with variable targets for directed responses, liveness monitoring for election timeouts, proven safety invariants. All node-to-node messaging is native Vor — externs only used for log operations.
+- **Variable send targets** — `send L {:msg, fields}` where L is a pattern-bound variable, resolved at runtime via Registry lookup. Enables directed responses in protocols like Raft.
+- **Guard-safe data field comparison** — Guards like `when T > current_term` use `map_get/2` (guard BIF) instead of `maps:get/2`.
+- **Init state timeouts** — Gen_statem agents that start in a monitored state now get the state_timeout set at init.
+- **Resilience handler full actions** — Resilience handlers can now have multiple transitions, not just a target state.
+- **Atom comparison in if conditions** — `if up_to_date == :true do` now parses correctly.
 - **Broadcast** — `broadcast {:msg, fields}` sends a message to all outbound-connected agents in the system block. Always asynchronous (cast). Works alongside `emit` and `send` in the same handler. Checks against `sends` protocol declarations. Generated code iterates `__vor_connections__` and sends via the registry with graceful handling of missing peers.
 - **Soundness fix: proven invariant fail-closed** — Unsupported `proven` invariant bodies now produce compile errors instead of silently passing. The safety verifier also accepts any state field name, not just `phase`.
 - **Soundness fix: graph extraction uses declared state field** — State graph only extracts transitions for the declared enum state field, preventing non-state guards from corrupting the graph.

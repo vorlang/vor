@@ -1,0 +1,196 @@
+agent RaftNode(
+  node_id: atom,
+  cluster_size: integer,
+  election_timeout_ms: integer,
+  heartbeat_ms: integer
+) do
+
+  extern do
+    Vor.Examples.RaftHelpers.log_append(log: list, term: integer, command: term) :: list
+    Vor.Examples.RaftHelpers.log_last_index(log: list) :: integer
+    Vor.Examples.RaftHelpers.log_last_term(log: list) :: integer
+    Vor.Examples.RaftHelpers.log_up_to_date(candidate_last_index: integer, candidate_last_term: integer, my_log: list) :: atom
+    Vor.Examples.RaftHelpers.majority(cluster_size: integer) :: integer
+  end
+
+  state role: :follower | :candidate | :leader
+  state current_term: integer
+  state voted_for: atom
+  state vote_count: integer
+  state log: list
+  state commit_index: integer
+
+  protocol do
+    accepts {:request_vote, term: integer, candidate_id: atom, last_log_index: integer, last_log_term: integer}
+    accepts {:vote_granted, term: integer, voter: atom}
+    accepts {:vote_denied, term: integer}
+    accepts {:append_entries, term: integer, leader_id: atom, entries: list, leader_commit: integer}
+    accepts {:append_ok, term: integer, follower: atom}
+    accepts {:append_fail, term: integer, follower: atom}
+    accepts {:client_request, command: term}
+    accepts {:get_state}
+
+    sends {:request_vote, term: integer, candidate_id: atom, last_log_index: integer, last_log_term: integer}
+    sends {:vote_granted, term: integer, voter: atom}
+    sends {:vote_denied, term: integer}
+    sends {:append_entries, term: integer, leader_id: atom, entries: list, leader_commit: integer}
+    sends {:append_ok, term: integer, follower: atom}
+    sends {:append_fail, term: integer, follower: atom}
+
+    emits {:client_ok, index: integer}
+    emits {:client_redirect, leader: atom}
+    emits {:state_info, role: atom, term: integer, log_length: integer, commit_index: integer}
+  end
+
+  on {:append_entries, term: T, leader_id: L, entries: E, leader_commit: LC} when role == :follower and T >= current_term do
+    transition current_term: T
+    transition commit_index: LC
+    send L {:append_ok, term: T, follower: node_id}
+  end
+
+  on {:append_entries, term: T, leader_id: L, entries: E, leader_commit: LC} when role == :follower and T < current_term do
+    send L {:append_fail, term: current_term, follower: node_id}
+  end
+
+  on {:request_vote, term: T, candidate_id: C, last_log_index: LI, last_log_term: LT} when role == :follower and T > current_term do
+    transition current_term: T
+    transition voted_for: C
+    send C {:vote_granted, term: T, voter: node_id}
+  end
+
+  on {:request_vote, term: T, candidate_id: C, last_log_index: LI, last_log_term: LT} when role == :follower and T <= current_term do
+    send C {:vote_denied, term: current_term}
+  end
+
+  on {:client_request, command: Cmd} when role == :follower do
+    emit {:client_redirect, leader: :unknown}
+  end
+
+  on {:get_state} when role == :follower do
+    log_len = Vor.Examples.RaftHelpers.log_last_index(log: log)
+    emit {:state_info, role: :follower, term: current_term, log_length: log_len, commit_index: commit_index}
+  end
+
+  on {:vote_granted, term: T, voter: V} when role == :candidate and T == current_term do
+    transition vote_count: vote_count + 1
+  end
+
+  on {:vote_denied, term: T} when role == :candidate and T > current_term do
+    transition role: :follower
+    transition current_term: T
+    transition voted_for: :nil
+    transition vote_count: 0
+  end
+
+  on {:vote_denied, term: T} when role == :candidate and T <= current_term do
+    transition vote_count: vote_count
+  end
+
+  on {:append_entries, term: T, leader_id: L, entries: E, leader_commit: LC} when role == :candidate and T >= current_term do
+    transition role: :follower
+    transition current_term: T
+    transition voted_for: :nil
+    transition vote_count: 0
+    transition commit_index: LC
+    send L {:append_ok, term: T, follower: node_id}
+  end
+
+  on {:append_entries, term: T, leader_id: L, entries: E, leader_commit: LC} when role == :candidate and T < current_term do
+    send L {:append_fail, term: current_term, follower: node_id}
+  end
+
+  on {:client_request, command: Cmd} when role == :candidate do
+    emit {:client_redirect, leader: :unknown}
+  end
+
+  on {:get_state} when role == :candidate do
+    log_len = Vor.Examples.RaftHelpers.log_last_index(log: log)
+    emit {:state_info, role: :candidate, term: current_term, log_length: log_len, commit_index: commit_index}
+  end
+
+  on {:client_request, command: Cmd} when role == :leader do
+    new_log = Vor.Examples.RaftHelpers.log_append(log: log, term: current_term, command: Cmd)
+    transition log: new_log
+    new_index = Vor.Examples.RaftHelpers.log_last_index(log: new_log)
+    broadcast {:append_entries, term: current_term, leader_id: node_id, entries: :replicating, leader_commit: commit_index}
+    emit {:client_ok, index: new_index}
+  end
+
+  on {:append_ok, term: T, follower: F} when role == :leader and T == current_term do
+    transition commit_index: commit_index
+  end
+
+  on {:append_fail, term: T, follower: F} when role == :leader and T > current_term do
+    transition role: :follower
+    transition current_term: T
+    transition voted_for: :nil
+    transition vote_count: 0
+  end
+
+  on {:append_fail, term: T, follower: F} when role == :leader and T <= current_term do
+    transition commit_index: commit_index
+  end
+
+  on {:append_entries, term: T, leader_id: L, entries: E, leader_commit: LC} when role == :leader and T > current_term do
+    transition role: :follower
+    transition current_term: T
+    transition voted_for: :nil
+    transition vote_count: 0
+    transition commit_index: LC
+    send L {:append_ok, term: T, follower: node_id}
+  end
+
+  on {:append_entries, term: T, leader_id: L, entries: E, leader_commit: LC} when role == :leader and T <= current_term do
+    send L {:append_fail, term: current_term, follower: node_id}
+  end
+
+  on {:request_vote, term: T, candidate_id: C, last_log_index: LI, last_log_term: LT} when role == :leader and T > current_term do
+    transition role: :follower
+    transition current_term: T
+    transition voted_for: C
+    send C {:vote_granted, term: T, voter: node_id}
+  end
+
+  on {:request_vote, term: T, candidate_id: C, last_log_index: LI, last_log_term: LT} when role == :leader and T <= current_term do
+    send C {:vote_denied, term: current_term}
+  end
+
+  on {:get_state} when role == :leader do
+    log_len = Vor.Examples.RaftHelpers.log_last_index(log: log)
+    emit {:state_info, role: :leader, term: current_term, log_length: log_len, commit_index: commit_index}
+  end
+
+  liveness "election progresses" monitored(within: election_timeout_ms) do
+    always(role != :candidate and role != :leader implies eventually(role == :candidate))
+  end
+
+  resilience do
+    on_invariant_violation("election progresses") ->
+      transition role: :candidate
+      transition current_term: current_term + 1
+      transition voted_for: node_id
+      transition vote_count: 1
+  end
+
+  safety "followers don't accept client writes" proven do
+    never(role == :follower and emitted({:client_ok, _}))
+  end
+
+  safety "candidates don't accept client writes" proven do
+    never(role == :candidate and emitted({:client_ok, _}))
+  end
+
+end
+
+system RaftCluster do
+  agent :node1, RaftNode(node_id: :node1, cluster_size: 3, election_timeout_ms: 300, heartbeat_ms: 100)
+  agent :node2, RaftNode(node_id: :node2, cluster_size: 3, election_timeout_ms: 350, heartbeat_ms: 100)
+  agent :node3, RaftNode(node_id: :node3, cluster_size: 3, election_timeout_ms: 400, heartbeat_ms: 100)
+
+  connect :node1 -> :node2
+  connect :node1 -> :node3
+  connect :node2 -> :node1
+  connect :node2 -> :node3
+  connect :node3 -> :node1
+  connect :node3 -> :node2
+end

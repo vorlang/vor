@@ -4,7 +4,7 @@ defmodule Vor.Codegen.Beam do
   """
 
   def compile(forms, opts \\ []) do
-    compiler_opts = [:return_errors, :return_warnings | opts]
+    compiler_opts = [:return_errors, :return_warnings, :nowarn_unused_vars | opts]
 
     case :compile.forms(forms, compiler_opts) do
       {:ok, module, binary, warnings} ->

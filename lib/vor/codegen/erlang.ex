@@ -355,13 +355,27 @@ defmodule Vor.Codegen.Erlang do
     data_field_pairs = gen_data_field_pairs(agent.data_fields || [], l)
     init_map = {:map, l, param_pairs ++ data_field_pairs}
 
+    # Check if initial state needs a state_timeout for liveness monitoring
+    monitors = agent.monitors || []
+    init_timeout_acts = state_timeout_actions(initial_state, monitors, l)
+
     # Build init body that extracts system metadata if present
     body = gen_init_with_metadata(init_map, l, fn data_var ->
-      {:tuple, l, [
-        {:atom, l, :ok},
-        {:atom, l, initial_state},
-        {:var, l, data_var}
-      ]}
+      case init_timeout_acts do
+        [] ->
+          {:tuple, l, [
+            {:atom, l, :ok},
+            {:atom, l, initial_state},
+            {:var, l, data_var}
+          ]}
+        _ ->
+          {:tuple, l, [
+            {:atom, l, :ok},
+            {:atom, l, initial_state},
+            {:var, l, data_var},
+            list_to_erl(init_timeout_acts, l)
+          ]}
+      end
     end)
 
     {:function, l, :init, 1, [
@@ -508,26 +522,46 @@ defmodule Vor.Codegen.Erlang do
   end
 
   defp gen_state_timeout_clauses(agent, monitors, l) do
+    state_field_name = case agent.state_fields do
+      [%IR.StateField{name: name} | _] -> name
+      _ -> :phase
+    end
+
+    data_field_names = MapSet.new((agent.data_fields || []), fn %IR.DataField{name: name} -> name end)
+
     timeout_handlers = agent.handlers
     |> Enum.filter(fn h -> is_timeout_handler?(h, monitors) end)
 
     Enum.map(timeout_handlers, fn handler ->
       monitor = Enum.find(monitors, fn m -> m.event_tag == handler.pattern.tag end)
 
-      # Find the target state from the handler's actions
-      target = Enum.find_value(handler.actions, fn
-        %IR.Action{type: :transition, data: %IR.TransitionAction{value: v}} when is_atom(v) -> v
-        _ -> nil
-      end) || monitor.target_state
+      # Compile the full handler body for gen_statem
+      {body_exprs, new_state, data_updates, _emit_form} =
+        compile_statem_body(handler.actions, l, state_field_name, data_field_names)
+
+      state_result = case new_state do
+        nil -> {:var, l, :State}
+        value when is_atom(value) -> {:atom, l, value}
+      end
+
+      data_result = case data_updates do
+        [] -> {:var, l, :Data}
+        updates ->
+          map_pairs = Enum.map(updates, fn {field, val_form} ->
+            {:map_field_exact, l, {:atom, l, field}, val_form}
+          end)
+          {:map, l, {:var, l, :Data}, map_pairs}
+      end
 
       excluded = [monitor.target_state | monitor.excluded_states]
       guard = excluded
+      |> Enum.uniq()
       |> Enum.map(fn s -> {:op, l, :"/=", {:var, l, :State}, {:atom, l, s}} end)
 
       {:clause, l,
         [{:atom, l, :state_timeout}, {:atom, l, handler.pattern.tag}, {:var, l, :State}, {:var, l, :Data}],
         [guard],
-        [{:tuple, l, [{:atom, l, :next_state}, {:atom, l, target}, {:var, l, :Data}]}]}
+        body_exprs ++ [{:tuple, l, [{:atom, l, :next_state}, state_result, data_result]}]}
     end)
   end
 
@@ -793,7 +827,8 @@ defmodule Vor.Codegen.Erlang do
       {:integer, n} -> {:integer, l, n}
       {:atom, a} -> {:atom, l, a}
       {:param, name} ->
-        {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+        # Use map_get/2 which is a guard-safe BIF (OTP 21+)
+        {:call, l, {:atom, l, :map_get},
           [{:atom, l, name}, {:var, l, :Data}]}
     end
     [[{:op, l, erl_op, left, right}]]
@@ -1010,19 +1045,24 @@ defmodule Vor.Codegen.Erlang do
       {:remote, l, {:atom, l, mod_atom}, {:atom, l, ext.function}},
       arg_forms}
 
-    # Wrap in try/catch
+    # Wrap in try/catch with unique variable names per extern call
+    suffix = :"#{ext.function}"
+    class_var = :"VorClass_#{suffix}"
+    reason_var = :"VorReason_#{suffix}"
+    stack_var = :"VorStack_#{suffix}"
+
     try_form = {:try, l,
       [call_form],  # body
       [],           # case clauses (none)
       [             # catch clauses
         {:clause, l,
-          [{:tuple, l, [{:var, l, :Class}, {:var, l, :Reason}, {:var, l, :Stacktrace}]}],
+          [{:tuple, l, [{:var, l, class_var}, {:var, l, reason_var}, {:var, l, stack_var}]}],
           [],
           [{:tuple, l, [
             {:atom, l, :vor_extern_error},
-            {:var, l, :Class},
-            {:var, l, :Reason},
-            {:var, l, :Stacktrace}
+            {:var, l, class_var},
+            {:var, l, reason_var},
+            {:var, l, stack_var}
           ]}]}
       ],
       []}           # after (none)
@@ -1047,23 +1087,30 @@ defmodule Vor.Codegen.Erlang do
     end)
     msg = {:tuple, l, [{:atom, l, tag}, {:map, l, msg_pairs}]}
 
-    # Look up registry name from Data/State map
-    registry_ref = {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
-      [{:atom, l, :__vor_registry__}, {:var, l, map_var}]}
+    # Target can be a literal atom or a bound variable
+    target_form = case target do
+      {:bound_var, var} -> {:var, l, erl_var(var)}
+      atom when is_atom(atom) -> {:atom, l, atom}
+    end
 
-    # Via tuple: {:via, Registry, {RegistryName, target}}
-    via = {:tuple, l, [
-      {:atom, l, :via},
-      {:atom, l, Registry},
-      {:tuple, l, [registry_ref, {:atom, l, target}]}
+    # Safe send: check if registry exists, skip if standalone agent
+    registry_lookup = {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+      [{:atom, l, :__vor_registry__}, {:var, l, map_var}, {:atom, l, :undefined}]}
+
+    registry_send = {:call, l,
+      {:remote, l, {:atom, l, :gen_server}, {:atom, l, :cast}},
+      [{:tuple, l, [
+        {:atom, l, :via},
+        {:atom, l, Registry},
+        {:tuple, l, [{:var, l, :VorSendReg}, target_form]}
+      ]}, msg]}
+
+    safe_send = {:case, l, registry_lookup, [
+      {:clause, l, [{:atom, l, :undefined}], [], [{:atom, l, :ok}]},
+      {:clause, l, [{:var, l, :VorSendReg}], [], [registry_send]}
     ]}
 
-    # gen_server:cast(Via, Message)
-    cast_call = {:call, l,
-      {:remote, l, {:atom, l, :gen_server}, {:atom, l, :cast}},
-      [via, msg]}
-
-    [cast_call]
+    [safe_send]
   end
 
   defp action_to_erl(%IR.Action{type: :broadcast, data: %IR.BroadcastAction{tag: tag, fields: fields}}, l, map_var) do
@@ -1073,7 +1120,7 @@ defmodule Vor.Codegen.Erlang do
     end)
     msg = {:tuple, l, [{:atom, l, tag}, {:map, l, msg_pairs}]}
 
-    # Get connections and registry from data map
+    # Get connections and registry from data map (default to empty list for standalone agents)
     connections_ref = {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
       [{:atom, l, :__vor_connections__}, {:var, l, map_var}, {:nil, l}]}
     registry_ref = {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
@@ -1111,9 +1158,16 @@ defmodule Vor.Codegen.Erlang do
 
     foreach_call = {:call, l,
       {:remote, l, {:atom, l, :lists}, {:atom, l, :foreach}},
-      [foreach_fun, connections_ref]}
+      [foreach_fun, {:var, l, :VorBroadcastConns}]}
 
-    [foreach_call]
+    # Safe broadcast: skip if connections is nil (standalone agent)
+    safe_broadcast = {:case, l, connections_ref, [
+      {:clause, l, [{:atom, l, nil}], [], [{:atom, l, :ok}]},
+      {:clause, l, [{:nil, l}], [], [{:atom, l, :ok}]},
+      {:clause, l, [{:var, l, :VorBroadcastConns}], [], [foreach_call]}
+    ]}
+
+    [safe_broadcast]
   end
 
   defp action_to_erl(_action, _l, _map_var), do: []

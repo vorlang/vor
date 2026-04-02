@@ -23,9 +23,14 @@ defmodule Vor.Lowering do
     relations = extract_relations(ast.body)
     relation_map = Map.new(relations, fn r -> {r.name, r} end)
 
+    state_field_name = case state_fields do
+      [%IR.StateField{name: name} | _] -> name
+      _ -> :phase
+    end
+
     monitors = extract_monitors(ast.body, all_states, known_names)
     handlers = extract_handlers(ast.body, known_names, relation_map)
-    timeout_handlers = generate_timeout_handlers(monitors, known_names)
+    timeout_handlers = generate_timeout_handlers(monitors, known_names, state_field_name)
 
     ir = %IR.Agent{
       name: ast.name,
@@ -160,7 +165,7 @@ defmodule Vor.Lowering do
 
     %IR.Handler{
       pattern: lower_pattern(pattern),
-      guard: lower_guard(guard),
+      guard: lower_guard(guard, param_names),
       actions: actions
     }
   end
@@ -216,29 +221,36 @@ defmodule Vor.Lowering do
     }
   end
 
-  defp lower_guard(nil), do: nil
+  defp lower_guard(nil, _known_names), do: nil
 
-  defp lower_guard(%AST.Guard{field: field, op: op, value: value}) do
+  defp lower_guard(%AST.Guard{field: field, op: op, value: value}, known_names) do
     %IR.GuardExpr{
       field: to_atom(field),
       op: op,
-      value: lower_guard_value(value)
+      value: lower_guard_value(value, known_names)
     }
   end
 
-  defp lower_guard(%AST.CompoundGuard{op: op, left: left, right: right}) do
+  defp lower_guard(%AST.CompoundGuard{op: op, left: left, right: right}, known_names) do
     %IR.CompoundGuardExpr{
       op: op,
-      left: lower_guard(left),
-      right: lower_guard(right)
+      left: lower_guard(left, known_names),
+      right: lower_guard(right, known_names)
     }
   end
 
-  defp lower_guard_value({:atom, v}), do: {:atom, to_atom(v)}
-  defp lower_guard_value({:var, v}), do: {:var, to_atom(v)}
-  defp lower_guard_value({:integer, n}), do: {:integer, n}
-  defp lower_guard_value({:range, low, high}), do: {:range, low, high}
-  defp lower_guard_value(other), do: other
+  defp lower_guard_value({:atom, v}, _known_names), do: {:atom, to_atom(v)}
+  defp lower_guard_value({:var, v}, known_names) do
+    var_atom = to_atom(v)
+    if MapSet.member?(known_names, var_atom) do
+      {:param, var_atom}
+    else
+      {:var, var_atom}
+    end
+  end
+  defp lower_guard_value({:integer, n}, _known_names), do: {:integer, n}
+  defp lower_guard_value({:range, low, high}, _known_names), do: {:range, low, high}
+  defp lower_guard_value(other, _known_names), do: other
 
   defp lower_action(%AST.Emit{tag: tag, fields: fields}, param_names) do
     %IR.Action{
@@ -400,10 +412,14 @@ defmodule Vor.Lowering do
   end
 
   defp lower_action(%AST.Send{target: target, tag: tag, fields: fields}, param_names) do
+    lowered_target = case target do
+      {:var, name} -> {:bound_var, to_atom(name)}
+      name -> to_atom(name)
+    end
     %IR.Action{
       type: :send,
       data: %IR.SendAction{
-        target: to_atom(target),
+        target: lowered_target,
         tag: to_atom(tag),
         fields: Enum.map(fields, fn
           {field, {:var, var}} -> {to_atom(field), lower_value_ref(var, param_names)}
@@ -563,14 +579,14 @@ defmodule Vor.Lowering do
     excluded = tokens
     |> Enum.chunk_every(3, 1, :discard)
     |> Enum.flat_map(fn
-      [{:identifier, _, :phase}, {:operator, _, :!=}, {:atom, _, state}] -> [String.to_atom(state)]
+      [{:identifier, _, _field}, {:operator, _, :!=}, {:atom, _, state}] -> [String.to_atom(state)]
       _ -> []
     end)
 
     target = tokens
     |> Enum.chunk_every(3, 1, :discard)
     |> Enum.find_value(fn
-      [{:identifier, _, :phase}, {:operator, _, :==}, {:atom, _, state}] -> String.to_atom(state)
+      [{:identifier, _, _field}, {:operator, _, :==}, {:atom, _, state}] -> String.to_atom(state)
       _ -> nil
     end)
 
@@ -579,12 +595,12 @@ defmodule Vor.Lowering do
 
   defp parse_liveness_states(_), do: {[], :terminated}
 
-  defp generate_timeout_handlers(monitors, known_names) do
+  defp generate_timeout_handlers(monitors, known_names, state_field_name) do
     Enum.map(monitors, fn %IR.LivenessMonitor{} = monitor ->
       actions = Enum.map(monitor.resilience_actions, &lower_action(&1, known_names))
 
       actions = if actions == [] do
-        [%IR.Action{type: :transition, data: %IR.TransitionAction{field: :phase, value: monitor.target_state}}]
+        [%IR.Action{type: :transition, data: %IR.TransitionAction{field: state_field_name, value: monitor.target_state}}]
       else
         actions
       end
@@ -593,7 +609,7 @@ defmodule Vor.Lowering do
 
       %IR.Handler{
         pattern: %IR.MatchPattern{tag: monitor.event_tag, bindings: []},
-        guard: %IR.GuardExpr{field: :phase, op: :not_in, value: {:states, excluded}},
+        guard: %IR.GuardExpr{field: state_field_name, op: :not_in, value: {:states, excluded}},
         actions: actions
       }
     end)
