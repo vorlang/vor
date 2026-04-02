@@ -64,7 +64,7 @@ The equivalent in Elixir would be a gen_server with manual rate tracking, `propl
 - Protocol composition checking — `system` blocks verify connected agents have compatible protocols
 - Protocol conformance checking
 - Working rate limiter and circuit breaker examples
-- 67 tests passing
+- 73 tests passing
 
 ## Verified state machine
 

@@ -20,9 +20,11 @@ Key files:
 ## Agent compilation targets
 
 - Agent with no `state` declaration → gen_server
+- Agent with non-enum state fields only (`state count: integer`) → gen_server with state map
 - Agent with `state phase: :a | :b | :c` (enum union) → gen_statem
 - First enum-typed state field → gen_statem State atom
-- Additional state fields → entries in the gen_statem Data map with type defaults (integer→0, atom→nil)
+- Additional state fields → entries in the Data/State map with type defaults (integer→0, atom→nil, map→%{}, list→[], binary→<<>>)
+- Parameters and state fields share the same map for both gen_server and gen_statem
 
 ## What works in handler bodies
 

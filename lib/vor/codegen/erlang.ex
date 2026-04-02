@@ -62,7 +62,9 @@ defmodule Vor.Codegen.Erlang do
   end
 
   defp gen_init_server(agent, l) do
-    init_map = gen_params_map(agent.params, l)
+    param_pairs = gen_params_map_pairs(agent.params, l)
+    data_field_pairs = gen_data_field_pairs(agent.data_fields || [], l)
+    init_map = {:map, l, param_pairs ++ data_field_pairs}
     {:function, l, :init, 1, [
       {:clause, l, [{:var, l, :Args}], [],
         [{:tuple, l, [{:atom, l, :ok}, init_map]}]}
@@ -110,21 +112,49 @@ defmodule Vor.Codegen.Erlang do
   defp compile_handler_body(actions, l, map_var) do
     {pre_actions, terminal} = split_terminal(actions)
 
-    pre_exprs = Enum.flat_map(pre_actions, &action_to_erl(&1, l, map_var))
+    # Separate transitions from other pre-actions
+    {transitions, other_pre} = Enum.split_with(pre_actions, fn a -> a.type == :transition end)
+
+    pre_exprs = Enum.flat_map(other_pre, &action_to_erl(&1, l, map_var))
+
+    # Generate state update from transitions
+    {state_update_exprs, state_var} = gen_server_state_updates(transitions, l)
+
+    # After state updates, emit should reference the updated state variable
+    emit_map_var = if transitions != [], do: :NewState, else: map_var
 
     terminal_expr = case terminal do
       %IR.Action{type: :emit, data: emit} ->
-        reply_form = emit_to_erl(emit, l, map_var)
-        {:tuple, l, [{:atom, l, :reply}, reply_form, {:var, l, :State}]}
+        reply_form = emit_to_erl(emit, l, emit_map_var)
+        {:tuple, l, [{:atom, l, :reply}, reply_form, {:var, l, state_var}]}
 
       %IR.Action{type: :conditional, data: %IR.ConditionalAction{} = cond_action} ->
-        compile_conditional(cond_action, l, map_var)
+        compile_conditional_genserver(cond_action, l, emit_map_var, state_var)
 
       nil ->
-        {:tuple, l, [{:atom, l, :reply}, {:atom, l, :ok}, {:var, l, :State}]}
+        {:tuple, l, [{:atom, l, :reply}, {:atom, l, :ok}, {:var, l, state_var}]}
     end
 
-    pre_exprs ++ [terminal_expr]
+    pre_exprs ++ state_update_exprs ++ [terminal_expr]
+  end
+
+  # Generate state map updates for gen_server transitions
+  defp gen_server_state_updates([], _l), do: {[], :State}
+  defp gen_server_state_updates(transitions, l) do
+    map_pairs = Enum.map(transitions, fn %IR.Action{type: :transition, data: %IR.TransitionAction{field: field, value: value}} ->
+      {:map_field_exact, l, {:atom, l, field}, transition_value_to_erl(value, l, :State)}
+    end)
+    update_expr = {:match, l, {:var, l, :NewState}, {:map, l, {:var, l, :State}, map_pairs}}
+    {[update_expr], :NewState}
+  end
+
+  defp transition_value_to_erl(value, l, map_var) when is_atom(value), do: {:atom, l, value}
+  defp transition_value_to_erl({:integer, n}, l, _map_var), do: {:integer, l, n}
+  defp transition_value_to_erl({:atom, a}, l, _map_var), do: {:atom, l, a}
+  defp transition_value_to_erl({:bound_var, var}, l, _map_var), do: {:var, l, erl_var(var)}
+  defp transition_value_to_erl({:param, name}, l, map_var), do: value_to_erl({:param, name}, l, map_var)
+  defp transition_value_to_erl({:arith, op, left, right}, l, map_var) do
+    {:op, l, arith_op(op), value_to_erl(left, l, map_var), value_to_erl(right, l, map_var)}
   end
 
   defp split_terminal(actions) do
@@ -133,6 +163,18 @@ defmodule Vor.Codegen.Erlang do
       nil -> {actions, nil}
       idx -> {Enum.take(actions, idx), Enum.at(actions, idx)}
     end
+  end
+
+  defp compile_conditional_genserver(%IR.ConditionalAction{condition: cond_ir, then_actions: then_acts, else_actions: else_acts}, l, map_var, _state_var) do
+    cond_form = condition_to_erl(cond_ir, l, map_var)
+
+    then_body = compile_handler_body(then_acts, l, map_var)
+    else_body = compile_handler_body(else_acts, l, map_var)
+
+    {:case, l, cond_form, [
+      {:clause, l, [{:atom, l, true}], [], then_body},
+      {:clause, l, [{:atom, l, false}], [], else_body}
+    ]}
   end
 
   defp compile_conditional(%IR.ConditionalAction{condition: cond_ir, then_actions: then_acts, else_actions: else_acts}, l, map_var) do
@@ -627,8 +669,11 @@ defmodule Vor.Codegen.Erlang do
 
   defp gen_data_field_pairs([], _l), do: []
   defp gen_data_field_pairs(data_fields, l) do
-    Enum.map(data_fields, fn %IR.DataField{name: name, default: default} ->
+    Enum.map(data_fields, fn %IR.DataField{name: name, type: type, default: default} ->
       default_form = case default do
+        :__empty_map__ -> {:map, l, []}
+        :__empty_list__ -> {:nil, l}
+        :__empty_binary__ -> {:bin, l, []}
         nil -> {:atom, l, nil}
         0 -> {:integer, l, 0}
         n when is_integer(n) -> {:integer, l, n}

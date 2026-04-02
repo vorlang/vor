@@ -96,6 +96,9 @@ defmodule Vor.Lowering do
           :integer -> 0
           :atom -> nil
           :term -> nil
+          :map -> :__empty_map__
+          :list -> :__empty_list__
+          :binary -> :__empty_binary__
           _ -> nil
         end
         {to_atom(t), d}
