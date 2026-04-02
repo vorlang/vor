@@ -55,7 +55,7 @@ defmodule Vor.Graph do
 
   defp extract_handler_transitions(actions, from_state, trigger) do
     Enum.flat_map(actions, fn
-      %IR.Action{type: :transition, data: %IR.TransitionAction{field: :phase, value: to}} ->
+      %IR.Action{type: :transition, data: %IR.TransitionAction{value: to}} when is_atom(to) ->
         [%{from: from_state, to: to, trigger: trigger}]
 
       %IR.Action{type: :conditional, data: %IR.ConditionalAction{then_actions: then_acts, else_actions: else_acts}} ->
@@ -93,7 +93,8 @@ defmodule Vor.Graph do
   end
 
   # Extract which state a handler's guard constrains
-  defp guard_state(%IR.GuardExpr{field: :phase, op: :==, value: {:atom, state}}), do: state
+  # Match any guard that checks a field == atom (the state field name may vary)
+  defp guard_state(%IR.GuardExpr{op: :==, value: {:atom, state}}), do: state
   defp guard_state(%IR.CompoundGuardExpr{left: left}), do: guard_state(left)
   defp guard_state(_), do: nil
 

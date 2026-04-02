@@ -11,6 +11,7 @@ defmodule Vor.IR do
       :behaviour,
       :params,
       :state_fields,
+      :data_fields,
       :protocol,
       :handlers,
       :relations,
@@ -91,6 +92,18 @@ defmodule Vor.IR do
 
   defmodule Condition do
     defstruct [:left, :op, :right]
+  end
+
+  defmodule DataField do
+    defstruct [:name, :type, :default]
+  end
+
+  defmodule VarBindingAction do
+    defstruct [:name, :expr]
+  end
+
+  defmodule CompoundCondition do
+    defstruct [:op, :left, :right]
   end
 
   defmodule LivenessMonitor do

@@ -7,19 +7,22 @@ defmodule Vor.Lowering do
   alias Vor.{AST, IR}
 
   def lower(%AST.Agent{} = ast) do
-    state_fields = extract_state_fields(ast.body)
+    {state_fields, data_fields} = extract_state_and_data_fields(ast.body)
     has_state = state_fields != []
     params = extract_params(ast.params)
     param_names = MapSet.new(params, fn {name, _type} -> name end)
+    data_field_names = MapSet.new(data_fields, fn %IR.DataField{name: name} -> name end)
+    # Combine param_names and data_field_names for variable resolution
+    known_names = MapSet.union(param_names, data_field_names)
 
     all_states = case state_fields do
       [%IR.StateField{values: vals} | _] -> vals
       _ -> []
     end
 
-    monitors = extract_monitors(ast.body, all_states, param_names)
-    handlers = extract_handlers(ast.body, param_names)
-    timeout_handlers = generate_timeout_handlers(monitors, param_names)
+    monitors = extract_monitors(ast.body, all_states, known_names)
+    handlers = extract_handlers(ast.body, known_names)
+    timeout_handlers = generate_timeout_handlers(monitors, known_names)
 
     ir = %IR.Agent{
       name: ast.name,
@@ -27,6 +30,7 @@ defmodule Vor.Lowering do
       behaviour: if(has_state, do: :gen_statem, else: :gen_server),
       params: params,
       state_fields: state_fields,
+      data_fields: data_fields,
       protocol: extract_protocol(ast.body),
       handlers: handlers ++ timeout_handlers,
       relations: extract_relations(ast.body),
@@ -49,12 +53,56 @@ defmodule Vor.Lowering do
   defp to_atom(v) when is_atom(v), do: v
   defp to_atom(v) when is_binary(v), do: String.to_atom(v)
 
-  defp extract_state_fields(body) do
-    body
-    |> Enum.filter(&match?(%AST.StateDecl{}, &1))
-    |> Enum.map(fn %AST.StateDecl{field: field, type_union: types} ->
-      %IR.StateField{name: to_atom(field), values: Enum.map(types, &to_atom/1), initial: to_atom(List.first(types))}
+  defp extract_state_and_data_fields(body) do
+    decls = Enum.filter(body, &match?(%AST.StateDecl{}, &1))
+
+    # First state decl with a | union of atoms becomes the state field
+    # All others become data fields
+    {state_fields, data_fields} =
+      Enum.reduce(decls, {[], []}, fn %AST.StateDecl{field: field, type_union: types}, {sf, df} ->
+        cond do
+          # Already have a state field, or this is a type reference (not enum)
+          sf != [] ->
+            {sf, [make_data_field(field, types) | df]}
+
+          is_enum_type?(types) ->
+            state = %IR.StateField{
+              name: to_atom(field),
+              values: Enum.map(types, &to_atom/1),
+              initial: to_atom(List.first(types))
+            }
+            {[state], df}
+
+          true ->
+            {sf, [make_data_field(field, types) | df]}
+        end
+      end)
+
+    {state_fields, Enum.reverse(data_fields)}
+  end
+
+  defp is_enum_type?(types) do
+    # An enum type has multiple atoms joined by |
+    length(types) > 1 and Enum.all?(types, fn
+      {:type, _} -> false
+      _ -> true
     end)
+  end
+
+  defp make_data_field(field, types) do
+    {type, default} = case types do
+      [{:type, t}] ->
+        d = case to_atom(t) do
+          :integer -> 0
+          :atom -> nil
+          :term -> nil
+          _ -> nil
+        end
+        {to_atom(t), d}
+      _ ->
+        {:atom, nil}
+    end
+    %IR.DataField{name: to_atom(field), type: type, default: default}
   end
 
   defp extract_protocol(body) do
@@ -126,6 +174,7 @@ defmodule Vor.Lowering do
 
   defp lower_guard_value({:atom, v}), do: {:atom, to_atom(v)}
   defp lower_guard_value({:var, v}), do: {:var, to_atom(v)}
+  defp lower_guard_value({:integer, n}), do: {:integer, n}
   defp lower_guard_value({:range, low, high}), do: {:range, low, high}
   defp lower_guard_value(other), do: other
 
@@ -141,6 +190,8 @@ defmodule Vor.Lowering do
             {to_atom(field), {:atom, to_atom(val)}}
           {field, {:expr, %AST.ArithExpr{op: op, left: left, right: right}}} ->
             {to_atom(field), {:arith, op, lower_expr_operand(left, param_names), lower_expr_operand(right, param_names)}}
+          {field, {:integer, n}} ->
+            {to_atom(field), {:integer, n}}
         end)
       }
     }
@@ -157,7 +208,37 @@ defmodule Vor.Lowering do
     }
   end
 
-  defp lower_action(%AST.Transition{field: field, value: value}, _param_names) do
+  defp lower_action(%AST.Transition{field: field, value: {:expr, %AST.ArithExpr{op: op, left: left, right: right}}}, param_names) do
+    %IR.Action{
+      type: :transition,
+      data: %IR.TransitionAction{
+        field: to_atom(field),
+        value: {:arith, op, lower_expr_operand(left, param_names), lower_expr_operand(right, param_names)}
+      }
+    }
+  end
+
+  defp lower_action(%AST.Transition{field: field, value: {:var, var}}, param_names) do
+    %IR.Action{
+      type: :transition,
+      data: %IR.TransitionAction{
+        field: to_atom(field),
+        value: lower_value_ref(var, param_names)
+      }
+    }
+  end
+
+  defp lower_action(%AST.Transition{field: field, value: {:integer, n}}, _param_names) do
+    %IR.Action{
+      type: :transition,
+      data: %IR.TransitionAction{
+        field: to_atom(field),
+        value: {:integer, n}
+      }
+    }
+  end
+
+  defp lower_action(%AST.Transition{field: field, value: value}, _param_names) when is_atom(value) or is_binary(value) do
     %IR.Action{
       type: :transition,
       data: %IR.TransitionAction{
@@ -195,6 +276,46 @@ defmodule Vor.Lowering do
     }
   end
 
+  defp lower_action(%AST.VarBinding{name: name, expr: %AST.ArithExpr{op: op, left: left, right: right}}, param_names) do
+    %IR.Action{
+      type: :var_binding,
+      data: %IR.VarBindingAction{
+        name: to_atom(name),
+        expr: {:arith, op, lower_expr_operand(left, param_names), lower_expr_operand(right, param_names)}
+      }
+    }
+  end
+
+  defp lower_action(%AST.VarBinding{name: name, expr: {:var, var}}, param_names) do
+    %IR.Action{
+      type: :var_binding,
+      data: %IR.VarBindingAction{
+        name: to_atom(name),
+        expr: lower_value_ref(var, param_names)
+      }
+    }
+  end
+
+  defp lower_action(%AST.VarBinding{name: name, expr: {:atom, val}}, _param_names) do
+    %IR.Action{
+      type: :var_binding,
+      data: %IR.VarBindingAction{
+        name: to_atom(name),
+        expr: {:atom, to_atom(val)}
+      }
+    }
+  end
+
+  defp lower_action(%AST.VarBinding{name: name, expr: {:integer, val}}, _param_names) do
+    %IR.Action{
+      type: :var_binding,
+      data: %IR.VarBindingAction{
+        name: to_atom(name),
+        expr: {:integer, val}
+      }
+    }
+  end
+
   defp lower_action(%AST.ExternCall{module: mod, function: func, args: args, bind: bind}, param_names) do
     %IR.Action{
       type: :extern_call,
@@ -211,9 +332,10 @@ defmodule Vor.Lowering do
     }
   end
 
-  defp lower_value_ref(var, param_names) do
+  defp lower_value_ref(var, known_names) do
     var_atom = to_atom(var)
-    if MapSet.member?(param_names, var_atom) do
+    if MapSet.member?(known_names, var_atom) do
+      # Both params and data fields are stored in the same map (State for gen_server, Data for gen_statem)
       {:param, var_atom}
     else
       {:bound_var, var_atom}
@@ -229,6 +351,14 @@ defmodule Vor.Lowering do
       left: lower_expr_operand(left, param_names),
       op: op,
       right: lower_expr_operand(right, param_names)
+    }
+  end
+
+  defp lower_condition(%AST.CompoundComparison{op: op, left: left, right: right}, param_names) do
+    %IR.CompoundCondition{
+      op: op,
+      left: lower_condition(left, param_names),
+      right: lower_condition(right, param_names)
     }
   end
 
@@ -270,7 +400,7 @@ defmodule Vor.Lowering do
   defp lower_fact_value({:multiply, a, b}), do: {:multiply, lower_fact_value(a), lower_fact_value(b)}
   defp lower_fact_value(other), do: other
 
-  defp extract_monitors(body, all_states, _param_names) do
+  defp extract_monitors(body, all_states, _known_names) do
     liveness_invariants =
       body
       |> Enum.filter(fn
@@ -316,8 +446,6 @@ defmodule Vor.Lowering do
     |> Map.new()
   end
 
-  # Parse liveness body tokens to extract excluded and target states
-  # Pattern: always(phase != :excluded implies eventually(phase == :target))
   defp parse_liveness_states(tokens) when is_list(tokens) do
     excluded = tokens
     |> Enum.chunk_every(3, 1, :discard)
@@ -338,12 +466,10 @@ defmodule Vor.Lowering do
 
   defp parse_liveness_states(_), do: {[], :terminated}
 
-  defp generate_timeout_handlers(monitors, param_names) do
+  defp generate_timeout_handlers(monitors, known_names) do
     Enum.map(monitors, fn %IR.LivenessMonitor{} = monitor ->
-      # Create a synthetic handler for the timeout event
-      actions = Enum.map(monitor.resilience_actions, &lower_action(&1, param_names))
+      actions = Enum.map(monitor.resilience_actions, &lower_action(&1, known_names))
 
-      # If no resilience actions specified, just transition to target
       actions = if actions == [] do
         [%IR.Action{type: :transition, data: %IR.TransitionAction{field: :phase, value: monitor.target_state}}]
       else

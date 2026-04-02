@@ -72,13 +72,35 @@ defmodule Vor.Analysis.ProtocolChecker do
       end)
       |> MapSet.new(fn %IR.Action{data: %{bind: bind}} -> bind end)
 
-    bound_vars = MapSet.union(pattern_vars, extern_vars)
+    # Variables bound by var bindings
+    binding_vars =
+      actions
+      |> Enum.filter(fn
+        %IR.Action{type: :var_binding} -> true
+        _ -> false
+      end)
+      |> MapSet.new(fn %IR.Action{data: %{name: name}} -> name end)
 
-    for %IR.Action{type: :emit, data: %IR.EmitAction{fields: fields}} <- actions,
-        {_field, {:bound_var, var}} <- fields,
-        not MapSet.member?(bound_vars, var) do
-      {:error, :unbound_variable, var}
-    end
+    bound_vars = MapSet.union(pattern_vars, extern_vars) |> MapSet.union(binding_vars)
+
+    # Check emits at top level and inside conditionals
+    check_emit_scoping(actions, bound_vars)
+  end
+
+  defp check_emit_scoping(actions, bound_vars) do
+    Enum.flat_map(actions, fn
+      %IR.Action{type: :emit, data: %IR.EmitAction{fields: fields}} ->
+        for {_field, {:bound_var, var}} <- fields,
+            not MapSet.member?(bound_vars, var) do
+          {:error, :unbound_variable, var}
+        end
+
+      %IR.Action{type: :conditional, data: %IR.ConditionalAction{then_actions: then_acts, else_actions: else_acts}} ->
+        check_emit_scoping(then_acts, bound_vars) ++
+        check_emit_scoping(else_acts, bound_vars)
+
+      _ -> []
+    end)
   end
 
   defp check_unhandled_accepts(%IR.Agent{protocol: proto, handlers: handlers}) do

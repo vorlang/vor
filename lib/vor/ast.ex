@@ -110,4 +110,12 @@ defmodule Vor.AST do
   defmodule VarRef do
     defstruct [:name, :meta]
   end
+
+  defmodule VarBinding do
+    defstruct [:name, :expr, :meta]
+  end
+
+  defmodule CompoundComparison do
+    defstruct [:op, :left, :right, :meta]
+  end
 end

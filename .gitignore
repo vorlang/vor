@@ -27,3 +27,6 @@ vor-*.tar
 
 # Internal directions (never push)
 /directions/
+
+# Claude Code worktrees
+/.claude/

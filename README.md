@@ -54,14 +54,16 @@ The equivalent in Elixir would be a gen_server with manual rate tracking, `propl
 - Parameterized agents with configuration passed at init
 - Extern declarations for calling Erlang/Elixir from Vor agents (untrusted, try/catch wrapped)
 - Relations with facts, state declarations, protocols, handlers with guards
-- Conditional logic (`if/else`) and arithmetic expressions in handlers
+- Multiple state fields — enum field as gen_statem State, others in Data map
+- Richer expressions — variable binding, nested if/else, boolean conditions, comparison guards
+- Transition with expressions — `transition count: count + 1`
 - Compile-time safety verification — `proven` invariants checked against the state graph
 - State graph extraction with text and Mermaid diagram output (`mix vor.graph`)
 - Runtime liveness monitoring — stuck processes rescued by gen_statem state timeouts
 - Safety and liveness invariant declarations with guarantee tiers (proven, checked, monitored)
 - Protocol conformance checking
 - Working rate limiter and circuit breaker examples
-- 54 tests passing
+- 56 tests passing
 
 ## Verified state machine
 

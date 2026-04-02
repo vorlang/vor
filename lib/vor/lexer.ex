@@ -99,6 +99,8 @@ defmodule Vor.Lexer do
       string("==") |> replace(:==),
       string("!=") |> replace(:!=),
       string("..") |> replace(:range),
+      string(">") |> replace(:>),
+      string("<") |> replace(:<),
       string("=") |> replace(:equals),
       string("*") |> replace(:star),
       string("+") |> replace(:plus),

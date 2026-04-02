@@ -246,6 +246,21 @@ defmodule Vor.Parser do
     parse_binding_fields(rest, [{field, {:expr, expr}} | acc])
   end
 
+  # field: Integer OP Var (int-first arithmetic)
+  defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon},
+                             {:integer, _, left}, {:operator, _, op},
+                             {:identifier, _, right} | rest], acc)
+       when op in [:minus, :plus, :star, :slash] do
+    expr = %AST.ArithExpr{op: op, left: {:integer, left}, right: {:var, right}}
+    parse_binding_fields(rest, [{field, {:expr, expr}} | acc])
+  end
+
+  # field: Integer (integer literal in binding)
+  defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon},
+                             {:integer, _, value} | rest], acc) do
+    parse_binding_fields(rest, [{field, {:integer, value}} | acc])
+  end
+
   # field: Var
   defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon}, {:identifier, _, var} | rest], acc) do
     parse_binding_fields(rest, [{field, {:var, var}} | acc])
@@ -294,6 +309,21 @@ defmodule Vor.Parser do
 
   defp parse_guard_comparison([{:identifier, _, field}, {:operator, _, :==}, {:identifier, _, value} | rest]) do
     {:ok, %AST.Guard{field: field, op: :==, value: {:var, value}}, rest}
+  end
+
+  defp parse_guard_comparison([{:identifier, _, field}, {:operator, _, :==}, {:integer, _, value} | rest]) do
+    {:ok, %AST.Guard{field: field, op: :==, value: {:integer, value}}, rest}
+  end
+
+  # field > value, field < value, field >= value, field <= value
+  defp parse_guard_comparison([{:identifier, _, field}, {:operator, _, op}, {:identifier, _, value} | rest])
+       when op in [:>, :<, :>=, :<=] do
+    {:ok, %AST.Guard{field: field, op: op, value: {:var, value}}, rest}
+  end
+
+  defp parse_guard_comparison([{:identifier, _, field}, {:operator, _, op}, {:integer, _, value} | rest])
+       when op in [:>, :<, :>=, :<=] do
+    {:ok, %AST.Guard{field: field, op: op, value: {:integer, value}}, rest}
   end
 
   # S in 100..199
@@ -413,6 +443,51 @@ defmodule Vor.Parser do
     end
   end
 
+  # var = Var OP Var (arithmetic binding)
+  defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                            {:identifier, _, left}, {:operator, _, op},
+                            {:identifier, _, right} | rest], acc)
+       when op in [:minus, :plus, :star, :slash] do
+    expr = %AST.ArithExpr{op: op, left: {:var, left}, right: {:var, right}}
+    parse_handler_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
+  end
+
+  # var = Var OP Integer (arithmetic binding)
+  defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                            {:identifier, _, left}, {:operator, _, op},
+                            {:integer, _, right} | rest], acc)
+       when op in [:minus, :plus, :star, :slash] do
+    expr = %AST.ArithExpr{op: op, left: {:var, left}, right: {:integer, right}}
+    parse_handler_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
+  end
+
+  # var = Integer OP Var (int-first arithmetic binding)
+  defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                            {:integer, _, left}, {:operator, _, op},
+                            {:identifier, _, right} | rest], acc)
+       when op in [:minus, :plus, :star, :slash] do
+    expr = %AST.ArithExpr{op: op, left: {:integer, left}, right: {:var, right}}
+    parse_handler_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
+  end
+
+  # var = :atom (atom literal binding)
+  defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                            {:atom, _, value} | rest], acc) do
+    parse_handler_body(rest, [%AST.VarBinding{name: bind_var, expr: {:atom, value}, meta: meta} | acc])
+  end
+
+  # var = integer (integer literal binding)
+  defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                            {:integer, _, value} | rest], acc) do
+    parse_handler_body(rest, [%AST.VarBinding{name: bind_var, expr: {:integer, value}, meta: meta} | acc])
+  end
+
+  # var = Var (simple copy binding) — must come after extern call patterns
+  defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                            {:identifier, _, source_var} | rest], acc) do
+    parse_handler_body(rest, [%AST.VarBinding{name: bind_var, expr: {:var, source_var}, meta: meta} | acc])
+  end
+
   defp parse_handler_body([{:identifier, meta, name} | rest], acc) do
     # Bare function call
     parse_handler_body(rest, [%AST.FunctionCall{name: name, args: [], meta: meta} | acc])
@@ -475,6 +550,7 @@ defmodule Vor.Parser do
   end
 
   # Parse handler body stopping at `else` or `end`, returning which was found
+  # Supports all the same statements as parse_handler_body
   defp parse_if_body([{:keyword, _, :else} | rest], acc), do: {:ok, Enum.reverse(acc), :else, rest}
   defp parse_if_body([{:keyword, _, :end} | rest], acc), do: {:ok, Enum.reverse(acc), :end, rest}
 
@@ -492,21 +568,80 @@ defmodule Vor.Parser do
     end
   end
 
+  # Nested if/else inside if body
+  defp parse_if_body([{:keyword, meta, :if} | rest], acc) do
+    case parse_if_else(rest, meta) do
+      {:ok, if_node, rest} -> parse_if_body(rest, [if_node | acc])
+      {:error, _} = err -> err
+    end
+  end
+
+  # var = Var OP Var (arithmetic binding in if body)
+  defp parse_if_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                       {:identifier, _, left}, {:operator, _, op},
+                       {:identifier, _, right} | rest], acc)
+       when op in [:minus, :plus, :star, :slash] do
+    expr = %AST.ArithExpr{op: op, left: {:var, left}, right: {:var, right}}
+    parse_if_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
+  end
+
+  # var = Var OP Integer (arithmetic binding in if body)
+  defp parse_if_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                       {:identifier, _, left}, {:operator, _, op},
+                       {:integer, _, right} | rest], acc)
+       when op in [:minus, :plus, :star, :slash] do
+    expr = %AST.ArithExpr{op: op, left: {:var, left}, right: {:integer, right}}
+    parse_if_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
+  end
+
+  # var = Integer OP Var (int-first arithmetic in if body)
+  defp parse_if_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                       {:integer, _, left}, {:operator, _, op},
+                       {:identifier, _, right} | rest], acc)
+       when op in [:minus, :plus, :star, :slash] do
+    expr = %AST.ArithExpr{op: op, left: {:integer, left}, right: {:var, right}}
+    parse_if_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
+  end
+
   defp parse_if_body([token | _], _acc), do: {:error, {:unexpected_in_if, token}}
   defp parse_if_body([], _acc), do: {:error, :unexpected_eof}
 
-  # Condition: expr OP expr (e.g., current <= max_requests)
-  defp parse_condition([{:identifier, _, left}, {:operator, _, op}, {:identifier, _, right} | rest])
-       when op in [:<=, :>=, :==, :!=] do
+  # Condition: supports and/or boolean logic
+  defp parse_condition(tokens) do
+    case parse_single_condition(tokens) do
+      {:ok, left, [{:keyword, _, :and} | rest]} ->
+        case parse_condition(rest) do
+          {:ok, right, rest} ->
+            {:ok, %AST.CompoundComparison{op: :and, left: left, right: right}, rest}
+          err -> err
+        end
+      {:ok, left, [{:keyword, _, :or} | rest]} ->
+        case parse_condition(rest) do
+          {:ok, right, rest} ->
+            {:ok, %AST.CompoundComparison{op: :or, left: left, right: right}, rest}
+          err -> err
+        end
+      other -> other
+    end
+  end
+
+  # Single comparison: expr OP expr
+  defp parse_single_condition([{:identifier, _, left}, {:operator, _, op}, {:identifier, _, right} | rest])
+       when op in [:<=, :>=, :==, :!=, :>, :<] do
     {:ok, %AST.Comparison{left: {:var, left}, op: op, right: {:var, right}}, rest}
   end
 
-  defp parse_condition([{:identifier, _, left}, {:operator, _, op}, {:integer, _, right} | rest])
-       when op in [:<=, :>=, :==, :!=] do
+  defp parse_single_condition([{:identifier, _, left}, {:operator, _, op}, {:integer, _, right} | rest])
+       when op in [:<=, :>=, :==, :!=, :>, :<] do
     {:ok, %AST.Comparison{left: {:var, left}, op: op, right: {:integer, right}}, rest}
   end
 
-  defp parse_condition([token | _]), do: {:error, {:expected_condition, token}}
+  defp parse_single_condition([{:integer, _, left}, {:operator, _, op}, {:identifier, _, right} | rest])
+       when op in [:<=, :>=, :==, :!=, :>, :<] do
+    {:ok, %AST.Comparison{left: {:integer, left}, op: op, right: {:var, right}}, rest}
+  end
+
+  defp parse_single_condition([token | _]), do: {:error, {:expected_condition, token}}
 
   # --- Arithmetic expressions in emit fields ---
   # Extends parse_binding_field to handle: field: EXPR - EXPR, field: EXPR + EXPR
@@ -551,10 +686,48 @@ defmodule Vor.Parser do
 
   defp parse_emit([token | _], _meta), do: {:error, {:expected_emit_message, token}}
 
-  # --- Transition: transition field: :value ---
+  # --- Transition: transition field: expr ---
 
+  # transition field: :atom
   defp parse_transition([{:identifier, _, field}, {:delimiter, _, :colon}, {:atom, _, value} | rest], meta) do
     {:ok, %AST.Transition{field: field, value: value, meta: meta}, rest}
+  end
+
+  # transition field: Var OP Var
+  defp parse_transition([{:identifier, _, field}, {:delimiter, _, :colon},
+                          {:identifier, _, left}, {:operator, _, op},
+                          {:identifier, _, right} | rest], meta)
+       when op in [:minus, :plus, :star, :slash] do
+    expr = %AST.ArithExpr{op: op, left: {:var, left}, right: {:var, right}}
+    {:ok, %AST.Transition{field: field, value: {:expr, expr}, meta: meta}, rest}
+  end
+
+  # transition field: Var OP Integer
+  defp parse_transition([{:identifier, _, field}, {:delimiter, _, :colon},
+                          {:identifier, _, left}, {:operator, _, op},
+                          {:integer, _, right} | rest], meta)
+       when op in [:minus, :plus, :star, :slash] do
+    expr = %AST.ArithExpr{op: op, left: {:var, left}, right: {:integer, right}}
+    {:ok, %AST.Transition{field: field, value: {:expr, expr}, meta: meta}, rest}
+  end
+
+  # transition field: Integer OP Var
+  defp parse_transition([{:identifier, _, field}, {:delimiter, _, :colon},
+                          {:integer, _, left}, {:operator, _, op},
+                          {:identifier, _, right} | rest], meta)
+       when op in [:minus, :plus, :star, :slash] do
+    expr = %AST.ArithExpr{op: op, left: {:integer, left}, right: {:var, right}}
+    {:ok, %AST.Transition{field: field, value: {:expr, expr}, meta: meta}, rest}
+  end
+
+  # transition field: integer (must come after Integer OP Var)
+  defp parse_transition([{:identifier, _, field}, {:delimiter, _, :colon}, {:integer, _, value} | rest], meta) do
+    {:ok, %AST.Transition{field: field, value: {:integer, value}, meta: meta}, rest}
+  end
+
+  # transition field: Var (simple variable reference)
+  defp parse_transition([{:identifier, _, field}, {:delimiter, _, :colon}, {:identifier, _, var} | rest], meta) do
+    {:ok, %AST.Transition{field: field, value: {:var, var}, meta: meta}, rest}
   end
 
   defp parse_transition([token | _], _meta), do: {:error, {:expected_transition, token}}
@@ -573,11 +746,17 @@ defmodule Vor.Parser do
     end
   end
 
+  # Atom union: :a | :b | :c
   defp parse_type_union([{:atom, _, value} | rest], acc) do
     case rest do
       [{:delimiter, _, :pipe} | rest] -> parse_type_union(rest, [value | acc])
       _ -> {:ok, Enum.reverse([value | acc]), rest}
     end
+  end
+
+  # Identifier type: integer, atom, term, etc. (single type, no union)
+  defp parse_type_union([{:identifier, _, type} | rest], []) do
+    {:ok, [{:type, type}], rest}
   end
 
   defp parse_type_union([token | _], _acc), do: {:error, {:expected_type, token}}
@@ -820,7 +999,7 @@ defmodule Vor.Parser do
           {:error, _} = err -> err
         end
 
-      # Simple: monitored do ... end (no within — for backwards compat)
+      # Simple: tier do ... end
       [{:keyword, _, tier}, {:keyword, _, :do} | rest] when tier in [:proven, :checked, :monitored] ->
         case skip_until_end(rest) do
           {:ok, body_tokens, rest} ->
@@ -850,7 +1029,6 @@ defmodule Vor.Parser do
     {:ok, Enum.reverse(acc), rest}
   end
 
-  # on_invariant_violation("name") -> actions
   defp parse_resilience_handlers([{:identifier, meta, :on_invariant_violation},
                                    {:delimiter, _, :open_paren}, {:string, _, name},
                                    {:delimiter, _, :close_paren}, {:operator, _, :arrow} | rest], acc) do
@@ -862,7 +1040,6 @@ defmodule Vor.Parser do
     end
   end
 
-  # on_crash -> actions (skip for now — store raw)
   defp parse_resilience_handlers([{:identifier, _, :on_crash}, {:operator, _, :arrow} | rest], acc) do
     case skip_resilience_action_line(rest) do
       {:ok, rest} -> parse_resilience_handlers(rest, acc)
@@ -872,7 +1049,6 @@ defmodule Vor.Parser do
 
   defp parse_resilience_handlers([token | _], _acc), do: {:error, {:unexpected_in_resilience, token}}
 
-  # Parse comma-separated resilience actions until end or next handler
   defp parse_resilience_actions([{:keyword, _, :transition} | rest], acc) do
     case parse_transition(rest, nil) do
       {:ok, trans, rest} ->
@@ -895,9 +1071,7 @@ defmodule Vor.Parser do
     end
   end
 
-  defp parse_resilience_actions(tokens, acc) do
-    {:ok, Enum.reverse(acc), tokens}
-  end
+  defp parse_resilience_actions(tokens, acc), do: {:ok, Enum.reverse(acc), tokens}
 
   defp skip_resilience_action_line([{:keyword, _, :end} | _] = rest), do: {:ok, rest}
   defp skip_resilience_action_line([{:identifier, _, :on_invariant_violation} | _] = rest), do: {:ok, rest}
