@@ -263,6 +263,12 @@ defmodule Vor.Lowering do
   defp lower_field_value({:list, elements}, param_names) do
     {:list, Enum.map(elements, fn elem -> lower_field_value(elem, param_names) end)}
   end
+  defp lower_field_value({:builtin, %AST.MapOp{op: op, args: args}}, param_names) do
+    {:map_op, op, Enum.map(args, fn a -> lower_field_value(a, param_names) end)}
+  end
+  defp lower_field_value({:builtin, %AST.MinMax{op: op, left: left, right: right}}, param_names) do
+    {:minmax, op, lower_field_value(left, param_names), lower_field_value(right, param_names)}
+  end
 
   defp lower_action(%AST.Emit{tag: tag, fields: fields}, param_names) do
     %IR.Action{
@@ -280,6 +286,8 @@ defmodule Vor.Lowering do
             {to_atom(field), {:integer, n}}
           {field, {:list, _} = list_val} ->
             {to_atom(field), lower_field_value(list_val, param_names)}
+          {field, {:builtin, _} = bv} ->
+            {to_atom(field), lower_field_value(bv, param_names)}
         end)
       }
     }
@@ -322,6 +330,16 @@ defmodule Vor.Lowering do
       data: %IR.TransitionAction{
         field: to_atom(field),
         value: {:integer, n}
+      }
+    }
+  end
+
+  defp lower_action(%AST.Transition{field: field, value: {:builtin, builtin}}, param_names) do
+    %IR.Action{
+      type: :transition,
+      data: %IR.TransitionAction{
+        field: to_atom(field),
+        value: lower_field_value({:builtin, builtin}, param_names)
       }
     }
   end
@@ -370,6 +388,26 @@ defmodule Vor.Lowering do
       data: %IR.VarBindingAction{
         name: to_atom(name),
         expr: {:arith, op, lower_expr_operand(left, param_names), lower_expr_operand(right, param_names)}
+      }
+    }
+  end
+
+  defp lower_action(%AST.VarBinding{name: name, expr: %AST.MapOp{op: op, args: args}}, param_names) do
+    %IR.Action{
+      type: :var_binding,
+      data: %IR.VarBindingAction{
+        name: to_atom(name),
+        expr: {:map_op, op, Enum.map(args, fn a -> lower_field_value(a, param_names) end)}
+      }
+    }
+  end
+
+  defp lower_action(%AST.VarBinding{name: name, expr: %AST.MinMax{op: op, left: left, right: right}}, param_names) do
+    %IR.Action{
+      type: :var_binding,
+      data: %IR.VarBindingAction{
+        name: to_atom(name),
+        expr: {:minmax, op, lower_field_value(left, param_names), lower_field_value(right, param_names)}
       }
     }
   end

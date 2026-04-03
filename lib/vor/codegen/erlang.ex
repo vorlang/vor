@@ -199,6 +199,10 @@ defmodule Vor.Codegen.Erlang do
   defp transition_value_to_erl({:arith, op, left, right}, l, map_var) do
     {:op, l, arith_op(op), value_to_erl(left, l, map_var), value_to_erl(right, l, map_var)}
   end
+  defp transition_value_to_erl({:map_op, op, args}, l, map_var), do: map_op_to_erl(op, args, l, map_var)
+  defp transition_value_to_erl({:minmax, op, left, right}, l, map_var) do
+    {:call, l, {:atom, l, op}, [value_to_erl(left, l, map_var), value_to_erl(right, l, map_var)]}
+  end
 
   defp split_terminal(actions) do
     terminal_idx = Enum.find_index(actions, fn a -> a.type in [:emit, :conditional, :solve] end)
@@ -254,6 +258,12 @@ defmodule Vor.Codegen.Erlang do
   defp value_to_erl({:atom, a}, l, _map_var), do: {:atom, l, a}
   defp value_to_erl({:arith, op, left, right}, l, map_var) do
     {:op, l, arith_op(op), value_to_erl(left, l, map_var), value_to_erl(right, l, map_var)}
+  end
+  defp value_to_erl({:map_op, op, args}, l, map_var) do
+    map_op_to_erl(op, args, l, map_var)
+  end
+  defp value_to_erl({:minmax, op, left, right}, l, map_var) do
+    {:call, l, {:atom, l, op}, [value_to_erl(left, l, map_var), value_to_erl(right, l, map_var)]}
   end
   defp value_to_erl({:list, elements}, l, map_var) do
     elements
@@ -765,6 +775,10 @@ defmodule Vor.Codegen.Erlang do
   defp expr_to_erl({:param, name}, l, map_var), do: value_to_erl({:param, name}, l, map_var)
   defp expr_to_erl({:integer, n}, l, _map_var), do: {:integer, l, n}
   defp expr_to_erl({:atom, a}, l, _map_var), do: {:atom, l, a}
+  defp expr_to_erl({:map_op, op, args}, l, map_var), do: map_op_to_erl(op, args, l, map_var)
+  defp expr_to_erl({:minmax, op, left, right}, l, map_var) do
+    {:call, l, {:atom, l, op}, [value_to_erl(left, l, map_var), value_to_erl(right, l, map_var)]}
+  end
 
   defp compile_statem_conditional(%IR.ConditionalAction{condition: cond_ir, then_actions: then_acts, else_actions: else_acts}, l, state_field_name, data_field_names) do
     cond_form = condition_to_erl(cond_ir, l, :Data)
@@ -856,9 +870,65 @@ defmodule Vor.Codegen.Erlang do
           {:op, l, erl_op, value_to_erl(left, l, map_var), value_to_erl(right, l, map_var)}}
       {field, {:list, _} = list_val} ->
         {:map_field_assoc, l, {:atom, l, field}, value_to_erl(list_val, l, map_var)}
+      {field, {:map_op, _, _} = mop} ->
+        {:map_field_assoc, l, {:atom, l, field}, value_to_erl(mop, l, map_var)}
+      {field, {:minmax, _, _, _} = mm} ->
+        {:map_field_assoc, l, {:atom, l, field}, value_to_erl(mm, l, map_var)}
     end)
 
     {:tuple, l, [{:atom, l, tag}, {:map, l, map_pairs}]}
+  end
+
+  # Map operation codegen helpers
+  defp map_op_to_erl(:map_get, [map_ref, key, default], l, map_var) do
+    map_erl = value_to_erl(map_ref, l, map_var)
+    {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+      [value_to_erl(key, l, map_var), map_erl, value_to_erl(default, l, map_var)]}
+  end
+
+  defp map_op_to_erl(:map_put, [map_ref, key, val], l, map_var) do
+    map_erl = value_to_erl(map_ref, l, map_var)
+    {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :put}},
+      [value_to_erl(key, l, map_var), value_to_erl(val, l, map_var), map_erl]}
+  end
+
+  defp map_op_to_erl(:map_has, [map_ref, key], l, map_var) do
+    map_erl = value_to_erl(map_ref, l, map_var)
+    # Return :true or :false atoms for Vor compatibility
+    {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :is_key}},
+      [value_to_erl(key, l, map_var), map_erl]}
+  end
+
+  defp map_op_to_erl(:map_delete, [map_ref, key], l, map_var) do
+    map_erl = value_to_erl(map_ref, l, map_var)
+    {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :remove}},
+      [value_to_erl(key, l, map_var), map_erl]}
+  end
+
+  defp map_op_to_erl(:map_size, [map_ref], l, map_var) do
+    map_erl = value_to_erl(map_ref, l, map_var)
+    {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :size}},
+      [map_erl]}
+  end
+
+  defp map_op_to_erl(:map_sum, [map_ref], l, map_var) do
+    map_erl = value_to_erl(map_ref, l, map_var)
+    {:call, l, {:remote, l, {:atom, l, :lists}, {:atom, l, :sum}},
+      [{:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :values}},
+        [map_erl]}]}
+  end
+
+  defp map_op_to_erl(:map_merge, [map1, map2, {:atom, strategy}], l, map_var) do
+    map1_erl = value_to_erl(map1, l, map_var)
+    map2_erl = value_to_erl(map2, l, map_var)
+    merge_fun = case strategy do
+      :max -> {:fun, l, {:clauses, [{:clause, l, [{:var, l, :_K}, {:var, l, :V1}, {:var, l, :V2}], [], [{:call, l, {:atom, l, :max}, [{:var, l, :V1}, {:var, l, :V2}]}]}]}}
+      :min -> {:fun, l, {:clauses, [{:clause, l, [{:var, l, :_K}, {:var, l, :V1}, {:var, l, :V2}], [], [{:call, l, {:atom, l, :min}, [{:var, l, :V1}, {:var, l, :V2}]}]}]}}
+      :sum -> {:fun, l, {:clauses, [{:clause, l, [{:var, l, :_K}, {:var, l, :V1}, {:var, l, :V2}], [], [{:op, l, :+, {:var, l, :V1}, {:var, l, :V2}}]}]}}
+      :replace -> {:fun, l, {:clauses, [{:clause, l, [{:var, l, :_K}, {:var, l, :_V1}, {:var, l, :V2}], [], [{:var, l, :V2}]}]}}
+    end
+    {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :merge_with}},
+      [merge_fun, map1_erl, map2_erl]}
   end
 
   defp guard_to_erl(nil, _l), do: []

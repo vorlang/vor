@@ -371,6 +371,28 @@ defmodule Vor.Parser do
     parse_binding_fields(rest, [{field, {:atom, value}} | acc])
   end
 
+  # field: min/max(...) — identifier-based
+  defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon},
+                             {:identifier, _, op}, {:delimiter, _, :open_paren} | rest], acc)
+       when op in [:min, :max] do
+    case parse_builtin_call(op, [{:delimiter, {0, 0}, :open_paren} | rest]) do
+      {:ok, expr, rest} ->
+        parse_binding_fields(rest, [{field, {:builtin, expr}} | acc])
+      {:error, _} = err -> err
+    end
+  end
+
+  # field: map_op(...)
+  defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon},
+                             {:keyword, _, op} | rest], acc)
+       when op in [:map_get, :map_put, :map_has, :map_delete, :map_size, :map_sum, :map_merge] do
+    case parse_builtin_call(op, rest) do
+      {:ok, expr, rest} ->
+        parse_binding_fields(rest, [{field, {:builtin, expr}} | acc])
+      {:error, _} = err -> err
+    end
+  end
+
   # field: [] or field: [elem, elem, ...]
   defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon}, {:delimiter, _, :open_bracket} | rest], acc) do
     case parse_list_literal(rest) do
@@ -381,6 +403,78 @@ defmodule Vor.Parser do
   end
 
   defp parse_binding_field([token | _], _acc), do: {:error, {:expected_binding, token}}
+
+  # --- Built-in function calls (map_get, map_put, min, max, etc.) ---
+
+  defp parse_builtin_call(op, [{:delimiter, _, :open_paren} | rest]) do
+    case parse_builtin_args(rest, []) do
+      {:ok, args, rest} ->
+        node = case op do
+          op when op in [:min, :max] ->
+            case args do
+              [left, right] -> %AST.MinMax{op: op, left: left, right: right}
+              _ -> {:error, {:wrong_arg_count, op, length(args)}}
+            end
+          _ ->
+            %AST.MapOp{op: op, args: args}
+        end
+        case node do
+          %{} -> {:ok, node, rest}
+          {:error, _} = err -> err
+        end
+      {:error, _} = err -> err
+    end
+  end
+  defp parse_builtin_call(op, _), do: {:error, {:expected_open_paren, op}}
+
+  defp parse_builtin_args([{:delimiter, _, :close_paren} | rest], acc) do
+    {:ok, Enum.reverse(acc), rest}
+  end
+
+  defp parse_builtin_args([{:identifier, _, name}, {:delimiter, _, :comma} | rest], acc) do
+    parse_builtin_args(rest, [{:var, name} | acc])
+  end
+
+  defp parse_builtin_args([{:identifier, _, name}, {:delimiter, _, :close_paren} | rest], acc) do
+    {:ok, Enum.reverse([{:var, name} | acc]), rest}
+  end
+
+  defp parse_builtin_args([{:integer, _, n}, {:delimiter, _, :comma} | rest], acc) do
+    parse_builtin_args(rest, [{:integer, n} | acc])
+  end
+
+  defp parse_builtin_args([{:integer, _, n}, {:delimiter, _, :close_paren} | rest], acc) do
+    {:ok, Enum.reverse([{:integer, n} | acc]), rest}
+  end
+
+  defp parse_builtin_args([{:atom, _, a}, {:delimiter, _, :comma} | rest], acc) do
+    parse_builtin_args(rest, [{:atom, a} | acc])
+  end
+
+  defp parse_builtin_args([{:atom, _, a}, {:delimiter, _, :close_paren} | rest], acc) do
+    {:ok, Enum.reverse([{:atom, a} | acc]), rest}
+  end
+
+  # Handle arithmetic expressions as arguments: e.g., current + 1
+  defp parse_builtin_args([{:identifier, _, left}, {:operator, _, op}, {:identifier, _, right}, sep | rest], acc)
+       when op in [:plus, :minus, :star, :slash] and elem(sep, 2) in [:comma, :close_paren] do
+    expr = {:expr, %AST.ArithExpr{op: op, left: {:var, left}, right: {:var, right}}}
+    case elem(sep, 2) do
+      :comma -> parse_builtin_args(rest, [expr | acc])
+      :close_paren -> {:ok, Enum.reverse([expr | acc]), rest}
+    end
+  end
+
+  defp parse_builtin_args([{:identifier, _, left}, {:operator, _, op}, {:integer, _, right}, sep | rest], acc)
+       when op in [:plus, :minus, :star, :slash] and elem(sep, 2) in [:comma, :close_paren] do
+    expr = {:expr, %AST.ArithExpr{op: op, left: {:var, left}, right: {:integer, right}}}
+    case elem(sep, 2) do
+      :comma -> parse_builtin_args(rest, [expr | acc])
+      :close_paren -> {:ok, Enum.reverse([expr | acc]), rest}
+    end
+  end
+
+  defp parse_builtin_args([token | _], _acc), do: {:error, {:expected_builtin_arg, token}}
 
   # --- List literals ---
 
@@ -692,6 +786,28 @@ defmodule Vor.Parser do
     parse_handler_body(rest, [%AST.VarBinding{name: bind_var, expr: {:integer, value}, meta: meta} | acc])
   end
 
+  # var = min/max(...) — identifier-based built-in
+  defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                            {:identifier, _, op}, {:delimiter, _, :open_paren} | rest], acc)
+       when op in [:min, :max] do
+    case parse_builtin_call(op, [{:delimiter, {0, 0}, :open_paren} | rest]) do
+      {:ok, expr, rest} ->
+        parse_handler_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
+      {:error, _} = err -> err
+    end
+  end
+
+  # var = map_op(...)
+  defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                            {:keyword, _, op} | rest], acc)
+       when op in [:map_get, :map_put, :map_has, :map_delete, :map_size, :map_sum, :map_merge] do
+    case parse_builtin_call(op, rest) do
+      {:ok, expr, rest} ->
+        parse_handler_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
+      {:error, _} = err -> err
+    end
+  end
+
   # var = Var (simple copy binding) — must come after extern call patterns
   defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
                             {:identifier, _, source_var} | rest], acc) do
@@ -875,6 +991,28 @@ defmodule Vor.Parser do
     parse_if_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
   end
 
+  # var = min/max(...) inside if body — identifier-based
+  defp parse_if_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                       {:identifier, _, op}, {:delimiter, _, :open_paren} | rest], acc)
+       when op in [:min, :max] do
+    case parse_builtin_call(op, [{:delimiter, {0, 0}, :open_paren} | rest]) do
+      {:ok, expr, rest} ->
+        parse_if_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
+      {:error, _} = err -> err
+    end
+  end
+
+  # var = map_op(...) inside if body
+  defp parse_if_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                       {:keyword, _, op} | rest], acc)
+       when op in [:map_get, :map_put, :map_has, :map_delete, :map_size, :map_sum, :map_merge] do
+    case parse_builtin_call(op, rest) do
+      {:ok, expr, rest} ->
+        parse_if_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
+      {:error, _} = err -> err
+    end
+  end
+
   defp parse_if_body([token | _], _acc), do: {:error, {:unexpected_in_if, token}}
   defp parse_if_body([], _acc), do: {:error, :unexpected_eof}
 
@@ -1000,6 +1138,25 @@ defmodule Vor.Parser do
   # transition field: integer (must come after Integer OP Var)
   defp parse_transition([{:identifier, _, field}, {:delimiter, _, :colon}, {:integer, _, value} | rest], meta) do
     {:ok, %AST.Transition{field: field, value: {:integer, value}, meta: meta}, rest}
+  end
+
+  # transition field: map_op(...)
+  defp parse_transition([{:identifier, _, field}, {:delimiter, _, :colon}, {:keyword, _, op} | rest], meta)
+       when op in [:map_get, :map_put, :map_has, :map_delete, :map_size, :map_sum, :map_merge] do
+    case parse_builtin_call(op, rest) do
+      {:ok, expr, rest} -> {:ok, %AST.Transition{field: field, value: {:builtin, expr}, meta: meta}, rest}
+      {:error, _} = err -> err
+    end
+  end
+
+  # transition field: min/max(...) — identifier followed by open_paren
+  defp parse_transition([{:identifier, _, field}, {:delimiter, _, :colon},
+                          {:identifier, _, op}, {:delimiter, _, :open_paren} | rest], meta)
+       when op in [:min, :max] do
+    case parse_builtin_call(op, [{:delimiter, {0, 0}, :open_paren} | rest]) do
+      {:ok, expr, rest} -> {:ok, %AST.Transition{field: field, value: {:builtin, expr}, meta: meta}, rest}
+      {:error, _} = err -> err
+    end
   end
 
   # transition field: Var (simple variable reference)

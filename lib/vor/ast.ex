@@ -131,6 +131,14 @@ defmodule Vor.AST do
     defstruct [:meta]
   end
 
+  defmodule MapOp do
+    defstruct [:op, :args, :meta]
+  end
+
+  defmodule MinMax do
+    defstruct [:op, :left, :right, :meta]
+  end
+
   defmodule System do
     defstruct [:name, :agents, :connections, :meta]
   end
