@@ -19,7 +19,7 @@ defmodule Vor.Codegen.Erlang do
       gen_init_server(agent, l),
       gen_handle_call(agent, l),
       gen_handle_cast(agent, l),
-      gen_handle_info(l)
+      gen_handle_info(agent, l)
     ])
 
     {:ok, forms}
@@ -66,10 +66,20 @@ defmodule Vor.Codegen.Erlang do
     data_field_pairs = gen_data_field_pairs(agent.data_fields || [], l)
     init_map = {:map, l, param_pairs ++ data_field_pairs}
 
+    timer_setup = gen_periodic_timer_setup(agent.periodic_timers || [], l, :Data)
+
     # Build init body that extracts system metadata if present
     body = gen_init_with_metadata(init_map, l, fn data_var ->
       {:tuple, l, [{:atom, l, :ok}, {:var, l, data_var}]}
     end)
+
+    # Insert timer setup before the final return
+    body = case timer_setup do
+      [] -> body
+      _ ->
+        {pre, [ret]} = Enum.split(body, -1)
+        pre ++ timer_setup ++ [ret]
+    end
 
     {:function, l, :init, 1, [
       {:clause, l, [{:var, l, :Args}], [], body}
@@ -141,11 +151,34 @@ defmodule Vor.Codegen.Erlang do
     {:function, l, :handle_cast, 2, handler_clauses ++ [catchall]}
   end
 
-  defp gen_handle_info(l) do
-    {:function, l, :handle_info, 2, [
-      {:clause, l, [{:var, l, :_Msg}, {:var, l, :State}], [],
-        [{:tuple, l, [{:atom, l, :noreply}, {:var, l, :State}]}]}
-    ]}
+  defp gen_handle_info(agent, l) do
+    timer_clauses = Enum.map(agent.periodic_timers || [], fn timer ->
+      # Compile timer body — generate side effects only (transitions, send, broadcast)
+      {pre_actions, _terminal} = split_terminal(timer.actions)
+      {transitions, other_pre} = Enum.split_with(pre_actions, fn a -> a.type == :transition end)
+      pre_exprs = Enum.flat_map(other_pre, &action_to_erl(&1, l, :State))
+      {state_update_exprs, state_var} = gen_server_state_updates(transitions, l)
+
+      # Re-arm timer
+      interval_form = case timer.interval do
+        {:integer, n} -> {:integer, l, n}
+        {:param, name} -> {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+          [{:atom, l, name}, {:var, l, state_var}]}
+      end
+
+      rearm = {:call, l, {:remote, l, {:atom, l, :erlang}, {:atom, l, :send_after}},
+        [interval_form, {:call, l, {:atom, l, :self}, []}, {:atom, l, timer.tag}]}
+
+      result = {:tuple, l, [{:atom, l, :noreply}, {:var, l, state_var}]}
+
+      {:clause, l, [{:atom, l, timer.tag}, {:var, l, :State}], [],
+        pre_exprs ++ state_update_exprs ++ [rearm, result]}
+    end)
+
+    catchall = {:clause, l, [{:var, l, :_Msg}, {:var, l, :State}], [],
+      [{:tuple, l, [{:atom, l, :noreply}, {:var, l, :State}]}]}
+
+    {:function, l, :handle_info, 2, timer_clauses ++ [catchall]}
   end
 
   # Compile a handler's action list into Erlang body expressions for gen_server
@@ -395,6 +428,15 @@ defmodule Vor.Codegen.Erlang do
       end
     end)
 
+    timer_setup = gen_periodic_timer_setup(agent.periodic_timers || [], l, :Data)
+
+    body = case timer_setup do
+      [] -> body
+      _ ->
+        {pre, [ret]} = Enum.split(body, -1)
+        pre ++ timer_setup ++ [ret]
+    end
+
     {:function, l, :init, 1, [
       {:clause, l, [{:var, l, :Args}], [], body}
     ]}
@@ -456,7 +498,10 @@ defmodule Vor.Codegen.Erlang do
     # These prevent crashes when no guard matches — return error for calls, ignore for casts
     guarded_catchalls = gen_guarded_catchall_clauses(agent, l)
 
-    {:function, l, :handle_event, 4, cast_clauses ++ call_clauses ++ guarded_catchalls ++ timer_clauses ++ timeout_clauses ++ [catchall]}
+    # Periodic timer info handlers
+    periodic_clauses = gen_periodic_timer_statem_clauses(agent, l, state_field_name, monitors)
+
+    {:function, l, :handle_event, 4, cast_clauses ++ call_clauses ++ guarded_catchalls ++ timer_clauses ++ timeout_clauses ++ periodic_clauses ++ [catchall]}
   end
 
   defp has_nested_emits?(actions) do
@@ -514,6 +559,51 @@ defmodule Vor.Codegen.Erlang do
         [{:atom, l, :state_timeout}, {:atom, l, handler.pattern.tag}, {:var, l, :State}, {:var, l, :Data}],
         [guard],
         body}
+    end)
+  end
+
+  # Generate send_after calls for periodic timers in init
+  defp gen_periodic_timer_setup([], _l, _data_var), do: []
+  defp gen_periodic_timer_setup(timers, l, data_var) do
+    Enum.map(timers, fn timer ->
+      interval_form = case timer.interval do
+        {:integer, n} -> {:integer, l, n}
+        {:param, name} ->
+          {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+            [{:atom, l, name}, {:var, l, data_var}]}
+      end
+
+      {:call, l, {:remote, l, {:atom, l, :erlang}, {:atom, l, :send_after}},
+        [interval_form, {:call, l, {:atom, l, :self}, []}, {:atom, l, timer.tag}]}
+    end)
+  end
+
+  # Generate handle_event(info, ...) clauses for periodic timers in gen_statem
+  defp gen_periodic_timer_statem_clauses(agent, l, state_field_name, monitors) do
+    Enum.map(agent.periodic_timers || [], fn timer ->
+      body = compile_statem_handler_body(
+        timer.actions, l, :Data, 0, state_field_name, monitors, nil)
+
+      # Re-arm timer
+      interval_form = case timer.interval do
+        {:integer, n} -> {:integer, l, n}
+        {:param, name} ->
+          {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+            [{:atom, l, name}, {:var, l, :Data}]}
+      end
+
+      rearm = {:call, l, {:remote, l, {:atom, l, :erlang}, {:atom, l, :send_after}},
+        [interval_form, {:call, l, {:atom, l, :self}, []}, {:atom, l, timer.tag}]}
+
+      # Replace the return tuple to include rearm
+      # The body ends with {next_state, State, Data, Actions}
+      # Insert rearm before the return
+      {pre, [ret]} = Enum.split(body, -1)
+
+      {:clause, l,
+        [{:atom, l, :info}, {:atom, l, timer.tag}, {:var, l, :State}, {:var, l, :Data}],
+        [],
+        pre ++ [rearm, ret]}
     end)
   end
 

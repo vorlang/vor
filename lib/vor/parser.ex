@@ -197,6 +197,13 @@ defmodule Vor.Parser do
     end
   end
 
+  defp parse_declarations([{:keyword, _, :every} | _] = tokens, acc) do
+    case parse_every(tokens) do
+      {:ok, every, rest} -> parse_declarations(rest, [every | acc])
+      {:error, _} = err -> err
+    end
+  end
+
   defp parse_declarations([{:keyword, _, :extern} | _] = tokens, acc) do
     case parse_extern_block(tokens) do
       {:ok, extern, rest} -> parse_declarations(rest, [extern | acc])
@@ -361,17 +368,7 @@ defmodule Vor.Parser do
     parse_binding_fields(rest, [{field, {:integer, value}} | acc])
   end
 
-  # field: Var
-  defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon}, {:identifier, _, var} | rest], acc) do
-    parse_binding_fields(rest, [{field, {:var, var}} | acc])
-  end
-
-  # field: :atom_value
-  defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon}, {:atom, _, value} | rest], acc) do
-    parse_binding_fields(rest, [{field, {:atom, value}} | acc])
-  end
-
-  # field: min/max(...) — identifier-based
+  # field: min/max(...) — identifier-based (must be before generic Var clause)
   defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon},
                              {:identifier, _, op}, {:delimiter, _, :open_paren} | rest], acc)
        when op in [:min, :max] do
@@ -402,7 +399,37 @@ defmodule Vor.Parser do
     end
   end
 
+  # field: Var
+  defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon}, {:identifier, _, var} | rest], acc) do
+    parse_binding_fields(rest, [{field, {:var, var}} | acc])
+  end
+
+  # field: :atom_value
+  defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon}, {:atom, _, value} | rest], acc) do
+    parse_binding_fields(rest, [{field, {:atom, value}} | acc])
+  end
+
   defp parse_binding_field([token | _], _acc), do: {:error, {:expected_binding, token}}
+
+  # --- Every block ---
+
+  # every 100 do ... end
+  defp parse_every([{:keyword, meta, :every}, {:integer, _, interval}, {:keyword, _, :do} | rest]) do
+    case parse_handler_body(rest, []) do
+      {:ok, body, rest} ->
+        {:ok, %AST.Every{interval: {:integer, interval}, body: body, meta: meta}, rest}
+      {:error, _} = err -> err
+    end
+  end
+
+  # every param_name do ... end
+  defp parse_every([{:keyword, meta, :every}, {:identifier, _, param_name}, {:keyword, _, :do} | rest]) do
+    case parse_handler_body(rest, []) do
+      {:ok, body, rest} ->
+        {:ok, %AST.Every{interval: {:param, param_name}, body: body, meta: meta}, rest}
+      {:error, _} = err -> err
+    end
+  end
 
   # --- Built-in function calls (map_get, map_put, min, max, etc.) ---
 

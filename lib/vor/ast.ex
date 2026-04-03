@@ -131,6 +131,10 @@ defmodule Vor.AST do
     defstruct [:meta]
   end
 
+  defmodule Every do
+    defstruct [:interval, :body, :meta]
+  end
+
   defmodule MapOp do
     defstruct [:op, :args, :meta]
   end

@@ -68,7 +68,8 @@ The equivalent in Elixir would be a gen_server with manual rate tracking, `propl
 - Handler completeness checking — call handlers must emit on every code path
 - Multi-agent system runtime — supervisor, registry, inter-agent send tested end-to-end
 - Native map operations and min/max expressions
-- 185 tests passing, 9 property tests, zero compiler warnings
+- Periodic timers (`every`) for gossip, heartbeats, cleanup
+- 199 tests passing, 9 property tests, zero compiler warnings
 - [Step-by-step tutorial](docs/vor-tutorial.md) from Echo agent to multi-agent pipeline
 
 ## Verified state machine

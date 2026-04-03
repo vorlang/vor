@@ -31,6 +31,7 @@ defmodule Vor.Lowering do
     monitors = extract_monitors(ast.body, all_states, known_names)
     handlers = extract_handlers(ast.body, known_names, relation_map)
     timeout_handlers = generate_timeout_handlers(monitors, known_names, state_field_name)
+    periodic_timers = extract_periodic_timers(ast.body, known_names)
 
     ir = %IR.Agent{
       name: ast.name,
@@ -45,7 +46,8 @@ defmodule Vor.Lowering do
       invariants: extract_invariants(ast.body),
       resilience: nil,
       externs: extract_externs(ast.body),
-      monitors: monitors
+      monitors: monitors,
+      periodic_timers: periodic_timers
     }
 
     {:ok, ir}
@@ -666,6 +668,28 @@ defmodule Vor.Lowering do
       %IR.Handler{
         pattern: %IR.MatchPattern{tag: monitor.event_tag, bindings: []},
         guard: %IR.GuardExpr{field: state_field_name, op: :not_in, value: {:states, excluded}},
+        actions: actions
+      }
+    end)
+  end
+
+  defp extract_periodic_timers(body, known_names) do
+    body
+    |> Enum.filter(&match?(%AST.Every{}, &1))
+    |> Enum.with_index()
+    |> Enum.map(fn {%AST.Every{interval: interval, body: timer_body}, idx} ->
+      lowered_interval = case interval do
+        {:integer, n} -> {:integer, n}
+        {:param, name} -> {:param, to_atom(name)}
+      end
+
+      actions = timer_body
+      |> Enum.map(&lower_action(&1, known_names))
+      |> Enum.reject(&is_nil/1)
+
+      %IR.PeriodicTimer{
+        tag: :"vor_every_#{idx}",
+        interval: lowered_interval,
         actions: actions
       }
     end)

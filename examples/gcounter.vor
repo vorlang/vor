@@ -1,6 +1,5 @@
 agent GCounter(node_id: atom, sync_interval_ms: integer) do
 
-  state phase: :active | :syncing
   state counts: map
 
   protocol do
@@ -17,42 +16,31 @@ agent GCounter(node_id: atom, sync_interval_ms: integer) do
   end
 
   %% Increment this node's count
-  on {:increment} when phase == :active do
+  on {:increment} do
     current = map_get(counts, node_id, 0)
     transition counts: map_put(counts, node_id, current + 1)
     emit {:ok}
   end
 
   %% Receive sync from peer — merge with max
-  on {:sync, remote_counts: R} when phase == :active do
-    transition counts: map_merge(counts, R, :max)
-  end
-
-  on {:sync, remote_counts: R} when phase == :syncing do
+  on {:sync, remote_counts: R} do
     transition counts: map_merge(counts, R, :max)
   end
 
   %% Query the total count
-  on {:value} when phase == :active do
+  on {:value} do
     total = map_sum(counts)
     emit {:total, value: total}
   end
 
   %% Query the raw counts map
-  on {:get_counts} when phase == :active do
+  on {:get_counts} do
     emit {:counts, data: counts}
   end
 
   %% Periodic gossip — broadcast local state to all peers
-  liveness "periodic sync" monitored(within: sync_interval_ms) do
-    always(phase != :syncing implies eventually(phase == :syncing))
-  end
-
-  resilience do
-    on_invariant_violation("periodic sync") ->
-      transition phase: :syncing
-      broadcast {:sync, remote_counts: counts}
-      transition phase: :active
+  every sync_interval_ms do
+    broadcast {:sync, remote_counts: counts}
   end
 
 end

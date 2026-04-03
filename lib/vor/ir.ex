@@ -18,7 +18,8 @@ defmodule Vor.IR do
       :invariants,
       :resilience,
       :externs,
-      :monitors
+      :monitors,
+      :periodic_timers
     ]
   end
 
@@ -124,6 +125,10 @@ defmodule Vor.IR do
 
   defmodule AgentInstanceIR do
     defstruct [:name, :module, :type_name, :params, :behaviour]
+  end
+
+  defmodule PeriodicTimer do
+    defstruct [:tag, :interval, :actions]
   end
 
   defmodule LivenessMonitor do
