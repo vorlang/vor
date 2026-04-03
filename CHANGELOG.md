@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-04-02
+- **Property-based testing** — PropCheck generates random valid Vor programs and verifies compiler invariants: compilation safety, verifier soundness, graph extraction correctness, and protocol checking consistency. 9 properties, 100 iterations each.
 - **Noop keyword** — `noop` in handler bodies for intentional no-ops. Valid in cast handlers; call handlers without emit still fail completeness check.
 - **List literals** — `[]`, `[1, 2, 3]`, `[:a, :b]`, `[Var1, Var2]` in emit, send, broadcast, and transition fields. Raft example updated to use real lists instead of atom placeholders.
 - **Conditional transitions in gen_statem** — Transitions inside if/else branches now take effect. Each branch produces its own gen_statem return with its own data map. Data map threaded through with unique variable names. Send and broadcast read post-transition values. Resilience handlers support broadcast and send.

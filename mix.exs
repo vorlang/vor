@@ -25,7 +25,8 @@ defmodule Vor.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:nimble_parsec, "~> 1.4"}
+      {:nimble_parsec, "~> 1.4"},
+      {:propcheck, "~> 1.4", only: :test}
     ]
   end
 end
