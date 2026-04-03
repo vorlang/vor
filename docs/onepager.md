@@ -14,39 +14,66 @@ What Vor adds is a verification layer that OTP doesn't provide. You declare stat
 
 ## Core Primitives
 
-**Relations** — Bidirectional mappings for knowledge and data transformation. Define a conversion once; query it in any direction. Relations are the declarative core — directional handlers manage effects and stateful behavior.
+**Relations** — Bidirectional mappings for knowledge and data transformation. Define a relation once; query it in any direction. Fact-based relations support multi-directional lookup. Equation-based relations are automatically inverted at compile time — define `F = C * 9/5 + 32`, query with either variable. The solver handles the directionality.
 
-**State Declarations** — Explicit enumeration of valid states. When present, the agent compiles to a gen_statem. The compiler has the complete state graph and can verify transitions against safety invariants.
+**State Declarations** — Explicit enumeration of valid states. When present, the agent compiles to a gen_statem. The compiler has the complete state graph and can verify transitions against safety invariants. Non-enum state fields (integers, atoms, lists) are stored in the gen_statem data map or the gen_server state map, with type-appropriate defaults.
 
-**Protocols** — Typed message interfaces for agents, including ordering, backpressure, and failure semantics. Composition is checked by unifying protocols — type compatibility is necessary but not sufficient; behavioral contracts must also align.
+**Protocols** — Typed message interfaces for agents. `accepts` declares what an agent receives. `emits` declares synchronous replies. `sends` declares messages forwarded to other agents. Protocol composition is checked at compile time when agents are wired together in a system block — tag mismatches and field name mismatches are compile errors.
 
-**Invariants** — Temporal properties in the tradition of TLA+. Safety: "this must never happen." Liveness: "this must eventually happen." Each invariant is assigned a guarantee tier: *proven* (compiler-verified, limited to single-agent local properties), *checked* (tested against output), or *monitored* (enforced at runtime with defined violation responses).
+**Invariants** — Temporal properties in the tradition of TLA+. Safety invariants ("this must never happen") are tagged `proven` and verified at compile time by exhaustive graph traversal. Liveness invariants ("this must eventually happen") are tagged `monitored` and enforced at runtime via gen_statem state timeouts. The compiler rejects `proven` invariants it cannot verify — it fails closed, never silently accepting unverifiable properties.
 
-**Resilience** — Declarative failure handling. What happens when an invariant is violated, when a process crashes, when a constraint can't be satisfied. Maps to OTP supervision strategies but derived from the spec rather than hand-configured.
+**Resilience** — Declarative failure handling. What happens when a liveness invariant is violated, when a process is stuck, when recovery is needed. Resilience handlers are generated as regular handler clauses and included in the state graph — the safety verifier checks them too, ensuring the recovery path doesn't introduce new bugs.
 
-## Future: AI-Assisted Synthesis
+**Multi-Agent Systems** — Agents are wired together in `system` blocks with named instances, parameters, and connection topology. The compiler generates an OTP Supervisor and Registry. `send` delivers messages to specific named agents. `broadcast` delivers to all connected agents. Agents discover each other via the Registry and automatically re-register on restart.
 
-Vor's declarative structure is designed so that AI can eventually fill in implementation details within declared constraints. Synthesis obligations — explicit holes where the human provides properties and bounds and AI provides an implementation — are part of the language design but not yet implemented. The verification story works today without AI. AI synthesis is an accelerator, not a prerequisite.
+**Extern Declarations** — Escape hatches to Erlang/Elixir for anything Vor doesn't handle natively: list operations, database access, HTTP calls, string manipulation. Extern calls are untrusted by default — wrapped in try/catch, and the compiler warns if a `proven` invariant depends on an extern result.
+
+## What's Working
+
+The compiler is real and tested:
+
+- Full pipeline: `.vor` source → Lexer → Parser → AST → IR → Verification → Erlang codegen → BEAM binary
+- Compile-time safety verification via state graph traversal
+- Runtime liveness monitoring via gen_statem state timeouts
+- Bidirectional relation solver with compile-time equation inversion
+- Protocol composition checking across multi-agent systems
+- Registry-based inter-agent messaging with `send` and `broadcast`
+- TLA+ specifications verifying the safety verifier and graph extraction algorithms
+- 164+ tests, 9 property-based test suites, adversarial edge case testing, performance benchmarks
+- Three working examples: rate limiter, circuit breaker, Raft consensus
+- Compilation under 5ms for any agent, verification under 2ms for any graph
+
+## Examples
+
+**Rate limiter** — gen_server with extern calls to ETS, parameterized limits, per-client tracking.
+
+**Circuit breaker** — gen_statem with three states (closed/open/half_open), proven safety invariant ("no forwarding when open"), liveness monitoring for recovery timeout.
+
+**Raft consensus** — three-node cluster with leader election via liveness-triggered candidacy, conditional vote granting, leader promotion on majority, and verified safety invariants. All node-to-node communication via native `send` and `broadcast`.
 
 ## Boundaries
 
-Vor is a general-purpose BEAM language — suited to anything Erlang and Elixir handle well, including telecom protocol stacks, distributed services, real-time web applications, workflow orchestration, and IoT coordination. Its relational primitives and declarative invariants add particular value where systems involve complex rules, protocol state machines, or correctness requirements that matter.
+Vor is suited to anything involving state machines, message protocols, or correctness requirements: telecom protocol stacks, distributed consensus, payment processing, workflow orchestration, IoT coordination. Its primitives add particular value where getting the state machine wrong has real consequences.
 
-**What Vor handles:** declarative knowledge (relations), protocol and state machine specification (protocols, invariants), behavioral contracts, and AI-assisted implementation (synthesis).
+**What Vor handles:** state machine specification, message protocol verification, safety and liveness invariants, multi-agent coordination, declarative knowledge via relations.
 
-**What Vor delegates:** performance-critical inner loops, raw system integration, and unconstrained side effects fall to human-authored Erlang/Elixir via escape hatches. Escape hatches are untrusted by default — runtime monitors wrap them and enforce invariants at the boundary.
+**What Vor delegates:** list and map operations, string manipulation, database access, HTTP, and anything else that's data processing rather than protocol logic. These fall to Erlang/Elixir via extern declarations. The boundary is clean — Vor handles the protocol layer where verification matters, Elixir handles the data layer where expressiveness matters.
 
 ## When Things Break
 
-**Invariant violation at runtime:** the supervision tree responds according to the agent's resilience declaration — restart, escalate, or compensate. Violations are observable events, not silent failures.
+**Safety invariant violated at compile time:** compilation fails with a clear error pointing to the specific handler and state that violates the property.
 
-**Contradictory specs:** the constraint solver detects conflicts at compile time. Underspecification is surfaced as ambiguity warnings.
+**Unsupported proven invariant:** compilation fails. The compiler rejects invariant bodies it cannot analyze rather than silently accepting them.
 
-**Escape hatch violations:** Erlang/Elixir code called from Vor agents is untrusted by default. Runtime monitors enforce invariants at the boundary.
+**Liveness invariant violated at runtime:** the resilience handler fires — transitioning state, broadcasting recovery messages, or escalating. Violations are observable events, not silent failures.
+
+**Escape hatch crashes:** extern call failures are caught by try/catch wrappers. The agent's OTP supervision handles recovery.
+
+**Protocol mismatch:** the compiler rejects systems where connected agents' send/accept declarations don't match on message tags or field names.
 
 ## Intellectual Heritage
 
-**Erlang/OTP** (processes, fault tolerance, hot code loading — Vor's runtime foundation) · **TLA+** (temporal logic, safety/liveness, specification-first design) · **Prolog & miniKanren** (relational programming, bidirectional computation) · **Vericoding** (AI synthesis of verified code from formal specs — an emerging approach that Vor is designed to leverage as it matures).
+**Erlang/OTP** (processes, fault tolerance, hot code loading — Vor's runtime foundation) · **TLA+** (temporal logic, safety/liveness, specification-first design — Vor's verification foundation, also used to verify Vor's own verifier) · **Prolog & miniKanren** (relational programming, bidirectional computation) · **Alloy** (first-order relational logic — the only other formal tool with first-class relations).
 
 ## Design Principles
 
@@ -54,12 +81,12 @@ Vor is a general-purpose BEAM language — suited to anything Erlang and Elixir 
 
 **Relations for knowledge, handlers for effects.** Bidirectional computation where it fits; explicit directionality where effects demand it.
 
-**Guarantee tiers are explicit.** Every property is labeled proven, checked, or monitored. No false confidence.
+**Guarantee tiers are explicit.** Every property is labeled proven or monitored. The compiler fails closed — it never claims to verify what it can't.
 
-**Failure is first-class.** Invariants can be violated. Specs can conflict. Vor defines what happens in each case.
+**Failure is first-class.** Invariants can be violated. Resilience handlers define what happens. Recovery paths are verified.
 
 **The BEAM is the foundation.** Vor doesn't replace OTP — it compiles to OTP and adds verification above it.
 
 ---
 
-*vorlang.org  ·  Targets: BEAM/OTP  ·  License: Open Source  ·  Status: Early stage, working compiler*
+*vorlang.org  ·  Targets: BEAM/OTP  ·  License: MIT  ·  Status: Working compiler with verified safety, Raft consensus example, 164+ tests*
