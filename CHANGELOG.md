@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-04-02
+- **Distributed lock example** — LockManager with exclusive access, FIFO wait queue, bounded hold time via liveness monitoring, and verified safety invariant (no grant when held). Queue operations via extern helpers. 50-client stress test passes.
+- **Extern calls in if/else bodies** — Extern call bindings now work inside if/else branches (needed for lock's conditional queue operations).
 - **Periodic timer (`every`) construct** — `every interval_ms do ... end` for scheduled periodic actions. Uses `erlang:send_after` (fires regardless of state changes, unlike liveness timeouts). Works in gen_server and gen_statem. Supports broadcast, send, transitions, extern calls. G-Counter updated to use `every` instead of liveness hack — now a clean gen_server.
 - **G-Counter CRDT example** — Three-node grow-only counter with gossip-based sync using `map_merge(counts, R, :max)`. Fully native Vor — no extern calls. Periodic broadcast via liveness monitoring. Cluster convergence verified: concurrent increments across nodes converge to correct total.
 - **Native map operations** — `map_get(m, k, default)`, `map_put(m, k, v)`, `map_has(m, k)`, `map_delete(m, k)`, `map_size(m)`, `map_sum(m)`, `map_merge(m1, m2, :max)`. Work in variable bindings, transitions, emit fields, for both gen_server and gen_statem.

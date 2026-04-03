@@ -1018,6 +1018,22 @@ defmodule Vor.Parser do
     parse_if_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
   end
 
+  # var = Mod.Sub.function(...) — extern call with binding inside if body
+  defp parse_if_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                       {:identifier, _, first_seg}, {:operator, _, :dot} | rest], acc) do
+    case collect_dotted_name([first_seg], [{:operator, nil, :dot} | rest]) do
+      {:ok, segments, func, [{:delimiter, _, :open_paren} | rest]} ->
+        mod = Enum.join(Enum.map(segments, &Atom.to_string/1), ".")
+        case parse_extern_args(rest) do
+          {:ok, args, rest} ->
+            node = %AST.ExternCall{module: mod, function: func, args: args, bind: bind_var, meta: meta}
+            parse_if_body(rest, [node | acc])
+          {:error, _} = err -> err
+        end
+      {:error, _} = err -> err
+    end
+  end
+
   # var = min/max(...) inside if body — identifier-based
   defp parse_if_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
                        {:identifier, _, op}, {:delimiter, _, :open_paren} | rest], acc)

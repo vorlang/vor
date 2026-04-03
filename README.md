@@ -64,12 +64,12 @@ The equivalent in Elixir would be a gen_server with manual rate tracking, `propl
 - Safety and liveness invariant declarations with guarantee tiers (proven, checked, monitored)
 - Protocol composition checking — `system` blocks verify connected agents have compatible protocols
 - Protocol conformance checking
-- Working rate limiter, circuit breaker, Raft consensus, and G-Counter CRDT examples
+- Working rate limiter, circuit breaker, Raft consensus, G-Counter CRDT, and distributed lock examples
 - Handler completeness checking — call handlers must emit on every code path
 - Multi-agent system runtime — supervisor, registry, inter-agent send tested end-to-end
 - Native map operations and min/max expressions
 - Periodic timers (`every`) for gossip, heartbeats, cleanup
-- 199 tests passing, 9 property tests, zero compiler warnings
+- 209 tests passing, 9 property tests, zero compiler warnings
 - [Step-by-step tutorial](docs/vor-tutorial.md) from Echo agent to multi-agent pipeline
 
 ## Verified state machine
