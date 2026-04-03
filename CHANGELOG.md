@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-04-02
+- **G-Counter CRDT example** — Three-node grow-only counter with gossip-based sync using `map_merge(counts, R, :max)`. Fully native Vor — no extern calls. Periodic broadcast via liveness monitoring. Cluster convergence verified: concurrent increments across nodes converge to correct total.
 - **Native map operations** — `map_get(m, k, default)`, `map_put(m, k, v)`, `map_has(m, k)`, `map_delete(m, k)`, `map_size(m)`, `map_sum(m)`, `map_merge(m1, m2, :max)`. Work in variable bindings, transitions, emit fields, for both gen_server and gen_statem.
 - **Min/max expressions** — `min(a, b)` and `max(a, b)` as built-in expressions. Work in variable bindings, transitions, and emit fields. Useful for high/low water marks and CRDT merge strategies.
 - **Tutorial with verified examples** — 8-step tutorial from Echo agent to multi-agent pipeline. Every code example compiles and runs. 11 tutorial tests verify all steps.

@@ -64,7 +64,7 @@ The equivalent in Elixir would be a gen_server with manual rate tracking, `propl
 - Safety and liveness invariant declarations with guarantee tiers (proven, checked, monitored)
 - Protocol composition checking — `system` blocks verify connected agents have compatible protocols
 - Protocol conformance checking
-- Working rate limiter, circuit breaker, and Raft consensus examples
+- Working rate limiter, circuit breaker, Raft consensus, and G-Counter CRDT examples
 - Handler completeness checking — call handlers must emit on every code path
 - Multi-agent system runtime — supervisor, registry, inter-agent send tested end-to-end
 - Native map operations and min/max expressions

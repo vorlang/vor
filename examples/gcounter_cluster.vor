@@ -1,0 +1,66 @@
+agent GCounter(node_id: atom, sync_interval_ms: integer) do
+
+  state phase: :active | :syncing
+  state counts: map
+
+  protocol do
+    accepts {:increment}
+    accepts {:sync, remote_counts: map}
+    accepts {:value}
+    accepts {:get_counts}
+
+    sends {:sync, remote_counts: map}
+
+    emits {:ok}
+    emits {:total, value: integer}
+    emits {:counts, data: map}
+  end
+
+  on {:increment} when phase == :active do
+    current = map_get(counts, node_id, 0)
+    transition counts: map_put(counts, node_id, current + 1)
+    emit {:ok}
+  end
+
+  on {:sync, remote_counts: R} when phase == :active do
+    transition counts: map_merge(counts, R, :max)
+  end
+
+  on {:sync, remote_counts: R} when phase == :syncing do
+    transition counts: map_merge(counts, R, :max)
+  end
+
+  on {:value} when phase == :active do
+    total = map_sum(counts)
+    emit {:total, value: total}
+  end
+
+  on {:get_counts} when phase == :active do
+    emit {:counts, data: counts}
+  end
+
+  liveness "periodic sync" monitored(within: sync_interval_ms) do
+    always(phase != :syncing implies eventually(phase == :syncing))
+  end
+
+  resilience do
+    on_invariant_violation("periodic sync") ->
+      transition phase: :syncing
+      broadcast {:sync, remote_counts: counts}
+      transition phase: :active
+  end
+
+end
+
+system GCounterCluster do
+  agent :node1, GCounter(node_id: :node1, sync_interval_ms: 200)
+  agent :node2, GCounter(node_id: :node2, sync_interval_ms: 250)
+  agent :node3, GCounter(node_id: :node3, sync_interval_ms: 300)
+
+  connect :node1 -> :node2
+  connect :node1 -> :node3
+  connect :node2 -> :node1
+  connect :node2 -> :node3
+  connect :node3 -> :node1
+  connect :node3 -> :node2
+end
