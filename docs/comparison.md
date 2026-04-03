@@ -8,24 +8,23 @@ The "Mainstream" column describes the dominant paradigm (Java, Python, TypeScrip
 |---|---|---|
 | **Primary artifact** | Source code (functions, classes, modules) | Behavioral specification (.vor file). No separate implementation |
 | **Computation primitive** | Functions (unidirectional input → output) | Relations (bidirectional) + directional handlers for effects |
-| **Who writes the code** | Human writes all implementation | Human writes spec; AI synthesizes implementation within declared constraints |
 | **State model** | Mutable variables, objects, shared memory | Relational knowledge (timeless) + process state (temporal), explicitly separated |
 | | | |
-| **Correctness approach** | Tests (unit, integration, e2e). Mostly after the fact | Three tiers: proven (compiler-verified), checked (synthesis-tested), monitored (runtime) |
-| **Invariants** | Implicit in code logic. Asserts, type checks | First-class temporal logic (TLA+-style). Safety + liveness. Each tagged with guarantee tier |
-| **Spec vs. impl gap** | Large. Design docs drift from code immediately | Zero. The spec is the implementation. No drift possible |
+| **Correctness approach** | Tests (unit, integration, e2e). Mostly after the fact | Two tiers: proven (compiler-verified via graph traversal) and monitored (runtime enforcement with declared recovery) |
+| **Invariants** | Implicit in code logic. Asserts, type checks | First-class temporal logic (TLA+-style). Safety + liveness. Each tagged with guarantee tier. Compiler fails closed on unverifiable properties |
+| **Spec vs. impl gap** | Large. Design docs drift from code immediately | Zero. The spec compiles directly to BEAM bytecode. No drift possible |
 | | | |
-| **Concurrency model** | Threads, locks, async/await. Error-prone shared state | Agents as OTP processes. Topology inferred from protocol compatibility |
-| **Failure handling** | Try/catch, error codes. Ad-hoc per codebase | Declared resilience policies. Supervision derived from spec. Violations are observable events |
-| **Composition** | Function calls, imports, dependency injection | Protocol unification. Agents compose if message types + behavioral contracts align |
+| **Concurrency model** | Threads, locks, async/await. Error-prone shared state | Agents as OTP processes. Topology declared in system blocks. Protocols checked at compile time |
+| **Failure handling** | Try/catch, error codes. Ad-hoc per codebase | Declared resilience policies. Recovery handlers are verified against safety invariants. Violations are observable events |
+| **Composition** | Function calls, imports, dependency injection | Protocol unification. Agents compose if message tags and field names align. Compiler checks compatibility |
 | | | |
-| **Change process** | Edit code → test → review → deploy | Update spec → AI re-synthesizes → verify constraints → hot-swap on BEAM |
-| **Performance tuning** | Profile → manually optimize hot paths | Performance bounds are constraints. AI selects algorithm. Re-synthesis on drift |
-| **Debugging** | Stack traces, breakpoints, print statements | Invariant violation traces. AI explains which constraints led to which behaviors |
+| **Multi-agent coordination** | Ad-hoc messaging, shared databases, message queues | System blocks with Registry-based discovery. Send for directed messages, broadcast for fan-out. Automatic re-registration on restart |
+| **Change process** | Edit code → test → review → deploy | Update spec → compiler re-verifies → BEAM binary reloaded. Invariants checked on every change |
+| **Debugging** | Stack traces, breakpoints, print statements | Invariant violation traces. Compiler trace shows each pipeline stage. State graph extraction and visualization |
 | | | |
-| **Key difficulty** | Complexity scales with human cognitive limits. Concurrency bugs. Integration debt | AI synthesis is probabilistic. Performance bounds may be unsatisfiable. Re-synthesis risks |
-| **Escape hatches** | N/A — everything is manual | Drop to Erlang/Elixir for unconstrained effects, system integration, performance-critical paths |
-| **Maturity** | Decades of tooling, libraries, talent pool | Early stage. Working compiler (Elixir-based, compiles to BEAM). Active development |
+| **Key difficulty** | Complexity scales with human cognitive limits. Concurrency bugs. Integration debt | Expression language limits require extern calls for data operations. Verification limited to single-agent local properties. Conditional codegen complexity in gen_statem |
+| **Escape hatches** | N/A — everything is manual | Drop to Erlang/Elixir via extern declarations. Untrusted by default — try/catch wrapped, compiler warns if proven invariants depend on extern results |
+| **Maturity** | Decades of tooling, libraries, talent pool | Working compiler with 164+ tests, TLA+-verified verifier, Raft consensus example. Compilation <5ms, verification <2ms. Active development |
 
 ### What about Erlang and Elixir?
 
@@ -35,58 +34,50 @@ What Erlang and Elixir don't have is verification of the things that go wrong ev
 
 Vor doesn't replace OTP — it compiles to OTP. A Vor agent is a gen_server or gen_statem at runtime, supervised and distributed like any other BEAM process. Vor adds the layer above: the state machine is declared and verified, the protocol is checked at compile time, and the invariants are enforced. Everything below that layer is the same BEAM you already trust.
 
----
+### How Vor differs from verification tools
 
-## The collapse problem: why AI on mainstream doesn't work
-
-The table above suggests a clean split, but there's a deeper question: can you just layer AI code generation onto mainstream languages? That's what Copilot, Claude Code, Cursor, and every AI coding tool attempts today. The argument for Vor rests on why this approach is structurally limited.
-
-### What AI-on-mainstream looks like now
-
-The current model is: human writes intent in natural language or partial code, AI generates implementation in Python/TypeScript/Java/etc., human reviews, tests, and deploys. This works. It's productive. It's also fundamentally bounded.
-
-### Why it collapses at scale
-
-**The generated code inherits all the problems of the language it's written in.** AI-generated Python still has race conditions, type errors at runtime, implicit state mutations, and dependency hell. The AI doesn't eliminate these failure modes — it just produces them faster. You've traded "slow to write, slow to break" for "fast to write, fast to break." The verification burden shifts from writing to reviewing, but it doesn't shrink.
-
-**Review becomes the bottleneck, and it doesn't scale.** When a human writes code, they build a mental model as they go. When AI generates code, the human must reconstruct that mental model from the output. For small generations this is fine. For large systems, the reviewer is doing harder cognitive work than the original author would have — they're reverse-engineering intent from implementation, which is strictly harder than forward-engineering implementation from intent. As AI generates more code faster, the review queue grows, and either quality drops or velocity drops. You can't escape this tradeoff within the mainstream paradigm.
-
-**The spec-implementation gap widens, not narrows.** AI coding tools generate implementations from informal specifications (natural language prompts, comments, partial code). But informal specs are ambiguous. The AI resolves ambiguity by making choices the human didn't specify. Each unreviewed choice is a latent bug. As systems grow, the accumulated unreviewed choices compound into behavioral drift — the system does something nobody intended, but nobody can point to where it went wrong because there's no formal spec to compare against. The mainstream approach has no mechanism to prevent this.
-
-**Testing AI-generated code with AI-generated tests is circular.** If the AI generates both the implementation and the tests, you've created a closed system that validates itself. The tests encode the same assumptions (and potentially the same misunderstandings) as the code. This looks like coverage without providing actual assurance. The only escape is human-written tests, which brings you back to the review bottleneck.
-
-**Refactoring becomes treacherous.** Mainstream codebases are held together by implicit invariants — assumptions that live in developers' heads, not in the code. AI can't see these invariants. When it refactors, it preserves syntax and tests but may violate unstated assumptions. The more AI-generated code accumulates, the fewer humans understand the implicit invariants, and the more dangerous each change becomes. This is technical debt at machine speed.
-
-### What Vor does differently
-
-Vor's key move is collapsing the spec-implementation gap to zero. There is no implementation to review because there is no separate implementation. The .vor file is both the specification and the source of truth. The AI doesn't generate code for humans to review — it generates BEAM bytecode that is mechanically verified against the spec's constraints before deployment.
-
-This changes the verification problem from "does this code match our intent?" (unbounded, requires human judgment) to "does this output satisfy these constraints?" (bounded, mechanically checkable). The human's job shifts from reviewing code to writing good constraints — which is hard, but it's a well-defined hard, not an open-ended hard.
-
-The constraints don't just catch bugs — they prevent the AI from making unauthorized choices. Every behavioral property must be declared. If the spec is silent on something, the AI either flags the ambiguity or defaults to a safe behavior defined by the language. There's no space for "latent unreviewed choices" to accumulate.
-
-### Why not existing verification tools with IDE integration?
-
-A reasonable alternative to Vor: use TLA+ or P to verify your design, then generate code stubs from the verified model, and fill in the implementation in Erlang/Elixir with IDE support. This is essentially the workflow Amazon uses (TLA+ for design, Java/Rust for implementation) and Microsoft advocates (P for modeling, C# for production). Why isn't this enough?
+A reasonable alternative to Vor: use TLA+ or P to verify your design, then implement in Erlang/Elixir. This is essentially the workflow Amazon uses (TLA+ for design, Java/Rust for implementation) and Microsoft advocates (P for modeling, C# for production). Why isn't this enough?
 
 **The two-artifact problem.** You now have a TLA+ spec and an Erlang implementation. They're written in different languages, live in different files, and use different tools. On day one they match. On day thirty, someone fixes a production bug by editing the Erlang code without updating the TLA+ spec. On day ninety, someone adds a feature to the spec but the implementation diverges in a subtle way. On day three hundred, nobody trusts the spec anymore and it becomes shelfware. This isn't hypothetical — it's the documented experience of almost every team that adopts formal methods alongside a production codebase. The spec drifts from the code because nothing enforces their alignment.
 
 **Stubs aren't implementations.** A verified TLA+ model can tell you that your state machine design is correct. It can generate the skeleton of a gen_statem with the right states and transitions. But the skeleton is empty — someone still has to write the handler bodies, the timer management, the error responses, the data transformations. That's where most bugs live. The stub gives you correct structure but unverified behavior. It's like having a verified blueprint but no building inspector.
 
-**Verification and execution live in different worlds.** TLA+ checks properties against a mathematical model. The Erlang code runs on the BEAM. Between them is a manual translation step that no tool verifies. Did the developer faithfully translate every TLA+ state transition into a gen_statem clause? Did they handle every message that the TLA+ model says can arrive in each state? Did they implement the timer backoff exactly as the model specifies? These are exactly the questions where bugs hide, and the IDE integration doesn't answer them.
+**Verification and execution live in different worlds.** TLA+ checks properties against a mathematical model. The Erlang code runs on the BEAM. Between them is a manual translation step that no tool verifies. Did the developer faithfully translate every TLA+ state transition into a gen_statem clause? Did they handle every message that the TLA+ model says can arrive in each state? Did they implement the timer backoff exactly as the model specifies? These are exactly the questions where bugs hide, and no tool answers them.
 
 **The tools don't share semantics.** TLA+ thinks in terms of state predicates and temporal formulas. Erlang thinks in terms of processes and message passing. P thinks in terms of events and state machines. Each tool has its own abstraction, and translating between them is a manual, error-prone process. The developer must be fluent in both the verification language and the implementation language, and must mentally maintain the mapping between them. This is why formal methods adoption remains low despite decades of advocacy — the cognitive overhead of maintaining two mental models is high.
 
 **What Vor does instead.** In Vor, there is one artifact. The state machine declaration, the handler behavior, the invariants, and the executable code are all in the same `.vor` file, in the same language, processed by the same compiler. When you change a handler, the compiler re-checks it against the invariants. When you add an invariant, the compiler verifies it against the existing handlers. Nothing drifts because there's nothing to drift from. The verified model and the running code are the same thing.
 
-The tradeoff is real: existing verification tools (TLA+, SPIN, Alloy) are more mature, more expressive, and better understood than Vor's invariant system. Vor's compile-time verification is currently limited to local single-agent properties — it can't do everything TLA+ can do. But the properties it can check are checked against the actual executable code, not against a separate model that might not match reality. A weaker guarantee about the real system beats a stronger guarantee about a model that's drifted from the system.
+The tradeoff is real: existing verification tools (TLA+, SPIN, Alloy) are more mature, more expressive, and better understood than Vor's invariant system. Vor's compile-time verification is currently limited to local single-agent properties — it can't verify distributed invariants like "at most one leader per term" across a cluster. But the properties it can check are checked against the actual executable code, not against a separate model that might not match reality. A weaker guarantee about the real system beats a stronger guarantee about a model that's drifted from the system.
 
-### The honest risk
+### How Vor differs from other BEAM languages
 
-This only works if the constraint language is expressive enough to capture what matters, and if the AI synthesis is reliable enough to produce correct implementations. Both are open research problems. The vericoding results (82% in Dafny) suggest we're approaching viability but aren't there yet. Vor is a bet that the trajectory continues — that formal specification plus AI synthesis will cross the threshold from "research demo" to "practical tool" within the next few years.
+**Gleam** asks "what if Erlang had types?" Gleam adds static type safety to the BEAM with a clean, modern syntax and excellent developer experience. It's a general-purpose language that competes on correctness through types.
 
-If that bet is wrong, Vor is an interesting language with a good runtime target that can still be used with human-written implementations behind the spec. The spec-as-primary-artifact principle has value independent of whether AI synthesis works perfectly. But if the bet is right, Vor is positioned where the future actually lands — and AI-on-mainstream will be remembered as the transition phase, not the destination.
+**Vor** asks "what if your state machine was proven correct?" Vor adds compile-time verification of state machine properties, protocol compatibility, and temporal invariants. It's a specialized language that competes on correctness through formal verification.
+
+They don't compete. Someone could use Gleam for their web application and Vor for their protocol layer. Gleam catches type errors; Vor catches state machine errors, stuck processes, and protocol mismatches. Different bugs, different tools.
+
+**Cure** (cure-lang.org) is the closest BEAM language to Vor. Cure uses dependent types and SMT solvers from the Haskell/Idris tradition. Vor uses relational logic and temporal properties from the TLA+/Prolog tradition. Cure proves type-level properties; Vor proves behavioral properties. Different intellectual lineages solving adjacent problems — potential allies, not competitors.
+
+### The AI question
+
+Vor's declarative structure — where the spec is the program and properties are first-class — is designed to be AI-friendly. An AI writing a Vor program gets its work checked by the compiler: invariants must hold, protocols must match, handlers must cover all accepted messages. The compiler catches the AI's mistakes the same way it catches a human's.
+
+This isn't AI synthesis in the speculative sense of "AI generates implementations from properties." It's more practical: AI writes `.vor` files the same way it writes `.py` or `.ex` files, but the Vor compiler provides stronger guarantees about what it produces. The spec-as-program principle means there's no gap between what the AI was asked to build and what the compiler verifies. The rate limiter, circuit breaker, and Raft examples were all developed with AI assistance — the compiler caught real bugs in AI-generated code during development.
+
+Full AI synthesis — where the human provides only properties and the AI provides the implementation — is part of the language design vision but not yet implemented. The verification story works today without it.
+
+### The honest risks
+
+**Expressiveness limits.** Vor's handler expression language is simpler than Erlang or Elixir. Complex data operations (list manipulation, map traversal, string processing) require extern calls to Elixir. This is by design — Vor handles the protocol layer, Elixir handles the data layer — but it means Vor programs are always hybrid. The boundary between "what Vor verifies" and "what Elixir does unverified" requires judgment.
+
+**Single-agent verification.** Vor can verify properties of individual agents but not distributed properties across a cluster. The Raft example verifies that each node's state machine is locally correct, but "at most one leader per term" — the key Raft safety property — requires reasoning about message interleavings across agents, which is exactly what TLA+ does well and Vor doesn't do yet.
+
+**Adoption.** New programming languages face a steep adoption curve regardless of technical merit. Vor's audience — BEAM developers who need verification, or formal methods practitioners who need executable specs — is small. The project's viability depends on finding the right early users, not on broad appeal.
+
+If Vor never gains adoption, it's still a working demonstration that verification and execution can live in one artifact on a production runtime. If it does gain adoption, the BEAM ecosystem gets a verification layer it's never had.
 
 ---
 
-*vorlang.org  ·  Targets: BEAM/OTP  ·  License: Open Source  ·  Status: Design Phase*
+*vorlang.org  ·  Targets: BEAM/OTP  ·  License: MIT  ·  Status: Working compiler with verified safety, Raft consensus example, 164+ tests*
