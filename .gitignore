@@ -36,3 +36,5 @@ tla2tools.jar
 
 # Claude Code worktrees
 /.claude/
+tla/states/
+*.bin

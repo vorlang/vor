@@ -85,21 +85,19 @@ defmodule Vor.Examples.RaftTest do
     :gen_statem.stop(pid)
   end
 
-  test "candidate accumulates votes" do
+  test "candidate becomes leader with majority votes" do
     pid = start_raft_node(election_timeout_ms: 200)
     Process.sleep(350)
 
-    # Check we're a candidate with 1 self-vote
     result = :gen_statem.call(pid, {:get_state, %{}})
     assert {:state_info, %{role: :candidate, term: term}} = result
 
-    # Send one more vote
+    # Send one more vote — majority of 3 is 2, candidate already voted for self
     :gen_statem.cast(pid, {:vote_granted, %{term: term, voter: :node2}})
     Process.sleep(50)
 
-    # Vote count should be 2 (self + node2)
-    {_state, data} = :sys.get_state(pid)
-    assert data.vote_count == 2
+    result = :gen_statem.call(pid, {:get_state, %{}})
+    assert {:state_info, %{role: :leader}} = result
     :gen_statem.stop(pid)
   end
 
@@ -135,7 +133,7 @@ defmodule Vor.Examples.RaftTest do
 
   # --- Cluster integration tests ---
 
-  test "three-node cluster starts and nodes communicate" do
+  test "three-node cluster elects exactly one leader" do
     source = File.read!("examples/raft_cluster.vor")
     {:ok, result} = Vor.Compiler.compile_system_and_load(source)
     {:ok, sup_pid} = result.system.start_link.()
@@ -143,22 +141,39 @@ defmodule Vor.Examples.RaftTest do
     registry = result.system.registry
 
     # Wait for election timeouts + vote propagation
-    Process.sleep(800)
+    Process.sleep(1000)
 
-    # All nodes should be alive and have progressed past initial state
     roles = Enum.map([:node1, :node2, :node3], fn name ->
       [{pid, _}] = Registry.lookup(registry, name)
       {:state_info, state} = :gen_statem.call(pid, {:get_state, %{}})
       {name, state}
     end)
 
-    # At least one node should have become a candidate (election timeout fired)
-    non_followers = Enum.filter(roles, fn {_, state} -> state.role != :follower end)
-    assert length(non_followers) >= 1, "Expected at least one non-follower, got: #{inspect(roles)}"
+    leaders = Enum.filter(roles, fn {_, state} -> state.role == :leader end)
+    assert length(leaders) == 1, "Expected exactly one leader, got: #{inspect(roles)}"
 
-    # All nodes should have term >= 1 (election happened)
-    terms = Enum.map(roles, fn {_, state} -> state.term end)
-    assert Enum.any?(terms, fn t -> t >= 1 end), "Expected at least one node with term >= 1, got: #{inspect(terms)}"
+    Supervisor.stop(sup_pid)
+  end
+
+  test "cluster leader accepts client writes" do
+    source = File.read!("examples/raft_cluster.vor")
+    {:ok, result} = Vor.Compiler.compile_system_and_load(source)
+    {:ok, sup_pid} = result.system.start_link.()
+
+    registry = result.system.registry
+
+    Process.sleep(1000)
+
+    leader_pid = Enum.find_value([:node1, :node2, :node3], fn name ->
+      [{pid, _}] = Registry.lookup(registry, name)
+      {:state_info, state} = :gen_statem.call(pid, {:get_state, %{}})
+      if state.role == :leader, do: pid, else: nil
+    end)
+
+    assert leader_pid != nil, "No leader elected"
+
+    result = :gen_statem.call(leader_pid, {:client_request, %{command: :set_x}})
+    assert {:client_ok, %{index: 1}} = result
 
     Supervisor.stop(sup_pid)
   end

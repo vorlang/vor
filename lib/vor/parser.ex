@@ -1330,6 +1330,41 @@ defmodule Vor.Parser do
     end
   end
 
+  defp parse_resilience_actions([{:keyword, meta, :broadcast}, {:delimiter, _, :open_brace}, {:atom, _, tag} | rest], acc) do
+    case parse_binding_fields(rest, []) do
+      {:ok, fields, rest} ->
+        node = %AST.Broadcast{tag: tag, fields: fields, meta: meta}
+        parse_resilience_actions(rest, [node | acc])
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_resilience_actions([{:keyword, meta, :send}, {:atom, _, target} | rest], acc) do
+    case rest do
+      [{:delimiter, _, :open_brace}, {:atom, _, tag} | rest] ->
+        case parse_binding_fields(rest, []) do
+          {:ok, fields, rest} ->
+            node = %AST.Send{target: target, tag: tag, fields: fields, meta: meta}
+            parse_resilience_actions(rest, [node | acc])
+          {:error, _} = err -> err
+        end
+      [token | _] -> {:error, {:expected_send_message, token}}
+    end
+  end
+
+  defp parse_resilience_actions([{:keyword, meta, :send}, {:identifier, _, target} | rest], acc) do
+    case rest do
+      [{:delimiter, _, :open_brace}, {:atom, _, tag} | rest] ->
+        case parse_binding_fields(rest, []) do
+          {:ok, fields, rest} ->
+            node = %AST.Send{target: {:var, target}, tag: tag, fields: fields, meta: meta}
+            parse_resilience_actions(rest, [node | acc])
+          {:error, _} = err -> err
+        end
+      [token | _] -> {:error, {:expected_send_message, token}}
+    end
+  end
+
   defp parse_resilience_actions(tokens, acc), do: {:ok, Enum.reverse(acc), tokens}
 
   defp skip_resilience_action_line([{:keyword, _, :end} | _] = rest), do: {:ok, rest}

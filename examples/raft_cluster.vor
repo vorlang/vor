@@ -72,7 +72,13 @@ agent RaftNode(
   end
 
   on {:vote_granted, term: T, voter: V} when role == :candidate and T == current_term do
-    transition vote_count: vote_count + 1
+    new_votes = vote_count + 1
+    transition vote_count: new_votes
+    maj = Vor.Examples.RaftHelpers.majority(cluster_size: cluster_size)
+    if new_votes >= maj do
+      transition role: :leader
+      broadcast {:append_entries, term: current_term, leader_id: node_id, entries: :empty, leader_commit: commit_index}
+    end
   end
 
   on {:vote_denied, term: T} when role == :candidate and T > current_term do
@@ -170,6 +176,7 @@ agent RaftNode(
       transition current_term: current_term + 1
       transition voted_for: node_id
       transition vote_count: 1
+      broadcast {:request_vote, term: current_term, candidate_id: node_id, last_log_index: 0, last_log_term: 0}
   end
 
   safety "followers don't accept client writes" proven do
@@ -184,8 +191,8 @@ end
 
 system RaftCluster do
   agent :node1, RaftNode(node_id: :node1, cluster_size: 3, election_timeout_ms: 300, heartbeat_ms: 100)
-  agent :node2, RaftNode(node_id: :node2, cluster_size: 3, election_timeout_ms: 350, heartbeat_ms: 100)
-  agent :node3, RaftNode(node_id: :node3, cluster_size: 3, election_timeout_ms: 400, heartbeat_ms: 100)
+  agent :node2, RaftNode(node_id: :node2, cluster_size: 3, election_timeout_ms: 600, heartbeat_ms: 100)
+  agent :node3, RaftNode(node_id: :node3, cluster_size: 3, election_timeout_ms: 900, heartbeat_ms: 100)
 
   connect :node1 -> :node2
   connect :node1 -> :node3

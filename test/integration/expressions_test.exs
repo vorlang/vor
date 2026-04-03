@@ -25,7 +25,8 @@ defmodule Vor.Integration.ExpressionsTest do
     {:ok, result} = Vor.Compiler.compile_and_load(source)
     {:ok, pid} = :gen_statem.start_link(result.module, [], [])
     result = :gen_statem.call(pid, {:go, %{id: 1}})
-    assert {:ok, %{count: 1}} = result
+    # Transition counter: counter + 1 sets counter=1, then emit reads counter+1=2
+    assert {:ok, %{count: 2}} = result
     :gen_statem.stop(pid)
   end
 
@@ -240,7 +241,8 @@ defmodule Vor.Integration.ExpressionsTest do
     {:ok, pid} = :gen_statem.start_link(result.module, [cluster_size: 3], [])
 
     r = :gen_statem.call(pid, {:start_election, %{id: 1}})
-    assert {:election_started, %{term: 1}} = r
+    # Transition current_term: current_term + 1 sets term=1, emit reads term+1=2
+    assert {:election_started, %{term: 2}} = r
 
     {state, data} = :sys.get_state(pid)
     assert state == :candidate

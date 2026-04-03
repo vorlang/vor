@@ -67,7 +67,7 @@ The equivalent in Elixir would be a gen_server with manual rate tracking, `propl
 - Working rate limiter, circuit breaker, and Raft consensus examples
 - Handler completeness checking — call handlers must emit on every code path
 - Multi-agent system runtime — supervisor, registry, inter-agent send tested end-to-end
-- 132 tests passing, zero compiler warnings
+- 138 tests passing, zero compiler warnings
 
 ## Verified state machine
 

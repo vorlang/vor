@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-04-02
+- **Conditional transitions in gen_statem** — Transitions inside if/else branches now take effect. Each branch produces its own gen_statem return with its own data map. Data map threaded through with unique variable names. Send and broadcast read post-transition values. Resilience handlers support broadcast and send.
 - **Raft consensus example** — Three-node Raft cluster using native Vor primitives: `broadcast` for vote requests, `send` with variable targets for directed responses, liveness monitoring for election timeouts, proven safety invariants. All node-to-node messaging is native Vor — externs only used for log operations.
 - **Variable send targets** — `send L {:msg, fields}` where L is a pattern-bound variable, resolved at runtime via Registry lookup. Enables directed responses in protocols like Raft.
 - **Guard-safe data field comparison** — Guards like `when T > current_term` use `map_get/2` (guard BIF) instead of `maps:get/2`.

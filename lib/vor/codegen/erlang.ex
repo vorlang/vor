@@ -391,7 +391,7 @@ defmodule Vor.Codegen.Erlang do
       _ -> :phase
     end
 
-    data_field_names = MapSet.new((agent.data_fields || []), fn %IR.DataField{name: name} -> name end)
+    _data_field_names = MapSet.new((agent.data_fields || []), fn %IR.DataField{name: name} -> name end)
 
     # Generate cast clauses and corresponding call clauses
     {cast_clauses, call_clauses} =
@@ -401,66 +401,17 @@ defmodule Vor.Codegen.Erlang do
         pattern_form = pattern_to_erl(handler.pattern, l)
         guard_erl = statem_guard_to_erl(handler.guard, l)
 
-        # Build the handler body for gen_statem
-        {body_exprs, new_state, data_updates, emit_form} =
-          compile_statem_body(handler.actions, l, state_field_name, data_field_names)
-
-        # Check if there are emits nested in conditionals
-        has_conditional_emits = emit_form == nil and has_nested_emits?(handler.actions)
-
-        # Build the result tuple
-        state_result = case new_state do
-          nil -> {:var, l, :State}
-          value when is_atom(value) -> {:atom, l, value}
-        end
-
-        # Build the data variable - apply updates if any
-        data_result = case data_updates do
-          [] -> {:var, l, :Data}
-          updates ->
-            map_pairs = Enum.map(updates, fn {field, val_form} ->
-              {:map_field_exact, l, {:atom, l, field}, val_form}
-            end)
-            {:map, l, {:var, l, :Data}, map_pairs}
-        end
-
-        # Inject state timeout actions for liveness monitoring
-        timeout_acts = state_timeout_actions(new_state, monitors, l)
-        actions_list = list_to_erl(timeout_acts, l)
-
-        # Cast clause - no reply needed
-        cast_body = body_exprs ++ [
-          {:tuple, l, [{:atom, l, :next_state}, state_result, data_result, actions_list]}
-        ]
+        # Build cast and call handler bodies using the new data-threading codegen
+        cast_body = compile_statem_handler_body(
+          handler.actions, l, :Data, 0, state_field_name, monitors, nil)
 
         cast_clause = {:clause, l,
           [{:atom, l, :cast}, pattern_form, {:var, l, :State}, {:var, l, :Data}],
           guard_erl,
           cast_body}
 
-        # Call clause - reply with emit value or :ok
-        # If emits are inside conditionals, bind the case expr result to VorReply
-        {call_body_exprs, reply_value} = cond do
-          emit_form != nil ->
-            {body_exprs, emit_form}
-
-          has_conditional_emits ->
-            # The last body_expr is a case that returns the emit value
-            # Bind it to VorReply
-            {pre, [last]} = Enum.split(body_exprs, -1)
-            binding = {:match, l, {:var, l, :VorReply}, last}
-            {pre ++ [binding], {:var, l, :VorReply}}
-
-          true ->
-            {body_exprs, {:atom, l, :ok}}
-        end
-
-        reply_action = {:tuple, l, [{:atom, l, :reply}, {:var, l, :From}, reply_value]}
-        call_actions = list_to_erl([reply_action | timeout_acts], l)
-
-        call_body = call_body_exprs ++ [
-          {:tuple, l, [{:atom, l, :next_state}, state_result, data_result, call_actions]}
-        ]
+        call_body = compile_statem_handler_body(
+          handler.actions, l, :Data, 0, state_field_name, monitors, {:call, :From})
 
         call_clause = {:clause, l,
           [{:tuple, l, [{:atom, l, :call}, {:var, l, :From}]},
@@ -527,31 +478,15 @@ defmodule Vor.Codegen.Erlang do
       _ -> :phase
     end
 
-    data_field_names = MapSet.new((agent.data_fields || []), fn %IR.DataField{name: name} -> name end)
-
     timeout_handlers = agent.handlers
     |> Enum.filter(fn h -> is_timeout_handler?(h, monitors) end)
 
     Enum.map(timeout_handlers, fn handler ->
       monitor = Enum.find(monitors, fn m -> m.event_tag == handler.pattern.tag end)
 
-      # Compile the full handler body for gen_statem
-      {body_exprs, new_state, data_updates, _emit_form} =
-        compile_statem_body(handler.actions, l, state_field_name, data_field_names)
-
-      state_result = case new_state do
-        nil -> {:var, l, :State}
-        value when is_atom(value) -> {:atom, l, value}
-      end
-
-      data_result = case data_updates do
-        [] -> {:var, l, :Data}
-        updates ->
-          map_pairs = Enum.map(updates, fn {field, val_form} ->
-            {:map_field_exact, l, {:atom, l, field}, val_form}
-          end)
-          {:map, l, {:var, l, :Data}, map_pairs}
-      end
+      # Compile the full handler body using the new data-threading codegen
+      body = compile_statem_handler_body(
+        handler.actions, l, :Data, 0, state_field_name, monitors, nil)
 
       excluded = [monitor.target_state | monitor.excluded_states]
       guard = excluded
@@ -561,7 +496,7 @@ defmodule Vor.Codegen.Erlang do
       {:clause, l,
         [{:atom, l, :state_timeout}, {:atom, l, handler.pattern.tag}, {:var, l, :State}, {:var, l, :Data}],
         [guard],
-        body_exprs ++ [{:tuple, l, [{:atom, l, :next_state}, state_result, data_result]}]}
+        body}
     end)
   end
 
@@ -604,6 +539,148 @@ defmodule Vor.Codegen.Erlang do
     end)
   end
 
+  # Compile a gen_statem handler body with data map threading.
+  # Returns a list of Erlang expressions ending in a {next_state, ...} or {keep_state, ...} return.
+  # `data_var` is the current data map variable name (e.g., :Data, :VorData1, :VorData2).
+  # `counter` is used for unique variable names.
+  # `state_field_name` is the enum state field name.
+  # `monitors` is for generating state_timeout actions.
+  # `call_info` is nil for cast, or {:call, from_var} for call (to include reply action).
+  defp compile_statem_handler_body(actions, l, data_var, counter, state_field_name, monitors, call_info) do
+    {exprs, has_terminal} =
+      compile_statem_actions_v2(actions, l, data_var, counter, state_field_name, monitors, call_info)
+
+    if has_terminal do
+      # A conditional already generated all returns inside its branches
+      exprs
+    else
+      # Linear path — need to generate return at the end
+      # Extract the final data var and state from the generated expressions
+      {final_data_var, new_state, emit_form} =
+        extract_final_state(actions, l, data_var, counter, state_field_name)
+
+      state_result = case new_state do
+        nil -> {:var, l, :State}
+        value when is_atom(value) -> {:atom, l, value}
+      end
+
+      timeout_acts = state_timeout_actions(new_state, monitors, l)
+
+      case call_info do
+        nil ->
+          actions_list = list_to_erl(timeout_acts, l)
+          exprs ++ [{:tuple, l, [{:atom, l, :next_state}, state_result, {:var, l, final_data_var}, actions_list]}]
+
+        {:call, from_var} ->
+          reply_value = emit_form || {:atom, l, :ok}
+          reply_action = {:tuple, l, [{:atom, l, :reply}, {:var, l, from_var}, reply_value]}
+          actions_list = list_to_erl([reply_action | timeout_acts], l)
+          exprs ++ [{:tuple, l, [{:atom, l, :next_state}, state_result, {:var, l, final_data_var}, actions_list]}]
+      end
+    end
+  end
+
+  # Extract final data variable name, state, and emit from a linear action sequence
+  defp extract_final_state(actions, _l, data_var, counter, state_field_name) do
+    Enum.reduce(actions, {data_var, nil, nil, counter}, fn action, {dv, state, emit, c} ->
+      case action do
+        %IR.Action{type: :transition, data: %IR.TransitionAction{field: field, value: value}} ->
+          if field == state_field_name and is_atom(value) do
+            {dv, value, emit, c}
+          else
+            {:"VorData#{c}", state, emit, c + 1}
+          end
+        %IR.Action{type: :emit, data: %IR.EmitAction{}} ->
+          {dv, state, :has_emit, c}
+        _ ->
+          {dv, state, emit, c}
+      end
+    end)
+    |> then(fn {dv, state, emit_marker, _c} ->
+      emit_form = if emit_marker == :has_emit do
+        # Find and compile the emit
+        emit_action = Enum.find(actions, fn a -> a.type == :emit end)
+        if emit_action, do: emit_to_erl(emit_action.data, 1, dv), else: nil
+      else
+        nil
+      end
+      {dv, state, emit_form}
+    end)
+  end
+
+  # Compile actions producing {exprs, has_terminal_conditional}
+  # When a conditional is encountered, it generates complete returns inside each branch
+  defp compile_statem_actions_v2(actions, l, data_var, counter, state_field_name, monitors, call_info) do
+    {exprs, _dv, _c, has_terminal} =
+      Enum.reduce(actions, {[], data_var, counter, false}, fn action, {exprs, dv, c, terminal} ->
+        if terminal do
+          # Already generated a terminal conditional — skip remaining
+          {exprs, dv, c, true}
+        else
+          case action do
+            %IR.Action{type: :transition, data: %IR.TransitionAction{field: field, value: value}} ->
+              if field == state_field_name and is_atom(value) do
+                # State transition — track in accumulator but don't generate code
+                {exprs, dv, c, false}
+              else
+                new_dv = :"VorData#{c}"
+                val_form = transition_value_to_erl(value, l, dv)
+                update = {:match, l, {:var, l, new_dv},
+                  {:map, l, {:var, l, dv}, [
+                    {:map_field_exact, l, {:atom, l, field}, val_form}
+                  ]}}
+                {exprs ++ [update], new_dv, c + 1, false}
+              end
+
+            %IR.Action{type: :var_binding, data: %IR.VarBindingAction{name: name, expr: expr}} ->
+              binding = {:match, l, {:var, l, erl_var(name)}, expr_to_erl(expr, l, dv)}
+              {exprs ++ [binding], dv, c, false}
+
+            %IR.Action{type: :extern_call} = ext ->
+              ext_exprs = action_to_erl(ext, l, dv)
+              {exprs ++ ext_exprs, dv, c, false}
+
+            %IR.Action{type: :send} = send ->
+              send_exprs = action_to_erl(send, l, dv)
+              {exprs ++ send_exprs, dv, c, false}
+
+            %IR.Action{type: :broadcast} = bcast ->
+              bcast_exprs = action_to_erl(bcast, l, dv)
+              {exprs ++ bcast_exprs, dv, c, false}
+
+            %IR.Action{type: :emit} ->
+              # Emit is handled in the return generation, skip here
+              {exprs, dv, c, false}
+
+            %IR.Action{type: :conditional, data: %IR.ConditionalAction{condition: cond_ir, then_actions: ta, else_actions: ea}} ->
+              # Terminal: generate case with complete returns in each branch
+              cond_form = condition_to_erl(cond_ir, l, dv)
+
+              # Get remaining actions after this conditional
+              idx = Enum.find_index(actions, fn a -> a == action end) || 0
+              rest = Enum.drop(actions, idx + 1)
+
+              then_body = compile_statem_handler_body(ta ++ rest, l, dv, c, state_field_name, monitors, call_info)
+              else_body = compile_statem_handler_body(ea ++ rest, l, dv, c + 100, state_field_name, monitors, call_info)
+
+              case_expr = {:case, l, cond_form, [
+                {:clause, l, [{:atom, l, true}], [], then_body},
+                {:clause, l, [{:atom, l, false}], [], else_body}
+              ]}
+
+              {exprs ++ [case_expr], dv, c + 200, true}
+
+            _ ->
+              {exprs, dv, c, false}
+          end
+        end
+      end)
+
+    {exprs, has_terminal}
+  end
+
+
+  # Legacy compile_statem_body - kept for timeout handlers and other non-handler contexts
   # Compile gen_statem handler body - returns {body_exprs, new_state_atom | nil, data_updates, emit_form | nil}
   defp compile_statem_body(actions, l, state_field_name, data_field_names) do
     {body_exprs, new_state, data_updates, emit_form} =
