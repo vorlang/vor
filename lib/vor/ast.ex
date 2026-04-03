@@ -127,6 +127,10 @@ defmodule Vor.AST do
     defstruct [:tag, :fields, :meta]
   end
 
+  defmodule Noop do
+    defstruct [:meta]
+  end
+
   defmodule System do
     defstruct [:name, :agents, :connections, :meta]
   end

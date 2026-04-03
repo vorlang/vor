@@ -156,12 +156,14 @@ defmodule Vor.Lowering do
     end
 
     # For solve calls, we need to resolve the relation and embed its data
-    actions = Enum.map(body, fn action ->
+    actions = body
+    |> Enum.map(fn action ->
       case action do
         %AST.Solve{} -> lower_solve_action(action, param_names, relation_map, pattern_vars)
         other -> lower_action(other, param_names)
       end
     end)
+    |> Enum.reject(&is_nil/1)
 
     %IR.Handler{
       pattern: lower_pattern(pattern),
@@ -252,6 +254,16 @@ defmodule Vor.Lowering do
   defp lower_guard_value({:range, low, high}, _known_names), do: {:range, low, high}
   defp lower_guard_value(other, _known_names), do: other
 
+  defp lower_field_value({:var, var}, param_names), do: lower_value_ref(var, param_names)
+  defp lower_field_value({:atom, val}, _param_names), do: {:atom, to_atom(val)}
+  defp lower_field_value({:integer, n}, _param_names), do: {:integer, n}
+  defp lower_field_value({:expr, %AST.ArithExpr{op: op, left: left, right: right}}, param_names) do
+    {:arith, op, lower_expr_operand(left, param_names), lower_expr_operand(right, param_names)}
+  end
+  defp lower_field_value({:list, elements}, param_names) do
+    {:list, Enum.map(elements, fn elem -> lower_field_value(elem, param_names) end)}
+  end
+
   defp lower_action(%AST.Emit{tag: tag, fields: fields}, param_names) do
     %IR.Action{
       type: :emit,
@@ -266,6 +278,8 @@ defmodule Vor.Lowering do
             {to_atom(field), {:arith, op, lower_expr_operand(left, param_names), lower_expr_operand(right, param_names)}}
           {field, {:integer, n}} ->
             {to_atom(field), {:integer, n}}
+          {field, {:list, _} = list_val} ->
+            {to_atom(field), lower_field_value(list_val, param_names)}
         end)
       }
     }
@@ -427,10 +441,13 @@ defmodule Vor.Lowering do
           {field, {:expr, %AST.ArithExpr{op: op, left: left, right: right}}} ->
             {to_atom(field), {:arith, op, lower_expr_operand(left, param_names), lower_expr_operand(right, param_names)}}
           {field, {:integer, n}} -> {to_atom(field), {:integer, n}}
+          {field, {:list, _} = lv} -> {to_atom(field), lower_field_value(lv, param_names)}
         end)
       }
     }
   end
+
+  defp lower_action(%AST.Noop{}, _param_names), do: nil
 
   defp lower_action(%AST.Broadcast{tag: tag, fields: fields}, param_names) do
     %IR.Action{
@@ -443,6 +460,7 @@ defmodule Vor.Lowering do
           {field, {:expr, %AST.ArithExpr{op: op, left: left, right: right}}} ->
             {to_atom(field), {:arith, op, lower_expr_operand(left, param_names), lower_expr_operand(right, param_names)}}
           {field, {:integer, n}} -> {to_atom(field), {:integer, n}}
+          {field, {:list, _} = lv} -> {to_atom(field), lower_field_value(lv, param_names)}
         end)
       }
     }

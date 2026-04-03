@@ -37,7 +37,7 @@ defmodule Vor.Lexer do
                    relation fact synthesize property never always eventually implies
                    forall where and or not in start_timer cancel_timer restart_timer
                    retransmit_last_response extern if else
-                   sends send broadcast system connect solve)
+                   sends send broadcast system connect solve noop)
 
     type = if name in keywords, do: :keyword, else: :identifier
     {rest, [{type, {line, col}, String.to_atom(name)}], context}
@@ -120,7 +120,9 @@ defmodule Vor.Lexer do
       string(")") |> replace(:close_paren),
       string(",") |> replace(:comma),
       string(":") |> replace(:colon),
-      string("|") |> replace(:pipe)
+      string("|") |> replace(:pipe),
+      string("[") |> replace(:open_bracket),
+      string("]") |> replace(:close_bracket)
     ])
     |> pre_traverse({:mark_position, []})
     |> post_traverse({:to_token, [:delimiter]})

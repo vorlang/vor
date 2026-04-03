@@ -255,6 +255,13 @@ defmodule Vor.Codegen.Erlang do
   defp value_to_erl({:arith, op, left, right}, l, map_var) do
     {:op, l, arith_op(op), value_to_erl(left, l, map_var), value_to_erl(right, l, map_var)}
   end
+  defp value_to_erl({:list, elements}, l, map_var) do
+    elements
+    |> Enum.reverse()
+    |> Enum.reduce({:nil, l}, fn elem, acc ->
+      {:cons, l, value_to_erl(elem, l, map_var), acc}
+    end)
+  end
 
   # Generate init body that extracts system metadata (__vor_registry__, __vor_name__) if present.
   # This makes standalone agents (no system) work unchanged, while system agents get registry info.
@@ -847,6 +854,8 @@ defmodule Vor.Codegen.Erlang do
         erl_op = arith_op(op)
         {:map_field_assoc, l, {:atom, l, field},
           {:op, l, erl_op, value_to_erl(left, l, map_var), value_to_erl(right, l, map_var)}}
+      {field, {:list, _} = list_val} ->
+        {:map_field_assoc, l, {:atom, l, field}, value_to_erl(list_val, l, map_var)}
     end)
 
     {:tuple, l, [{:atom, l, tag}, {:map, l, map_pairs}]}

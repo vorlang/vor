@@ -77,7 +77,7 @@ agent RaftNode(
     maj = Vor.Examples.RaftHelpers.majority(cluster_size: cluster_size)
     if new_votes >= maj do
       transition role: :leader
-      broadcast {:append_entries, term: current_term, leader_id: node_id, entries: :empty, leader_commit: commit_index}
+      broadcast {:append_entries, term: current_term, leader_id: node_id, entries: [], leader_commit: commit_index}
     end
   end
 
@@ -89,7 +89,7 @@ agent RaftNode(
   end
 
   on {:vote_denied, term: T} when role == :candidate and T <= current_term do
-    transition vote_count: vote_count
+    noop
   end
 
   on {:append_entries, term: T, leader_id: L, entries: E, leader_commit: LC} when role == :candidate and T >= current_term do
@@ -118,12 +118,12 @@ agent RaftNode(
     new_log = Vor.Examples.RaftHelpers.log_append(log: log, term: current_term, command: Cmd)
     transition log: new_log
     new_index = Vor.Examples.RaftHelpers.log_last_index(log: new_log)
-    broadcast {:append_entries, term: current_term, leader_id: node_id, entries: :replicating, leader_commit: commit_index}
+    broadcast {:append_entries, term: current_term, leader_id: node_id, entries: [Cmd], leader_commit: commit_index}
     emit {:client_ok, index: new_index}
   end
 
   on {:append_ok, term: T, follower: F} when role == :leader and T == current_term do
-    transition commit_index: commit_index
+    noop
   end
 
   on {:append_fail, term: T, follower: F} when role == :leader and T > current_term do
@@ -134,7 +134,7 @@ agent RaftNode(
   end
 
   on {:append_fail, term: T, follower: F} when role == :leader and T <= current_term do
-    transition commit_index: commit_index
+    noop
   end
 
   on {:append_entries, term: T, leader_id: L, entries: E, leader_commit: LC} when role == :leader and T > current_term do

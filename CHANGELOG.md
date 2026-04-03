@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-04-02
+- **Noop keyword** — `noop` in handler bodies for intentional no-ops. Valid in cast handlers; call handlers without emit still fail completeness check.
+- **List literals** — `[]`, `[1, 2, 3]`, `[:a, :b]`, `[Var1, Var2]` in emit, send, broadcast, and transition fields. Raft example updated to use real lists instead of atom placeholders.
 - **Conditional transitions in gen_statem** — Transitions inside if/else branches now take effect. Each branch produces its own gen_statem return with its own data map. Data map threaded through with unique variable names. Send and broadcast read post-transition values. Resilience handlers support broadcast and send.
 - **Raft consensus example** — Three-node Raft cluster using native Vor primitives: `broadcast` for vote requests, `send` with variable targets for directed responses, liveness monitoring for election timeouts, proven safety invariants. All node-to-node messaging is native Vor — externs only used for log operations.
 - **Variable send targets** — `send L {:msg, fields}` where L is a pattern-bound variable, resolved at runtime via Registry lookup. Enables directed responses in protocols like Raft.

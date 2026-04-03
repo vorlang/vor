@@ -371,7 +371,58 @@ defmodule Vor.Parser do
     parse_binding_fields(rest, [{field, {:atom, value}} | acc])
   end
 
+  # field: [] or field: [elem, elem, ...]
+  defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon}, {:delimiter, _, :open_bracket} | rest], acc) do
+    case parse_list_literal(rest) do
+      {:ok, elements, rest} ->
+        parse_binding_fields(rest, [{field, {:list, elements}} | acc])
+      {:error, _} = err -> err
+    end
+  end
+
   defp parse_binding_field([token | _], _acc), do: {:error, {:expected_binding, token}}
+
+  # --- List literals ---
+
+  # Empty list: []
+  defp parse_list_literal([{:delimiter, _, :close_bracket} | rest]) do
+    {:ok, [], rest}
+  end
+
+  # Populated list: [elem, elem, ...]
+  defp parse_list_literal(tokens) do
+    parse_list_elements(tokens, [])
+  end
+
+  defp parse_list_elements([{:delimiter, _, :close_bracket} | rest], acc) do
+    {:ok, Enum.reverse(acc), rest}
+  end
+
+  defp parse_list_elements([{:integer, _, n}, {:delimiter, _, :comma} | rest], acc) do
+    parse_list_elements(rest, [{:integer, n} | acc])
+  end
+
+  defp parse_list_elements([{:integer, _, n}, {:delimiter, _, :close_bracket} | rest], acc) do
+    {:ok, Enum.reverse([{:integer, n} | acc]), rest}
+  end
+
+  defp parse_list_elements([{:atom, _, a}, {:delimiter, _, :comma} | rest], acc) do
+    parse_list_elements(rest, [{:atom, a} | acc])
+  end
+
+  defp parse_list_elements([{:atom, _, a}, {:delimiter, _, :close_bracket} | rest], acc) do
+    {:ok, Enum.reverse([{:atom, a} | acc]), rest}
+  end
+
+  defp parse_list_elements([{:identifier, _, v}, {:delimiter, _, :comma} | rest], acc) do
+    parse_list_elements(rest, [{:var, v} | acc])
+  end
+
+  defp parse_list_elements([{:identifier, _, v}, {:delimiter, _, :close_bracket} | rest], acc) do
+    {:ok, Enum.reverse([{:var, v} | acc]), rest}
+  end
+
+  defp parse_list_elements([token | _], _acc), do: {:error, {:expected_list_element, token}}
 
   # --- Guard: when EXPR ---
 
@@ -515,6 +566,11 @@ defmodule Vor.Parser do
         end
       [token | _] -> {:error, {:expected_send_message, token}}
     end
+  end
+
+  # noop — intentional no-op
+  defp parse_handler_body([{:keyword, meta, :noop} | rest], acc) do
+    parse_handler_body(rest, [%AST.Noop{meta: meta} | acc])
   end
 
   # broadcast {:tag, field: value, ...}
@@ -767,6 +823,11 @@ defmodule Vor.Parser do
         end
       [token | _] -> {:error, {:expected_send_message, token}}
     end
+  end
+
+  # noop inside if body
+  defp parse_if_body([{:keyword, _meta, :noop} | rest], acc) do
+    parse_if_body(rest, acc)
   end
 
   # broadcast inside if body
