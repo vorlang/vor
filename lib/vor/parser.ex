@@ -371,7 +371,7 @@ defmodule Vor.Parser do
   # field: min/max(...) — identifier-based (must be before generic Var clause)
   defp parse_binding_field([{:identifier, _, field}, {:delimiter, _, :colon},
                              {:identifier, _, op}, {:delimiter, _, :open_paren} | rest], acc)
-       when op in [:min, :max] do
+       when op in [:min, :max, :list_head, :list_tail, :list_append, :list_prepend, :list_length, :list_empty] do
     case parse_builtin_call(op, [{:delimiter, {0, 0}, :open_paren} | rest]) do
       {:ok, expr, rest} ->
         parse_binding_fields(rest, [{field, {:builtin, expr}} | acc])
@@ -816,7 +816,7 @@ defmodule Vor.Parser do
   # var = min/max(...) — identifier-based built-in
   defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
                             {:identifier, _, op}, {:delimiter, _, :open_paren} | rest], acc)
-       when op in [:min, :max] do
+       when op in [:min, :max, :list_head, :list_tail, :list_append, :list_prepend, :list_length, :list_empty] do
     case parse_builtin_call(op, [{:delimiter, {0, 0}, :open_paren} | rest]) do
       {:ok, expr, rest} ->
         parse_handler_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
@@ -1037,7 +1037,7 @@ defmodule Vor.Parser do
   # var = min/max(...) inside if body — identifier-based
   defp parse_if_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
                        {:identifier, _, op}, {:delimiter, _, :open_paren} | rest], acc)
-       when op in [:min, :max] do
+       when op in [:min, :max, :list_head, :list_tail, :list_append, :list_prepend, :list_length, :list_empty] do
     case parse_builtin_call(op, [{:delimiter, {0, 0}, :open_paren} | rest]) do
       {:ok, expr, rest} ->
         parse_if_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
@@ -1195,7 +1195,7 @@ defmodule Vor.Parser do
   # transition field: min/max(...) — identifier followed by open_paren
   defp parse_transition([{:identifier, _, field}, {:delimiter, _, :colon},
                           {:identifier, _, op}, {:delimiter, _, :open_paren} | rest], meta)
-       when op in [:min, :max] do
+       when op in [:min, :max, :list_head, :list_tail, :list_append, :list_prepend, :list_length, :list_empty] do
     case parse_builtin_call(op, [{:delimiter, {0, 0}, :open_paren} | rest]) do
       {:ok, expr, rest} -> {:ok, %AST.Transition{field: field, value: {:builtin, expr}, meta: meta}, rest}
       {:error, _} = err -> err

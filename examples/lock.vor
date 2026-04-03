@@ -1,13 +1,5 @@
 agent LockManager(lock_timeout_ms: integer) do
 
-  extern do
-    Vor.Examples.LockHelpers.queue_push(queue: list, item: atom) :: list
-    Vor.Examples.LockHelpers.queue_head(queue: list) :: atom
-    Vor.Examples.LockHelpers.queue_tail(queue: list) :: list
-    Vor.Examples.LockHelpers.queue_empty(queue: list) :: atom
-    Vor.Examples.LockHelpers.queue_length(queue: list) :: integer
-  end
-
   state phase: :free | :held
   state holder: atom
   state wait_queue: list
@@ -37,36 +29,34 @@ agent LockManager(lock_timeout_ms: integer) do
   end
 
   on {:status} when phase == :free do
-    qlen = Vor.Examples.LockHelpers.queue_length(queue: wait_queue)
+    qlen = list_length(wait_queue)
     emit {:status_info, phase: :free, holder: :none, queue_length: qlen}
   end
 
   %% === HELD ===
 
   on {:acquire, client: C} when phase == :held do
-    new_queue = Vor.Examples.LockHelpers.queue_push(queue: wait_queue, item: C)
-    transition wait_queue: new_queue
-    qlen = Vor.Examples.LockHelpers.queue_length(queue: new_queue)
+    transition wait_queue: list_append(wait_queue, C)
+    qlen = list_length(wait_queue)
     emit {:queued, position: qlen}
   end
 
   on {:release, client: C} when phase == :held do
-    is_empty = Vor.Examples.LockHelpers.queue_empty(queue: wait_queue)
+    is_empty = list_empty(wait_queue)
     if is_empty == :true do
       transition phase: :free
       transition holder: :nil
       emit {:ok}
     else
-      next_client = Vor.Examples.LockHelpers.queue_head(queue: wait_queue)
-      remaining = Vor.Examples.LockHelpers.queue_tail(queue: wait_queue)
-      transition wait_queue: remaining
+      next_client = list_head(wait_queue)
+      transition wait_queue: list_tail(wait_queue)
       transition holder: next_client
       emit {:ok}
     end
   end
 
   on {:status} when phase == :held do
-    qlen = Vor.Examples.LockHelpers.queue_length(queue: wait_queue)
+    qlen = list_length(wait_queue)
     emit {:status_info, phase: :held, holder: holder, queue_length: qlen}
   end
 

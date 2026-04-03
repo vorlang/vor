@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-04-02
+- **Native list operations** — `list_head`, `list_tail`, `list_append`, `list_prepend`, `list_length`, `list_empty`. All handle empty lists safely. Lock example updated to use native ops — zero extern calls, fully native Vor.
 - **Distributed lock example** — LockManager with exclusive access, FIFO wait queue, bounded hold time via liveness monitoring, and verified safety invariant (no grant when held). Queue operations via extern helpers. 50-client stress test passes.
 - **Extern calls in if/else bodies** — Extern call bindings now work inside if/else branches (needed for lock's conditional queue operations).
 - **Periodic timer (`every`) construct** — `every interval_ms do ... end` for scheduled periodic actions. Uses `erlang:send_after` (fires regardless of state changes, unlike liveness timeouts). Works in gen_server and gen_statem. Supports broadcast, send, transitions, extern calls. G-Counter updated to use `every` instead of liveness hack — now a clean gen_server.

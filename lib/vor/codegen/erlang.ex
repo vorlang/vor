@@ -1021,6 +1021,49 @@ defmodule Vor.Codegen.Erlang do
       [merge_fun, map1_erl, map2_erl]}
   end
 
+  # --- List operation codegen ---
+
+  defp map_op_to_erl(:list_head, [list_ref], l, map_var) do
+    list_erl = value_to_erl(list_ref, l, map_var)
+    {:case, l, list_erl, [
+      {:clause, l, [{:cons, l, {:var, l, :VorListH}, {:var, l, :_}}], [], [{:var, l, :VorListH}]},
+      {:clause, l, [{:nil, l}], [], [{:atom, l, :none}]}
+    ]}
+  end
+
+  defp map_op_to_erl(:list_tail, [list_ref], l, map_var) do
+    list_erl = value_to_erl(list_ref, l, map_var)
+    {:case, l, list_erl, [
+      {:clause, l, [{:cons, l, {:var, l, :_}, {:var, l, :VorListT}}], [], [{:var, l, :VorListT}]},
+      {:clause, l, [{:nil, l}], [], [{:nil, l}]}
+    ]}
+  end
+
+  defp map_op_to_erl(:list_append, [list_ref, value], l, map_var) do
+    list_erl = value_to_erl(list_ref, l, map_var)
+    val_erl = value_to_erl(value, l, map_var)
+    {:op, l, :++, list_erl, {:cons, l, val_erl, {:nil, l}}}
+  end
+
+  defp map_op_to_erl(:list_prepend, [list_ref, value], l, map_var) do
+    list_erl = value_to_erl(list_ref, l, map_var)
+    val_erl = value_to_erl(value, l, map_var)
+    {:cons, l, val_erl, list_erl}
+  end
+
+  defp map_op_to_erl(:list_length, [list_ref], l, map_var) do
+    list_erl = value_to_erl(list_ref, l, map_var)
+    {:call, l, {:atom, l, :length}, [list_erl]}
+  end
+
+  defp map_op_to_erl(:list_empty, [list_ref], l, map_var) do
+    list_erl = value_to_erl(list_ref, l, map_var)
+    {:case, l, list_erl, [
+      {:clause, l, [{:nil, l}], [], [{:atom, l, true}]},
+      {:clause, l, [{:var, l, :_}], [], [{:atom, l, false}]}
+    ]}
+  end
+
   defp guard_to_erl(nil, _l), do: []
 
   defp guard_to_erl(%IR.GuardExpr{field: field, op: :==, value: {:atom, val}}, l) do
