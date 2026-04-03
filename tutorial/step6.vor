@@ -1,0 +1,37 @@
+agent TimedGate(auto_close_ms: integer) do
+  state phase: :closed | :open
+
+  protocol do
+    accepts {:open_gate}
+    accepts {:enter}
+    emits {:opened}
+    emits {:allowed}
+    emits {:denied}
+  end
+
+  on {:open_gate} when phase == :closed do
+    transition phase: :open
+    emit {:opened}
+  end
+
+  on {:enter} when phase == :open do
+    emit {:allowed}
+  end
+
+  on {:enter} when phase == :closed do
+    emit {:denied}
+  end
+
+  liveness "gate closes eventually" monitored(within: auto_close_ms) do
+    always(phase != :closed implies eventually(phase == :closed))
+  end
+
+  resilience do
+    on_invariant_violation("gate closes eventually") ->
+      transition phase: :closed
+  end
+
+  safety "no entry when closed" proven do
+    never(phase == :closed and emitted({:allowed, _}))
+  end
+end

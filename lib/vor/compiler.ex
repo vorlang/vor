@@ -5,14 +5,26 @@ defmodule Vor.Compiler do
   """
 
   def compile_string(source, opts \\ []) do
+    trace = Keyword.get(opts, :trace, false)
+
+    if trace, do: IO.puts("\n═══ Vor Compiler Trace ═══\n")
+    if trace, do: trace_source(source)
+
     with {:ok, tokens} <- Vor.Lexer.tokenize(source),
+         _ <- (if trace, do: trace_lexer(tokens)),
          {:ok, ast} <- Vor.Parser.parse(tokens),
+         _ <- (if trace, do: trace_parser(ast)),
          {:ok, ir} <- Vor.Lowering.lower(ast),
+         _ <- (if trace, do: trace_lowering(ir)),
          {:ok, _warnings} <- Vor.Analysis.ProtocolChecker.check(ir),
          {:ok, _completeness_warnings} <- Vor.Analysis.Completeness.check(ir),
          :ok <- verify_safety(ir),
+         _ <- (if trace, do: trace_verification(ir)),
          {:ok, forms} <- Vor.Codegen.Erlang.generate(ir),
+         _ <- (if trace, do: trace_codegen(ir)),
          {:ok, module, binary, compile_warnings} <- Vor.Codegen.Beam.compile(forms, opts) do
+      if trace, do: trace_compile(module, binary)
+      if trace, do: IO.puts("\n═══ Complete ═══")
       graph = extract_graph_from_ir(ir)
       {:ok, %{module: module, binary: binary, warnings: compile_warnings, ir: ir, forms: forms, graph: graph}}
     end
@@ -238,5 +250,91 @@ defmodule Vor.Compiler do
         end
       err -> err
     end
+  end
+
+  # --- Trace helpers ---
+
+  defp trace_source(source) do
+    lines = source |> String.split("\n") |> length()
+    IO.puts("[source]   #{lines} lines")
+  end
+
+  defp trace_lexer(tokens) do
+    keywords = tokens
+    |> Enum.filter(fn {type, _, _} -> type == :keyword end)
+    |> Enum.map(fn {_, _, val} -> val end)
+    |> Enum.uniq()
+    |> Enum.join(", ")
+
+    identifiers = tokens
+    |> Enum.filter(fn {type, _, _} -> type == :identifier end)
+    |> Enum.map(fn {_, _, val} -> val end)
+    |> Enum.uniq()
+    |> Enum.take(10)
+    |> Enum.join(", ")
+
+    IO.puts("[lexer]    #{length(tokens)} tokens")
+    IO.puts("           keywords: #{keywords}")
+    IO.puts("           identifiers: #{identifiers}")
+  end
+
+  defp trace_parser(%Vor.AST.Agent{name: name, params: params, body: body}) do
+    handler_count = Enum.count(body, &match?(%Vor.AST.Handler{}, &1))
+    has_protocol = Enum.any?(body, &match?(%Vor.AST.Protocol{}, &1))
+    has_relations = Enum.any?(body, &match?(%Vor.AST.Relation{}, &1))
+    has_safety = Enum.any?(body, &match?(%Vor.AST.Safety{}, &1))
+    has_liveness = Enum.any?(body, &match?(%Vor.AST.Liveness{}, &1))
+    param_str = if params && params != [], do: "(#{length(params)} params)", else: "(no params)"
+
+    IO.puts("[parser]   agent #{name}#{param_str}")
+    if has_protocol, do: IO.puts("           ├── protocol declared")
+    IO.puts("           ├── handlers: #{handler_count}")
+    if has_relations, do: IO.puts("           ├── relations declared")
+    if has_safety, do: IO.puts("           ├── safety invariants")
+    if has_liveness, do: IO.puts("           └── liveness invariants")
+  end
+
+  defp trace_lowering(%Vor.IR.Agent{} = ir) do
+    handler_count = length(ir.handlers)
+    data_count = length(ir.data_fields || [])
+    param_count = length(ir.params || [])
+
+    IO.puts("[lower]    target: #{ir.behaviour}")
+    IO.puts("           module: #{ir.module}")
+    if param_count > 0, do: IO.puts("           params: #{param_count}")
+    if data_count > 0, do: IO.puts("           data fields: #{data_count}")
+    if ir.state_fields != [] do
+      states = ir.state_fields |> hd() |> Map.get(:values) |> Enum.join(", ")
+      IO.puts("           states: #{states}")
+    end
+    IO.puts("           handlers: #{handler_count}")
+  end
+
+  defp trace_verification(%Vor.IR.Agent{} = ir) do
+    safety_count = ir.invariants |> Enum.count(fn
+      {:safety, _, :proven, _} -> true
+      _ -> false
+    end)
+    liveness_count = ir.invariants |> Enum.count(fn
+      {:liveness, _, _} -> true
+      _ -> false
+    end)
+
+    IO.puts("[verify]   safety invariants: #{safety_count} (all proven)")
+    if liveness_count > 0, do: IO.puts("           liveness monitors: #{liveness_count}")
+  end
+
+  defp trace_codegen(%Vor.IR.Agent{} = ir) do
+    exports = case ir.behaviour do
+      :gen_server -> "init/1, handle_call/3, handle_cast/2"
+      :gen_statem -> "init/1, callback_mode/0, handle_event/4"
+    end
+    IO.puts("[codegen]  Erlang abstract format generated")
+    IO.puts("           exports: #{exports}")
+  end
+
+  defp trace_compile(module, binary) do
+    size_kb = Float.round(byte_size(binary) / 1024, 1)
+    IO.puts("[compile]  ✓ BEAM binary: #{module} (#{size_kb} KB)")
   end
 end

@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-04-02
+- **Tutorial with verified examples** — 8-step tutorial from Echo agent to multi-agent pipeline. Every code example compiles and runs. 11 tutorial tests verify all steps.
+- **Compiler trace mode** — `Vor.Compiler.compile_string(source, trace: true)` prints stage-by-stage output: source stats, token count, AST structure, lowering target, verification results, codegen info, BEAM binary size. Also available via `mix vor.compile file.vor --trace`.
 - **Property-based testing** — PropCheck generates random valid Vor programs and verifies compiler invariants: compilation safety, verifier soundness, graph extraction correctness, and protocol checking consistency. 9 properties, 100 iterations each.
 - **Noop keyword** — `noop` in handler bodies for intentional no-ops. Valid in cast handlers; call handlers without emit still fail completeness check.
 - **List literals** — `[]`, `[1, 2, 3]`, `[:a, :b]`, `[Var1, Var2]` in emit, send, broadcast, and transition fields. Raft example updated to use real lists instead of atom placeholders.

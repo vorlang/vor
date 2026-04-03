@@ -1,0 +1,20 @@
+agent RateLimiter(max_requests: integer, window_ms: integer) do
+  extern do
+    Vor.Examples.TutorialHelpers.increment(client: binary, window_ms: integer) :: integer
+  end
+
+  protocol do
+    accepts {:request, client: binary}
+    emits {:ok, remaining: integer}
+    emits {:rejected}
+  end
+
+  on {:request, client: C} do
+    current = Vor.Examples.TutorialHelpers.increment(client: C, window_ms: window_ms)
+    if current <= max_requests do
+      emit {:ok, remaining: max_requests - current}
+    else
+      emit {:rejected}
+    end
+  end
+end

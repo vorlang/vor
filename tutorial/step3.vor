@@ -1,0 +1,24 @@
+agent BoundedCounter(max: integer) do
+  state count: integer
+
+  protocol do
+    accepts {:increment}
+    accepts {:get}
+    emits {:ok, remaining: integer}
+    emits {:full}
+    emits {:count, value: integer}
+  end
+
+  on {:increment} do
+    if count < max do
+      transition count: count + 1
+      emit {:ok, remaining: max - count}
+    else
+      emit {:full}
+    end
+  end
+
+  on {:get} do
+    emit {:count, value: count}
+  end
+end

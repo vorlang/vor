@@ -1,0 +1,19 @@
+agent Counter do
+  state count: integer
+
+  protocol do
+    accepts {:increment}
+    accepts {:get}
+    emits {:ok}
+    emits {:count, value: integer}
+  end
+
+  on {:increment} do
+    transition count: count + 1
+    emit {:ok}
+  end
+
+  on {:get} do
+    emit {:count, value: count}
+  end
+end

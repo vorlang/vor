@@ -1,0 +1,36 @@
+agent Producer do
+  protocol do
+    accepts {:produce, item: integer}
+    sends {:data, item: integer}
+    emits {:sent}
+  end
+
+  on {:produce, item: I} do
+    send :consumer {:data, item: I}
+    emit {:sent}
+  end
+end
+
+agent Consumer do
+  state total: integer
+
+  protocol do
+    accepts {:data, item: integer}
+    accepts {:get_total}
+    emits {:total, value: integer}
+  end
+
+  on {:data, item: I} do
+    transition total: total + I
+  end
+
+  on {:get_total} do
+    emit {:total, value: total}
+  end
+end
+
+system Pipeline do
+  agent :producer, Producer()
+  agent :consumer, Consumer()
+  connect :producer -> :consumer
+end

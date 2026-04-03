@@ -1,0 +1,35 @@
+agent Gate do
+  state phase: :closed | :open
+
+  protocol do
+    accepts {:open_gate}
+    accepts {:close_gate}
+    accepts {:enter}
+    emits {:opened}
+    emits {:closed_gate}
+    emits {:allowed}
+    emits {:denied}
+  end
+
+  on {:open_gate} when phase == :closed do
+    transition phase: :open
+    emit {:opened}
+  end
+
+  on {:close_gate} when phase == :open do
+    transition phase: :closed
+    emit {:closed_gate}
+  end
+
+  on {:enter} when phase == :open do
+    emit {:allowed}
+  end
+
+  on {:enter} when phase == :closed do
+    emit {:denied}
+  end
+
+  safety "no entry when closed" proven do
+    never(phase == :closed and emitted({:allowed, _}))
+  end
+end

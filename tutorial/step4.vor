@@ -1,0 +1,34 @@
+agent TieredCounter(default_max: integer) do
+  state count: integer
+
+  relation tier_limit(client: atom, max_requests: integer) do
+    fact(client: :free, max_requests: 10)
+    fact(client: :pro, max_requests: 100)
+    fact(client: :enterprise, max_requests: 1000)
+  end
+
+  protocol do
+    accepts {:request, client: atom}
+    accepts {:get_limit, client: atom}
+    emits {:ok, remaining: integer}
+    emits {:rejected}
+    emits {:limit, max: integer}
+  end
+
+  on {:request, client: C} do
+    solve tier_limit(client: C, max_requests: Max) do
+      if count < Max do
+        transition count: count + 1
+        emit {:ok, remaining: Max - count}
+      else
+        emit {:rejected}
+      end
+    end
+  end
+
+  on {:get_limit, client: C} do
+    solve tier_limit(client: C, max_requests: Max) do
+      emit {:limit, max: Max}
+    end
+  end
+end
