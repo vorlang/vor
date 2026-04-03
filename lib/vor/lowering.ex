@@ -29,7 +29,8 @@ defmodule Vor.Lowering do
     end
 
     monitors = extract_monitors(ast.body, all_states, known_names)
-    handlers = extract_handlers(ast.body, known_names, relation_map)
+    {init_handler, regular_handlers} = extract_init_and_handlers(ast.body, known_names, relation_map)
+    handlers = regular_handlers
     timeout_handlers = generate_timeout_handlers(monitors, known_names, state_field_name)
     periodic_timers = extract_periodic_timers(ast.body, known_names)
 
@@ -47,7 +48,8 @@ defmodule Vor.Lowering do
       resilience: nil,
       externs: extract_externs(ast.body),
       monitors: monitors,
-      periodic_timers: periodic_timers
+      periodic_timers: periodic_timers,
+      init_handler: init_handler
     }
 
     {:ok, ir}
@@ -137,12 +139,6 @@ defmodule Vor.Lowering do
       tag: to_atom(tag),
       fields: Enum.map(fields, fn {name, type} -> {to_atom(name), to_atom(type)} end)
     }
-  end
-
-  defp extract_handlers(body, param_names, relation_map) do
-    body
-    |> Enum.filter(&match?(%AST.Handler{}, &1))
-    |> Enum.map(&lower_handler(&1, param_names, relation_map))
   end
 
   defp lower_handler(%AST.Handler{pattern: pattern, guard: guard, body: body}, param_names, relation_map) do
@@ -671,6 +667,21 @@ defmodule Vor.Lowering do
         actions: actions
       }
     end)
+  end
+
+  defp extract_init_and_handlers(body, known_names, relation_map) do
+    {init_handlers, regular} = body
+    |> Enum.filter(&match?(%AST.Handler{}, &1))
+    |> Enum.split_with(fn h -> match?(%AST.Pattern{tag: "init"}, h.pattern) end)
+
+    init = case init_handlers do
+      [h] -> lower_handler(h, known_names, relation_map)
+      [_ | _] -> :duplicate_init
+      [] -> nil
+    end
+
+    handlers = Enum.map(regular, &lower_handler(&1, known_names, relation_map))
+    {init, handlers}
   end
 
   defp extract_periodic_timers(body, known_names) do

@@ -66,19 +66,23 @@ defmodule Vor.Codegen.Erlang do
     data_field_pairs = gen_data_field_pairs(agent.data_fields || [], l)
     init_map = {:map, l, param_pairs ++ data_field_pairs}
 
-    timer_setup = gen_periodic_timer_setup(agent.periodic_timers || [], l, :Data)
+    # Compile init handler body if present
+    {init_handler_exprs, init_data_var} = compile_init_handler_body(agent.init_handler, l, :Data)
+
+    timer_setup = gen_periodic_timer_setup(agent.periodic_timers || [], l, init_data_var)
 
     # Build init body that extracts system metadata if present
-    body = gen_init_with_metadata(init_map, l, fn data_var ->
-      {:tuple, l, [{:atom, l, :ok}, {:var, l, data_var}]}
+    body = gen_init_with_metadata(init_map, l, fn _data_var ->
+      {:tuple, l, [{:atom, l, :ok}, {:var, l, init_data_var}]}
     end)
 
-    # Insert timer setup before the final return
-    body = case timer_setup do
+    # Insert init handler + timer setup before the final return
+    inserts = init_handler_exprs ++ timer_setup
+    body = case inserts do
       [] -> body
       _ ->
         {pre, [ret]} = Enum.split(body, -1)
-        pre ++ timer_setup ++ [ret]
+        pre ++ inserts ++ [ret]
     end
 
     {:function, l, :init, 1, [
@@ -409,32 +413,36 @@ defmodule Vor.Codegen.Erlang do
     monitors = agent.monitors || []
     init_timeout_acts = state_timeout_actions(initial_state, monitors, l)
 
+    # Compile init handler body if present
+    {init_handler_exprs, init_data_var} = compile_init_handler_body(agent.init_handler, l, :Data)
+
     # Build init body that extracts system metadata if present
-    body = gen_init_with_metadata(init_map, l, fn data_var ->
+    body = gen_init_with_metadata(init_map, l, fn _data_var ->
       case init_timeout_acts do
         [] ->
           {:tuple, l, [
             {:atom, l, :ok},
             {:atom, l, initial_state},
-            {:var, l, data_var}
+            {:var, l, init_data_var}
           ]}
         _ ->
           {:tuple, l, [
             {:atom, l, :ok},
             {:atom, l, initial_state},
-            {:var, l, data_var},
+            {:var, l, init_data_var},
             list_to_erl(init_timeout_acts, l)
           ]}
       end
     end)
 
-    timer_setup = gen_periodic_timer_setup(agent.periodic_timers || [], l, :Data)
+    timer_setup = gen_periodic_timer_setup(agent.periodic_timers || [], l, init_data_var)
 
-    body = case timer_setup do
+    inserts = init_handler_exprs ++ timer_setup
+    body = case inserts do
       [] -> body
       _ ->
         {pre, [ret]} = Enum.split(body, -1)
-        pre ++ timer_setup ++ [ret]
+        pre ++ inserts ++ [ret]
     end
 
     {:function, l, :init, 1, [
@@ -560,6 +568,27 @@ defmodule Vor.Codegen.Erlang do
         [guard],
         body}
     end)
+  end
+
+  # Compile init handler body into expressions that update the Data variable
+  # Returns {exprs, final_data_var} — the final data var replaces the original in the return
+  defp compile_init_handler_body(nil, _l, data_var), do: {[], data_var}
+  defp compile_init_handler_body(%IR.Handler{actions: actions}, l, data_var) do
+    {pre_actions, _terminal} = split_terminal(actions)
+    {transitions, other_pre} = Enum.split_with(pre_actions, fn a -> a.type == :transition end)
+
+    pre_exprs = Enum.flat_map(other_pre, &action_to_erl(&1, l, data_var))
+
+    case transitions do
+      [] -> {pre_exprs, data_var}
+      _ ->
+        map_pairs = Enum.map(transitions, fn %IR.Action{type: :transition, data: %IR.TransitionAction{field: field, value: value}} ->
+          {:map_field_exact, l, {:atom, l, field}, transition_value_to_erl(value, l, data_var)}
+        end)
+        new_var = :VorInitData
+        update = {:match, l, {:var, l, new_var}, {:map, l, {:var, l, data_var}, map_pairs}}
+        {pre_exprs ++ [update], new_var}
+    end
   end
 
   # Generate send_after calls for periodic timers in init
@@ -1016,6 +1045,35 @@ defmodule Vor.Codegen.Erlang do
       :min -> {:fun, l, {:clauses, [{:clause, l, [{:var, l, :_K}, {:var, l, :V1}, {:var, l, :V2}], [], [{:call, l, {:atom, l, :min}, [{:var, l, :V1}, {:var, l, :V2}]}]}]}}
       :sum -> {:fun, l, {:clauses, [{:clause, l, [{:var, l, :_K}, {:var, l, :V1}, {:var, l, :V2}], [], [{:op, l, :+, {:var, l, :V1}, {:var, l, :V2}}]}]}}
       :replace -> {:fun, l, {:clauses, [{:clause, l, [{:var, l, :_K}, {:var, l, :_V1}, {:var, l, :V2}], [], [{:var, l, :V2}]}]}}
+      :lww ->
+        # Last-Writer-Wins: compare timestamps, tiebreak by node_id
+        # fun(_K, V1, V2) ->
+        #   T1 = maps:get(timestamp, V1, 0), T2 = maps:get(timestamp, V2, 0),
+        #   if T1 > T2 -> V1; T1 < T2 -> V2; else -> compare node_id
+        t1 = {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+          [{:atom, l, :timestamp}, {:var, l, :VorLwwV1}, {:integer, l, 0}]}
+        t2 = {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+          [{:atom, l, :timestamp}, {:var, l, :VorLwwV2}, {:integer, l, 0}]}
+        n1 = {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+          [{:atom, l, :node_id}, {:var, l, :VorLwwV1}, {:atom, l, :_}]}
+        n2 = {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+          [{:atom, l, :node_id}, {:var, l, :VorLwwV2}, {:atom, l, :_}]}
+
+        node_cmp = {:case, l, {:op, l, :>=, n1, n2}, [
+          {:clause, l, [{:atom, l, true}], [], [{:var, l, :VorLwwV1}]},
+          {:clause, l, [{:atom, l, false}], [], [{:var, l, :VorLwwV2}]}
+        ]}
+
+        time_cmp = {:case, l, {:op, l, :>, t1, t2}, [
+          {:clause, l, [{:atom, l, true}], [], [{:var, l, :VorLwwV1}]},
+          {:clause, l, [{:atom, l, false}], [],
+            [{:case, l, {:op, l, :<, t1, t2}, [
+              {:clause, l, [{:atom, l, true}], [], [{:var, l, :VorLwwV2}]},
+              {:clause, l, [{:atom, l, false}], [], [node_cmp]}
+            ]}]}
+        ]}
+
+        {:fun, l, {:clauses, [{:clause, l, [{:var, l, :_K}, {:var, l, :VorLwwV1}, {:var, l, :VorLwwV2}], [], [time_cmp]}]}}
     end
     {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :merge_with}},
       [merge_fun, map1_erl, map2_erl]}

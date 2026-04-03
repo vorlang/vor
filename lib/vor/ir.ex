@@ -19,7 +19,8 @@ defmodule Vor.IR do
       :resilience,
       :externs,
       :monitors,
-      :periodic_timers
+      :periodic_timers,
+      :init_handler
     ]
   end
 

@@ -16,6 +16,7 @@ defmodule Vor.Compiler do
          _ <- (if trace, do: trace_parser(ast)),
          {:ok, ir} <- Vor.Lowering.lower(ast),
          _ <- (if trace, do: trace_lowering(ir)),
+         :ok <- validate_init_handler(ir),
          {:ok, _warnings} <- Vor.Analysis.ProtocolChecker.check(ir),
          {:ok, _completeness_warnings} <- Vor.Analysis.Completeness.check(ir),
          :ok <- verify_safety(ir),
@@ -250,6 +251,32 @@ defmodule Vor.Compiler do
         end
       err -> err
     end
+  end
+
+  defp validate_init_handler(%Vor.IR.Agent{init_handler: nil}), do: :ok
+  defp validate_init_handler(%Vor.IR.Agent{init_handler: :duplicate_init}) do
+    {:error, %{type: :duplicate_init, message: "Only one 'on :init' handler allowed per agent"}}
+  end
+  defp validate_init_handler(%Vor.IR.Agent{init_handler: handler}) do
+    # Check for forbidden actions in init handler
+    forbidden = find_forbidden_init_actions(handler.actions)
+    case forbidden do
+      [] -> :ok
+      [type | _] ->
+        {:error, %{type: :invalid_init_handler,
+          message: "Cannot use '#{type}' in an init handler. Init handlers run during startup before the agent is registered."}}
+    end
+  end
+
+  defp find_forbidden_init_actions(actions) do
+    Enum.flat_map(actions, fn
+      %Vor.IR.Action{type: :emit} -> [:emit]
+      %Vor.IR.Action{type: :send} -> [:send]
+      %Vor.IR.Action{type: :broadcast} -> [:broadcast]
+      %Vor.IR.Action{type: :conditional, data: %{then_actions: ta, else_actions: ea}} ->
+        find_forbidden_init_actions(ta) ++ find_forbidden_init_actions(ea)
+      _ -> []
+    end)
   end
 
   # --- Trace helpers ---

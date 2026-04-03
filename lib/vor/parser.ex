@@ -284,6 +284,15 @@ defmodule Vor.Parser do
 
   # --- Handler: on PATTERN [when GUARD] do BODY end ---
 
+  # on :init do ... end — special init handler
+  defp parse_handler([{:keyword, meta, :on}, {:atom, _, "init"}, {:keyword, _, :do} | rest]) do
+    case parse_handler_body(rest, []) do
+      {:ok, body, rest} ->
+        {:ok, %AST.Handler{pattern: %AST.Pattern{tag: "init", bindings: []}, guard: nil, body: body, meta: meta}, rest}
+      {:error, _} = err -> err
+    end
+  end
+
   defp parse_handler([{:keyword, meta, :on} | rest]) do
     case parse_pattern(rest) do
       {:ok, pattern, rest} ->

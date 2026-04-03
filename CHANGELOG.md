@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-04-02
+- **Init handlers** — `on :init do ... end` runs once at startup before accepting messages. Supports extern calls, transitions, if/else, map/list ops. No emit/send/broadcast (compile error). Only one per agent. Extern failures caught — state fields keep defaults.
+- **LWW map_merge strategy** — `map_merge(store, remote, :lww)` for Last-Writer-Wins CRDTs. Compares timestamps, tiebreaks by node_id. Idempotent.
 - **Native list operations** — `list_head`, `list_tail`, `list_append`, `list_prepend`, `list_length`, `list_empty`. All handle empty lists safely. Lock example updated to use native ops — zero extern calls, fully native Vor.
 - **Distributed lock example** — LockManager with exclusive access, FIFO wait queue, bounded hold time via liveness monitoring, and verified safety invariant (no grant when held). Queue operations via extern helpers. 50-client stress test passes.
 - **Extern calls in if/else bodies** — Extern call bindings now work inside if/else branches (needed for lock's conditional queue operations).
