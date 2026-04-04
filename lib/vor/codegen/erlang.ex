@@ -47,16 +47,33 @@ defmodule Vor.Codegen.Erlang do
   # ---- gen_server codegen ----
 
   defp gen_start_link(agent, l) do
+    # case proplists:get_value(name, Args) of
+    #   undefined -> gen_server:start_link(Module, Args, []);
+    #   Name -> gen_server:start_link(Name, Module, Args, [])
+    # end
+    name_lookup = {:call, l, {:remote, l, {:atom, l, :proplists}, {:atom, l, :get_value}},
+      [{:atom, l, :name}, {:var, l, :Args}]}
+
+    start_anon = {:call, l,
+      {:remote, l, {:atom, l, :gen_server}, {:atom, l, :start_link}},
+      [{:atom, l, agent.module}, {:var, l, :Args}, {:nil, l}]}
+
+    start_named = {:call, l,
+      {:remote, l, {:atom, l, :gen_server}, {:atom, l, :start_link}},
+      [{:var, l, :VorName}, {:atom, l, agent.module}, {:var, l, :Args}, {:nil, l}]}
+
+    start_with_name = {:case, l, name_lookup, [
+      {:clause, l, [{:atom, l, :undefined}], [], [start_anon]},
+      {:clause, l, [{:var, l, :VorName}], [], [start_named]}
+    ]}
+
     [
       {:function, l, :start_link, 0, [
         {:clause, l, [], [],
           [{:call, l, {:atom, l, :start_link}, [{:nil, l}]}]}
       ]},
       {:function, l, :start_link, 1, [
-        {:clause, l, [{:var, l, :Args}], [],
-          [{:call, l,
-            {:remote, l, {:atom, l, :gen_server}, {:atom, l, :start_link}},
-            [{:atom, l, agent.module}, {:var, l, :Args}, {:nil, l}]}]}
+        {:clause, l, [{:var, l, :Args}], [], [start_with_name]}
       ]}
     ]
   end
@@ -397,16 +414,29 @@ defmodule Vor.Codegen.Erlang do
   # ---- gen_statem codegen ----
 
   defp gen_start_link_statem(agent, l) do
+    name_lookup = {:call, l, {:remote, l, {:atom, l, :proplists}, {:atom, l, :get_value}},
+      [{:atom, l, :name}, {:var, l, :Args}]}
+
+    start_anon = {:call, l,
+      {:remote, l, {:atom, l, :gen_statem}, {:atom, l, :start_link}},
+      [{:atom, l, agent.module}, {:var, l, :Args}, {:nil, l}]}
+
+    start_named = {:call, l,
+      {:remote, l, {:atom, l, :gen_statem}, {:atom, l, :start_link}},
+      [{:var, l, :VorName}, {:atom, l, agent.module}, {:var, l, :Args}, {:nil, l}]}
+
+    start_with_name = {:case, l, name_lookup, [
+      {:clause, l, [{:atom, l, :undefined}], [], [start_anon]},
+      {:clause, l, [{:var, l, :VorName}], [], [start_named]}
+    ]}
+
     [
       {:function, l, :start_link, 0, [
         {:clause, l, [], [],
           [{:call, l, {:atom, l, :start_link}, [{:nil, l}]}]}
       ]},
       {:function, l, :start_link, 1, [
-        {:clause, l, [{:var, l, :Args}], [],
-          [{:call, l,
-            {:remote, l, {:atom, l, :gen_statem}, {:atom, l, :start_link}},
-            [{:atom, l, agent.module}, {:var, l, :Args}, {:nil, l}]}]}
+        {:clause, l, [{:var, l, :Args}], [], [start_with_name]}
       ]}
     ]
   end

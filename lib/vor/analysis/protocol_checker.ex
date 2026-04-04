@@ -106,19 +106,32 @@ defmodule Vor.Analysis.ProtocolChecker do
   end
 
   defp check_emit_scoping(actions, bound_vars) do
-    Enum.flat_map(actions, fn
-      %IR.Action{type: :emit, data: %IR.EmitAction{fields: fields}} ->
-        for {_field, {:bound_var, var}} <- fields,
-            not MapSet.member?(bound_vars, var) do
-          {:error, :unbound_variable, var}
-        end
+    # Thread bound_vars through sequential actions so bindings accumulate
+    {errors, _} = Enum.reduce(actions, {[], bound_vars}, fn action, {errs, vars} ->
+      case action do
+        %IR.Action{type: :emit, data: %IR.EmitAction{fields: fields}} ->
+          new_errs = for {_field, {:bound_var, var}} <- fields,
+              not MapSet.member?(vars, var) do
+            {:error, :unbound_variable, var}
+          end
+          {errs ++ new_errs, vars}
 
-      %IR.Action{type: :conditional, data: %IR.ConditionalAction{then_actions: then_acts, else_actions: else_acts}} ->
-        check_emit_scoping(then_acts, bound_vars) ++
-        check_emit_scoping(else_acts, bound_vars)
+        %IR.Action{type: :var_binding, data: %{name: name}} ->
+          {errs, MapSet.put(vars, name)}
 
-      _ -> []
+        %IR.Action{type: :extern_call, data: %{bind: bind}} when not is_nil(bind) ->
+          {errs, MapSet.put(vars, bind)}
+
+        %IR.Action{type: :conditional, data: %IR.ConditionalAction{then_actions: then_acts, else_actions: else_acts}} ->
+          then_errs = check_emit_scoping(then_acts, vars)
+          else_errs = check_emit_scoping(else_acts, vars)
+          {errs ++ then_errs ++ else_errs, vars}
+
+        _ ->
+          {errs, vars}
+      end
     end)
+    errors
   end
 
   defp check_unhandled_accepts(%IR.Agent{protocol: proto, handlers: handlers}) do

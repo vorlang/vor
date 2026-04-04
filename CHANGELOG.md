@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-04-02
+- **Fix: variable scoping in if blocks (GAP-009)** — Variables bound inside if branches are now visible to subsequent statements in the same branch. Protocol checker threads scope sequentially through actions.
+- **Named agent registration (GAP-011)** — `start_link` accepts a `name` option for `{:local, atom}`, `{:global, term}`, or `{:via, module, term}` registration. Enables multiple instances of the same agent type. Backward compatible — agents without name start anonymously.
 - **Fix: post-transition extern args (GAP-007)** — Extern call arguments now read post-transition state field values. Gen_server handler body rewritten to thread data variable sequentially through transitions and extern calls.
 - **Fix: Erlang module extern calls (GAP-006)** — `Erlang.erlang.system_time(unit: :millisecond)` now correctly generates `erlang:system_time(...)` instead of `'Elixir.Erlang.erlang':system_time(...)`.
 - **Fix: atom literals in map ops (GAP-008)** — Atom literals (`:value`, `:key`, `:not_found`) and `nil` now work in map_get key/default positions, map_put keys, map_has keys, map_delete keys.
