@@ -121,4 +121,40 @@ defmodule Vor.Fixes.Gap007Test do
     assert {:result, %{echoed: 42}} = :gen_statem.call(pid, {:go, %{}})
     :gen_statem.stop(pid)
   end
+
+  test "cast handler extern reads post-transition state (the VorDB sync pattern)" do
+    source = """
+    agent CastPostTrans do
+      extern do
+        Vor.TestHelpers.Echo.reflect(value: term) :: term
+      end
+
+      state store: map
+
+      protocol do
+        accepts {:sync, remote: map}
+        accepts {:get_size}
+        emits {:size, n: integer}
+      end
+
+      on {:sync, remote: R} do
+        transition store: map_merge(store, R, :max)
+        Vor.TestHelpers.Echo.reflect(value: store)
+      end
+
+      on {:get_size} do
+        n = map_size(store)
+        emit {:size, n: n}
+      end
+    end
+    """
+
+    {:ok, result} = Vor.Compiler.compile_and_load(source)
+    {:ok, pid} = GenServer.start_link(result.module, [])
+
+    GenServer.cast(pid, {:sync, %{remote: %{a: 1, b: 2}}})
+    Process.sleep(50)
+
+    assert {:size, %{n: 2}} = GenServer.call(pid, {:get_size, %{}})
+  end
 end

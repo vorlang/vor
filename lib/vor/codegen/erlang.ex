@@ -123,18 +123,27 @@ defmodule Vor.Codegen.Erlang do
         pattern_form = pattern_to_erl(handler.pattern, l)
         {pre_actions, terminal} = split_terminal(handler.actions)
 
-        # Separate transitions from other pre-actions
-        {transitions, other_pre} = Enum.split_with(pre_actions, fn a -> a.type == :transition end)
-        pre_exprs = Enum.flat_map(other_pre, &action_to_erl(&1, l, :State))
+        # Process actions sequentially, threading state variable through transitions
+        {pre_exprs, current_var} = Enum.reduce(pre_actions, {[], :State}, fn action, {exprs, sv} ->
+          case action do
+            %IR.Action{type: :transition, data: %IR.TransitionAction{field: field, value: value}} ->
+              new_sv = :"VorCast#{length(exprs)}"
+              update = {:match, l, {:var, l, new_sv},
+                {:map, l, {:var, l, sv}, [
+                  {:map_field_exact, l, {:atom, l, field}, transition_value_to_erl(value, l, sv)}
+                ]}}
+              {exprs ++ [update], new_sv}
+            _ ->
+              {exprs ++ action_to_erl(action, l, sv), sv}
+          end
+        end)
 
-        # Generate state update from transitions
-        {state_update_exprs, state_var} = gen_server_state_updates(transitions, l)
+        state_var = current_var
 
         # For cast, ignore emit value — just update state
         terminal_exprs = case terminal do
           %IR.Action{type: :conditional, data: %IR.ConditionalAction{} = cond_action} ->
-            # Execute conditional for side effects (state updates inside branches)
-            [compile_conditional_genserver(cond_action, l, (if transitions != [], do: :NewState, else: :State), state_var)]
+            [compile_conditional_genserver(cond_action, l, current_var, state_var)]
           _ ->
             []
         end
@@ -144,7 +153,7 @@ defmodule Vor.Codegen.Erlang do
         {:clause, l,
           [pattern_form, {:var, l, :State}],
           guard_to_erl(handler.guard, l),
-          pre_exprs ++ state_update_exprs ++ terminal_exprs ++ [result]}
+          pre_exprs ++ terminal_exprs ++ [result]}
       end)
 
     catchall = {:clause, l,
@@ -157,11 +166,24 @@ defmodule Vor.Codegen.Erlang do
 
   defp gen_handle_info(agent, l) do
     timer_clauses = Enum.map(agent.periodic_timers || [], fn timer ->
-      # Compile timer body — generate side effects only (transitions, send, broadcast)
+      # Process timer body sequentially, threading state variable
       {pre_actions, _terminal} = split_terminal(timer.actions)
-      {transitions, other_pre} = Enum.split_with(pre_actions, fn a -> a.type == :transition end)
-      pre_exprs = Enum.flat_map(other_pre, &action_to_erl(&1, l, :State))
-      {state_update_exprs, state_var} = gen_server_state_updates(transitions, l)
+
+      {pre_exprs, current_var} = Enum.reduce(pre_actions, {[], :State}, fn action, {exprs, sv} ->
+        case action do
+          %IR.Action{type: :transition, data: %IR.TransitionAction{field: field, value: value}} ->
+            new_sv = :"VorTimer#{length(exprs)}"
+            update = {:match, l, {:var, l, new_sv},
+              {:map, l, {:var, l, sv}, [
+                {:map_field_exact, l, {:atom, l, field}, transition_value_to_erl(value, l, sv)}
+              ]}}
+            {exprs ++ [update], new_sv}
+          _ ->
+            {exprs ++ action_to_erl(action, l, sv), sv}
+        end
+      end)
+
+      state_var = current_var
 
       # Re-arm timer
       interval_form = case timer.interval do
@@ -176,7 +198,7 @@ defmodule Vor.Codegen.Erlang do
       result = {:tuple, l, [{:atom, l, :noreply}, {:var, l, state_var}]}
 
       {:clause, l, [{:atom, l, timer.tag}, {:var, l, :State}], [],
-        pre_exprs ++ state_update_exprs ++ [rearm, result]}
+        pre_exprs ++ [rearm, result]}
     end)
 
     catchall = {:clause, l, [{:var, l, :_Msg}, {:var, l, :State}], [],
@@ -226,15 +248,6 @@ defmodule Vor.Codegen.Erlang do
   end
 
   # Generate state map updates for gen_server transitions
-  defp gen_server_state_updates([], _l), do: {[], :State}
-  defp gen_server_state_updates(transitions, l) do
-    map_pairs = Enum.map(transitions, fn %IR.Action{type: :transition, data: %IR.TransitionAction{field: field, value: value}} ->
-      {:map_field_exact, l, {:atom, l, field}, transition_value_to_erl(value, l, :State)}
-    end)
-    update_expr = {:match, l, {:var, l, :NewState}, {:map, l, {:var, l, :State}, map_pairs}}
-    {[update_expr], :NewState}
-  end
-
   defp transition_value_to_erl(value, l, _map_var) when is_atom(value), do: {:atom, l, value}
   defp transition_value_to_erl({:integer, n}, l, _map_var), do: {:integer, l, n}
   defp transition_value_to_erl({:atom, a}, l, _map_var), do: {:atom, l, a}
