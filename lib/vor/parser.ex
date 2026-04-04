@@ -467,6 +467,15 @@ defmodule Vor.Parser do
     {:ok, Enum.reverse(acc), rest}
   end
 
+  # nil as a special identifier → atom
+  defp parse_builtin_args([{:identifier, _, :nil}, {:delimiter, _, :comma} | rest], acc) do
+    parse_builtin_args(rest, [{:atom, "nil"} | acc])
+  end
+
+  defp parse_builtin_args([{:identifier, _, :nil}, {:delimiter, _, :close_paren} | rest], acc) do
+    {:ok, Enum.reverse([{:atom, "nil"} | acc]), rest}
+  end
+
   defp parse_builtin_args([{:identifier, _, name}, {:delimiter, _, :comma} | rest], acc) do
     parse_builtin_args(rest, [{:var, name} | acc])
   end
@@ -734,7 +743,11 @@ defmodule Vor.Parser do
                             {:identifier, _, first_seg}, {:operator, _, :dot} | rest], acc) do
     case collect_dotted_name([first_seg], [{:operator, nil, :dot} | rest]) do
       {:ok, segments, func, [{:delimiter, _, :open_paren} | rest]} ->
-        mod = Enum.join(Enum.map(segments, &Atom.to_string/1), ".")
+        # Check for Erlang.module.function pattern
+        mod = case segments do
+          [:Erlang, erl_mod] -> {:erlang_mod, Atom.to_string(erl_mod)}
+          _ -> Enum.join(Enum.map(segments, &Atom.to_string/1), ".")
+        end
         case parse_extern_args(rest) do
           {:ok, args, rest} ->
             node = %AST.ExternCall{module: mod, function: func, args: args, bind: bind_var, meta: meta}

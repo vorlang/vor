@@ -1,6 +1,9 @@
 # Changelog
 
 ## 2026-04-02
+- **Fix: post-transition extern args (GAP-007)** — Extern call arguments now read post-transition state field values. Gen_server handler body rewritten to thread data variable sequentially through transitions and extern calls.
+- **Fix: Erlang module extern calls (GAP-006)** — `Erlang.erlang.system_time(unit: :millisecond)` now correctly generates `erlang:system_time(...)` instead of `'Elixir.Erlang.erlang':system_time(...)`.
+- **Fix: atom literals in map ops (GAP-008)** — Atom literals (`:value`, `:key`, `:not_found`) and `nil` now work in map_get key/default positions, map_put keys, map_has keys, map_delete keys.
 - **Init handlers** — `on :init do ... end` runs once at startup before accepting messages. Supports extern calls, transitions, if/else, map/list ops. No emit/send/broadcast (compile error). Only one per agent. Extern failures caught — state fields keep defaults.
 - **LWW map_merge strategy** — `map_merge(store, remote, :lww)` for Last-Writer-Wins CRDTs. Compares timestamps, tiebreaks by node_id. Idempotent.
 - **Native list operations** — `list_head`, `list_tail`, `list_append`, `list_prepend`, `list_length`, `list_empty`. All handle empty lists safely. Lock example updated to use native ops — zero extern calls, fully native Vor.

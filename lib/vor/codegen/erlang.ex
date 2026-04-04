@@ -189,16 +189,23 @@ defmodule Vor.Codegen.Erlang do
   defp compile_handler_body(actions, l, map_var) do
     {pre_actions, terminal} = split_terminal(actions)
 
-    # Separate transitions from other pre-actions
-    {transitions, other_pre} = Enum.split_with(pre_actions, fn a -> a.type == :transition end)
+    # Process actions sequentially, threading state variable through transitions
+    {pre_exprs, current_var} = Enum.reduce(pre_actions, {[], map_var}, fn action, {exprs, sv} ->
+      case action do
+        %IR.Action{type: :transition, data: %IR.TransitionAction{field: field, value: value}} ->
+          new_sv = :"VorGS#{length(exprs)}"
+          update = {:match, l, {:var, l, new_sv},
+            {:map, l, {:var, l, sv}, [
+              {:map_field_exact, l, {:atom, l, field}, transition_value_to_erl(value, l, sv)}
+            ]}}
+          {exprs ++ [update], new_sv}
+        _ ->
+          {exprs ++ action_to_erl(action, l, sv), sv}
+      end
+    end)
 
-    pre_exprs = Enum.flat_map(other_pre, &action_to_erl(&1, l, map_var))
-
-    # Generate state update from transitions
-    {state_update_exprs, state_var} = gen_server_state_updates(transitions, l)
-
-    # After state updates, emit should reference the updated state variable
-    emit_map_var = if transitions != [], do: :NewState, else: map_var
+    state_var = current_var
+    emit_map_var = current_var
 
     terminal_expr = case terminal do
       %IR.Action{type: :emit, data: emit} ->
@@ -215,7 +222,7 @@ defmodule Vor.Codegen.Erlang do
         {:tuple, l, [{:atom, l, :reply}, {:atom, l, :ok}, {:var, l, state_var}]}
     end
 
-    pre_exprs ++ state_update_exprs ++ [terminal_expr]
+    pre_exprs ++ [terminal_expr]
   end
 
   # Generate state map updates for gen_server transitions
@@ -1393,7 +1400,9 @@ defmodule Vor.Codegen.Erlang do
       arg_forms}
 
     # Wrap in try/catch with unique variable names per extern call
-    suffix = :"#{ext.function}"
+    # Use bind var (if any) + function name for uniqueness
+    bind_suffix = if ext.bind, do: "_#{ext.bind}", else: "_#{:erlang.unique_integer([:positive])}"
+    suffix = :"#{ext.function}#{bind_suffix}"
     class_var = :"VorClass_#{suffix}"
     reason_var = :"VorReason_#{suffix}"
     stack_var = :"VorStack_#{suffix}"
