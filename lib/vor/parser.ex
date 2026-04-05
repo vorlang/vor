@@ -951,6 +951,15 @@ defmodule Vor.Parser do
     parse_extern_arg_fields(rest, [{field, {:atom, value}} | acc])
   end
 
+  # Allow keywords as extern call argument names (state: val, protocol: val, etc.)
+  defp parse_extern_arg_field([{:keyword, _, field}, {:delimiter, _, :colon}, {:identifier, _, var} | rest], acc) do
+    parse_extern_arg_fields(rest, [{field, {:var, var}} | acc])
+  end
+
+  defp parse_extern_arg_field([{:keyword, _, field}, {:delimiter, _, :colon}, {:atom, _, value} | rest], acc) do
+    parse_extern_arg_fields(rest, [{field, {:atom, value}} | acc])
+  end
+
   defp parse_extern_arg_field([token | _], _acc), do: {:error, {:expected_extern_arg, token}}
 
   # --- If/Else ---
@@ -1045,6 +1054,22 @@ defmodule Vor.Parser do
     end
   end
 
+  # var = mod/sub.function(...) — Gleam extern call with binding inside if body
+  # Must come before arithmetic bindings because slash is both a path separator and arithmetic op
+  defp parse_if_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                       {:identifier, _, first_seg}, {:operator, _, :slash} | rest], acc) do
+    case collect_gleam_module_path([first_seg], [{:operator, nil, :slash} | rest]) do
+      {:ok, mod_atom, func, [{:delimiter, _, :open_paren} | rest]} ->
+        case parse_extern_args(rest) do
+          {:ok, args, rest} ->
+            node = %AST.ExternCall{module: {:gleam_mod, mod_atom}, function: func, args: args, bind: bind_var, meta: meta}
+            parse_if_body(rest, [node | acc])
+          {:error, _} = err -> err
+        end
+      {:error, _} = err -> err
+    end
+  end
+
   # var = Var OP Var (arithmetic binding in if body)
   defp parse_if_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
                        {:identifier, _, left}, {:operator, _, op},
@@ -1070,6 +1095,20 @@ defmodule Vor.Parser do
        when op in [:minus, :plus, :star, :slash] do
     expr = %AST.ArithExpr{op: op, left: {:integer, left}, right: {:var, right}}
     parse_if_body(rest, [%AST.VarBinding{name: bind_var, expr: expr, meta: meta} | acc])
+  end
+
+  # mod/sub.function(...) — Gleam extern call without binding inside if body
+  defp parse_if_body([{:identifier, meta, first_seg}, {:operator, _, :slash} | rest], acc) do
+    case collect_gleam_module_path([first_seg], [{:operator, nil, :slash} | rest]) do
+      {:ok, mod_atom, func, [{:delimiter, _, :open_paren} | rest]} ->
+        case parse_extern_args(rest) do
+          {:ok, args, rest} ->
+            node = %AST.ExternCall{module: {:gleam_mod, mod_atom}, function: func, args: args, bind: nil, meta: meta}
+            parse_if_body(rest, [node | acc])
+          {:error, _} = err -> err
+        end
+      {:error, _} = err -> err
+    end
   end
 
   # var = Mod.Sub.function(...) — extern call with binding inside if body
@@ -1326,6 +1365,11 @@ defmodule Vor.Parser do
   end
 
   defp parse_typed_field_paren([{:identifier, _, name}, {:delimiter, _, :colon}, {:identifier, _, type} | rest], acc) do
+    parse_typed_fields_paren(rest, [{name, type} | acc])
+  end
+
+  # Allow Vor keywords as extern parameter names (state, protocol, transition, emit, etc.)
+  defp parse_typed_field_paren([{:keyword, _, name}, {:delimiter, _, :colon}, {:identifier, _, type} | rest], acc) do
     parse_typed_fields_paren(rest, [{name, type} | acc])
   end
 
