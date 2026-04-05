@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-04-02
+- **Lightweight type tracking** — Compiler tracks types through handler bodies and errors on guaranteed crashes: arithmetic on map, map_get on integer, list_head on map, etc. Operations on `term` (message variables, Elixir extern results) produce no diagnostics. Types inferred from state declarations, parameters, and built-in operation signatures.
 - **Gleam extern support** — `extern gleam do vordb/counter.value(counter: term) :: integer end` with slash-separated module paths converted to `@`-atoms. Handler calls use same slash notation. Optional type validation against `package-interface.json`. Mixed agents with gleam + erlang + elixir externs supported.
 - **Fix: variable scoping in if blocks (GAP-009)** — Variables bound inside if branches are now visible to subsequent statements in the same branch. Protocol checker threads scope sequentially through actions.
 - **Named agent registration (GAP-011)** — `start_link` accepts a `name` option for `{:local, atom}`, `{:global, term}`, or `{:via, module, term}` registration. Enables multiple instances of the same agent type. Backward compatible — agents without name start anonymously.

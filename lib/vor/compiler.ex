@@ -19,6 +19,7 @@ defmodule Vor.Compiler do
          :ok <- validate_init_handler(ir),
          {:ok, _warnings} <- Vor.Analysis.ProtocolChecker.check(ir),
          {:ok, _completeness_warnings} <- Vor.Analysis.Completeness.check(ir),
+         {:ok, _type_warnings} <- Vor.Analysis.TypeChecker.check(ir),
          :ok <- verify_safety(ir),
          _ <- (if trace, do: trace_verification(ir)),
          {:ok, forms} <- Vor.Codegen.Erlang.generate(ir),
@@ -220,6 +221,7 @@ defmodule Vor.Compiler do
     results = Enum.reduce_while(agent_irs, {:ok, %{}}, fn {name, ir}, {:ok, acc} ->
       with {:ok, _warnings} <- Vor.Analysis.ProtocolChecker.check(ir),
            {:ok, _completeness_warnings} <- Vor.Analysis.Completeness.check(ir),
+           {:ok, _type_warnings} <- Vor.Analysis.TypeChecker.check(ir),
            :ok <- verify_safety(ir),
            {:ok, forms} <- Vor.Codegen.Erlang.generate(ir),
            {:ok, module, binary, warnings} <- Vor.Codegen.Beam.compile(forms, opts) do
