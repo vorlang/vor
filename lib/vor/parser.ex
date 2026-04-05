@@ -770,11 +770,14 @@ defmodule Vor.Parser do
     end
   end
 
-  # Mod.Sub.function(...) — extern call without binding (Elixir module)
+  # Mod.Sub.function(...) — extern call without binding (Elixir or Erlang module)
   defp parse_handler_body([{:identifier, meta, first_seg}, {:operator, _, :dot} | rest], acc) do
     case collect_dotted_name([first_seg], [{:operator, nil, :dot} | rest]) do
       {:ok, segments, func, [{:delimiter, _, :open_paren} | rest]} ->
-        mod = Enum.join(Enum.map(segments, &Atom.to_string/1), ".")
+        mod = case segments do
+          [:Erlang, erl_mod] -> {:erlang_mod, Atom.to_string(erl_mod)}
+          _ -> Enum.join(Enum.map(segments, &Atom.to_string/1), ".")
+        end
         case parse_extern_args(rest) do
           {:ok, args, rest} ->
             node = %AST.ExternCall{module: mod, function: func, args: args, bind: nil, meta: meta}
@@ -1045,7 +1048,10 @@ defmodule Vor.Parser do
                        {:identifier, _, first_seg}, {:operator, _, :dot} | rest], acc) do
     case collect_dotted_name([first_seg], [{:operator, nil, :dot} | rest]) do
       {:ok, segments, func, [{:delimiter, _, :open_paren} | rest]} ->
-        mod = Enum.join(Enum.map(segments, &Atom.to_string/1), ".")
+        mod = case segments do
+          [:Erlang, erl_mod] -> {:erlang_mod, Atom.to_string(erl_mod)}
+          _ -> Enum.join(Enum.map(segments, &Atom.to_string/1), ".")
+        end
         case parse_extern_args(rest) do
           {:ok, args, rest} ->
             node = %AST.ExternCall{module: mod, function: func, args: args, bind: bind_var, meta: meta}
@@ -1392,11 +1398,14 @@ defmodule Vor.Parser do
     {:ok, Enum.reverse(acc), rest}
   end
 
-  # Elixir module: Mod.Sub.function(args) :: return_type
+  # Elixir or Erlang module: Mod.Sub.function(args) :: return_type
   defp parse_extern_decls([{:identifier, meta, first_seg} | rest], acc) do
     case collect_dotted_name([first_seg], rest) do
       {:ok, segments, func, [{:delimiter, _, :open_paren} | rest]} ->
-        mod = Enum.join(Enum.map(segments, &Atom.to_string/1), ".")
+        mod = case segments do
+          [:Erlang, erl_mod] -> {:erlang_mod, Atom.to_string(erl_mod)}
+          _ -> Enum.join(Enum.map(segments, &Atom.to_string/1), ".")
+        end
         case parse_typed_fields_paren(rest, []) do
           {:ok, args, [{:operator, _, :double_colon} | rest]} ->
             case parse_return_type(rest) do

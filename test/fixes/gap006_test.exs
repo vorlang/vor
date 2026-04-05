@@ -54,6 +54,34 @@ defmodule Vor.Fixes.Gap006Test do
     GenServer.stop(pid)
   end
 
+  test "Erlang module in extern declaration generates correct atom" do
+    source = """
+    agent ErlangDecl do
+      extern do
+        Erlang.erlang.system_time(unit: atom) :: integer
+      end
+
+      protocol do
+        accepts {:now}
+        emits {:time, value: integer}
+      end
+
+      on {:now} do
+        t = Erlang.erlang.system_time(unit: :millisecond)
+        emit {:time, value: t}
+      end
+    end
+    """
+
+    # Verify the IR has {:erlang_mod, :erlang} not a Module.concat'd name
+    {:ok, tokens} = Vor.Lexer.tokenize(source)
+    {:ok, ast} = Vor.Parser.parse(tokens)
+    {:ok, ir} = Vor.Lowering.lower(ast)
+
+    extern = hd(ir.externs)
+    assert {:erlang_mod, :erlang} = extern.module
+  end
+
   test "Elixir module extern calls still work" do
     source = """
     agent ElixirExtern do
