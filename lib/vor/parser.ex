@@ -738,6 +738,21 @@ defmodule Vor.Parser do
     end
   end
 
+  # var = mod/sub.function(...) — Gleam extern call with binding
+  defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
+                            {:identifier, _, first_seg}, {:operator, _, :slash} | rest], acc) do
+    case collect_gleam_module_path([first_seg], [{:operator, nil, :slash} | rest]) do
+      {:ok, mod_atom, func, [{:delimiter, _, :open_paren} | rest]} ->
+        case parse_extern_args(rest) do
+          {:ok, args, rest} ->
+            node = %AST.ExternCall{module: {:gleam_mod, mod_atom}, function: func, args: args, bind: bind_var, meta: meta}
+            parse_handler_body(rest, [node | acc])
+          {:error, _} = err -> err
+        end
+      {:error, _} = err -> err
+    end
+  end
+
   # var = Mod.Sub.function(...) — extern call with binding (Elixir module)
   defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
                             {:identifier, _, first_seg}, {:operator, _, :dot} | rest], acc) do
@@ -766,6 +781,20 @@ defmodule Vor.Parser do
       {:ok, args, rest} ->
         node = %AST.ExternCall{module: {:erlang_mod, mod}, function: func, args: args, bind: bind_var, meta: meta}
         parse_handler_body(rest, [node | acc])
+      {:error, _} = err -> err
+    end
+  end
+
+  # mod/sub.function(...) — Gleam extern call without binding
+  defp parse_handler_body([{:identifier, meta, first_seg}, {:operator, _, :slash} | rest], acc) do
+    case collect_gleam_module_path([first_seg], [{:operator, nil, :slash} | rest]) do
+      {:ok, mod_atom, func, [{:delimiter, _, :open_paren} | rest]} ->
+        case parse_extern_args(rest) do
+          {:ok, args, rest} ->
+            node = %AST.ExternCall{module: {:gleam_mod, mod_atom}, function: func, args: args, bind: nil, meta: meta}
+            parse_handler_body(rest, [node | acc])
+          {:error, _} = err -> err
+        end
       {:error, _} = err -> err
     end
   end
@@ -1386,6 +1415,14 @@ defmodule Vor.Parser do
 
   # --- Extern Block ---
 
+  defp parse_extern_block([{:keyword, meta, :extern}, {:keyword, _, :gleam}, {:keyword, _, :do} | rest]) do
+    case parse_gleam_extern_decls(rest, []) do
+      {:ok, decls, rest} ->
+        {:ok, %AST.ExternBlock{declarations: decls, meta: meta}, rest}
+      {:error, _} = err -> err
+    end
+  end
+
   defp parse_extern_block([{:keyword, meta, :extern}, {:keyword, _, :do} | rest]) do
     case parse_extern_decls(rest, []) do
       {:ok, decls, rest} ->
@@ -1393,6 +1430,44 @@ defmodule Vor.Parser do
       {:error, _} = err -> err
     end
   end
+
+  # --- Gleam extern declarations ---
+  # vordb/counter.function(args) :: type
+
+  defp parse_gleam_extern_decls([{:keyword, _, :end} | rest], acc) do
+    {:ok, Enum.reverse(acc), rest}
+  end
+
+  defp parse_gleam_extern_decls([{:identifier, meta, first_seg} | rest], acc) do
+    case collect_gleam_module_path([first_seg], rest) do
+      {:ok, mod_atom, func, [{:delimiter, _, :open_paren} | rest]} ->
+        case parse_typed_fields_paren(rest, []) do
+          {:ok, args, [{:operator, _, :double_colon} | rest]} ->
+            case parse_return_type(rest) do
+              {:ok, ret_type, rest} ->
+                decl = %AST.ExternDecl{module: {:gleam_mod, mod_atom}, function: func, args: args, return_type: ret_type, meta: meta}
+                parse_gleam_extern_decls(rest, [decl | acc])
+              {:error, _} = err -> err
+            end
+          {:ok, _args, [token | _]} -> {:error, {:expected_double_colon, token}}
+          {:error, _} = err -> err
+        end
+      {:error, _} = err -> err
+    end
+  end
+
+  # Collect a Gleam module path: vordb/counter/sub.function
+  # Segments separated by / (slash operator), ends with .function
+  defp collect_gleam_module_path(segments, [{:operator, _, :slash}, {:identifier, _, next} | rest]) do
+    collect_gleam_module_path(segments ++ [next], rest)
+  end
+  defp collect_gleam_module_path(segments, [{:operator, _, :dot}, {:identifier, _, func} | rest]) do
+    mod_str = segments |> Enum.map(&Atom.to_string/1) |> Enum.join("@")
+    {:ok, String.to_atom(mod_str), func, rest}
+  end
+  defp collect_gleam_module_path(_segments, [token | _]), do: {:error, {:expected_gleam_path, token}}
+
+  # --- Regular extern declarations ---
 
   defp parse_extern_decls([{:keyword, _, :end} | rest], acc) do
     {:ok, Enum.reverse(acc), rest}

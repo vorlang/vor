@@ -549,6 +549,7 @@ defmodule Vor.Lowering do
   end
 
   defp lower_extern_module({:erlang_mod, mod}), do: {:erlang_mod, to_atom(mod)}
+  defp lower_extern_module({:gleam_mod, mod}), do: {:gleam_mod, to_atom(mod)}
   defp lower_extern_module(mod), do: Module.concat([to_atom(mod)])
 
   defp extract_relations(body) do

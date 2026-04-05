@@ -1429,6 +1429,7 @@ defmodule Vor.Codegen.Erlang do
     # Resolve the module atom for the call
     mod_atom = case ext.module do
       {:erlang_mod, m} -> m
+      {:gleam_mod, m} -> m  # Gleam modules use @-separated atoms, no prefix
       m -> m  # Elixir modules already have the Elixir. prefix from Module.concat
     end
 

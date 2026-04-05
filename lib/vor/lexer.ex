@@ -39,7 +39,7 @@ defmodule Vor.Lexer do
                    retransmit_last_response extern if else
                    sends send broadcast system connect solve noop
                    map_get map_put map_has map_delete map_size map_sum map_merge
-                   every)
+                   every gleam)
 
     type = if name in keywords, do: :keyword, else: :identifier
     {rest, [{type, {line, col}, String.to_atom(name)}], context}

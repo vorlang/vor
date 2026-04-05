@@ -71,7 +71,8 @@ The equivalent in Elixir would be a gen_server with manual rate tracking, `propl
 - Periodic timers (`every`) for gossip, heartbeats, cleanup
 - Native map and list operations, min/max expressions
 - Init handlers for startup logic, LWW merge for CRDTs
-- 254 tests passing, 9 property tests, zero compiler warnings
+- Gleam extern support with type boundary validation
+- 278 tests passing, 9 property tests, zero compiler warnings
 - [Step-by-step tutorial](docs/vor-tutorial.md) from Echo agent to multi-agent pipeline
 
 ## Verified state machine
