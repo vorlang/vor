@@ -2,7 +2,7 @@
 
 This document describes the current state of the Vor compiler. It is an internal reference for anyone working on the compiler, including AI coding agents. Update this document as features are added.
 
-Last updated after: critical fixes (soundness, graph extraction, system runtime, dead code cleanup)
+Last updated after: Gleam extern support, type boundary validation, extern proven boundary enforcement, 287+ tests
 
 ## Architecture
 
@@ -18,6 +18,8 @@ Key files:
 - `lib/vor/analysis/protocol_checker.ex` — Protocol conformance validation
 - `lib/vor/graph.ex` — State graph extraction
 - `lib/vor/verification/safety.ex` — Safety invariant verification
+- `lib/vor/gleam/interface.ex` — Gleam package-interface.json parser
+- `lib/vor/gleam/validator.ex` — Gleam type boundary validation
 
 ## Agent compilation targets
 
@@ -28,21 +30,91 @@ Key files:
 - Additional state fields → entries in the Data/State map with type defaults (integer→0, atom→nil, map→%{}, list→[], binary→<<>>)
 - Parameters and state fields share the same map for both gen_server and gen_statem
 
+## Named agent registration
+
+Agents accept an optional `name` in the args keyword list:
+
+```elixir
+GenServer.start_link(mod, [param: value, name: {:via, Registry, {MyReg, :my_name}}])
+```
+
+If `name` is present, the generated `start_link` passes it to `GenServer.start_link/3` or `:gen_statem.start_link/4`. If absent, the agent starts anonymously (backward compatible). This enables multiple instances of the same agent type with different names — used for vnode sharding and similar patterns.
+
+System blocks handle naming automatically via the Registry.
+
+## Init handlers
+
+`on :init do ... end` runs once during agent startup, before the agent accepts messages.
+
+```vor
+on :init do
+  persisted = VorDB.Storage.load(node_id: node_id)
+  transition store: persisted
+end
+```
+
+Supports: extern calls, variable bindings, transitions, if/else, map/list operations, parameter references.
+
+Does NOT support: emit, send, broadcast (no caller, agent not yet registered). These produce a compile error.
+
+Only one `on :init` per agent. Extern failures in init are caught — state fields keep their defaults. Init handler body runs after parameter extraction and state field default initialization, before `every` timers start.
+
 ## What works in handler bodies
 
 ### Expressions
-- Arithmetic in emit fields: `remaining: max_requests - current` (operators: +, -, *, /)
+- Arithmetic: `remaining: max_requests - current` (operators: +, -, *, /)
 - Operand order: `var OP var`, `var OP int`, and `int OP var` all work
 - Variable binding from extern calls: `upper = String.upcase(text: T)`
 - Variable binding from arithmetic: `doubled = V + V`
 - Variable binding from pattern matching: `on {:msg, field: V}`
-- Parameter and data field references in emits and extern args: `emit {:r, val: greeting}`
+- Parameter and data field references in emits and extern args
+- Min/max: `smaller = min(a, b)`, `larger = max(a, b)`
+- Atom literals: `:value`, `:key`, `:not_found`, `nil` — valid in all expression positions
+- Noop: `noop` — explicit no-operation statement
+
+### Map operations
+
+Native map operations for state fields and variables of type map:
+
+- `map_get(map, key, default)` — get value by key, or default if missing
+- `map_put(map, key, value)` — set a key-value pair, returns new map
+- `map_has(map, key)` — returns `:true` or `:false`
+- `map_delete(map, key)` — remove a key, returns new map
+- `map_size(map)` — number of entries
+- `map_sum(map)` — sum of all values (assumes integer values)
+- `map_merge(map1, map2, strategy)` — merge two maps with conflict resolution
+
+All operations work on state fields AND local variables. Atom literals work in key and default positions: `map_get(entry, :value, nil)`.
+
+### Map merge strategies
+
+- `:max` — keep the larger value per key (for G-Counter merge)
+- `:min` — keep the smaller value per key
+- `:sum` — add values per key
+- `:replace` — second map wins
+- `:lww` — Last-Writer-Wins. Values must be maps with `:timestamp` (integer) and `:node_id` (atom). Keeps the entry with the higher timestamp; ties broken by node_id
+
+### List operations
+
+Native list operations for state fields and variables of type list:
+
+- `list_head(list)` — first element, or `:none` if empty
+- `list_tail(list)` — all elements except the first, or `[]` if empty
+- `list_append(list, value)` — new list with value added at the end
+- `list_prepend(list, value)` — new list with value added at the front (O(1))
+- `list_length(list)` — number of elements
+- `list_empty(list)` — `:true` or `:false`
+
+All operations handle empty lists safely — no crashes on empty input. All operations work on state fields AND local variables.
 
 ### Conditionals
 - If/else: `if current <= max_requests do ... else ... end`
 - Nested if/else works: full statement set inside if bodies
 - If condition operators: `<=`, `>=`, `==`, `!=`, `>`, `<`
 - Boolean logic in if conditions: `if X > 0 and Y > 0 do`
+- Variables bound inside an if block are visible to subsequent statements in the same block (including emit, send, transition)
+- Variables in one branch are NOT visible in the other branch or after the if/else block
+- All extern types (Elixir, Erlang, Gleam) work inside if blocks
 
 ### Guards (on handler patterns)
 - Equality: `when phase == :closed`
@@ -54,24 +126,32 @@ Key files:
 - `state phase: :a | :b | :c` — the gen_statem State. First enum field.
 - `state count: integer` — goes into Data map with default 0.
 - `state label: atom` — goes into Data map with default nil.
+- `state store: map` — goes into Data map with default %{}.
+- `state items: list` — goes into Data map with default [].
 - `transition phase: :new_state` — changes the gen_statem State atom.
 - `transition count: count + 1` — updates Data map field with expression.
 - `transition voted_for: C` — updates Data map field with variable.
 - Multiple transitions in one handler are collapsed into a single state change with map update.
+
+### Transition ordering and data variable threading
+
+The handler body is compiled as a sequential chain. Each statement sees the results of all previous statements:
+
+- Transitions update the data variable: after `transition count: count + 1`, subsequent references to `count` see the post-transition value
+- This applies to extern call arguments, emit field values, send/broadcast field values, and subsequent transitions
+- Variable bindings from earlier statements are visible to later statements, including inside if blocks
 
 ### Gen_statem call support
 - Handlers respond to both `cast` and `call` events.
 - Call replies include the emitted value.
 - `:gen_statem.call(pid, {:msg, %{field: val}})` returns the emit tuple.
 
-### Timers
-- `start_timer`, `cancel_timer`, `restart_timer` from relations — works for gen_statem
-- gen_statem state timeouts for liveness monitoring — works
-
-### Local variables
-- Binding from pattern match — works
-- Binding from extern call — works
-- Binding from arithmetic expression — works (`x = a + 1`)
+### Periodic timers
+- `every interval_ms do ... end` — periodic execution
+- Interval can be a literal integer or a parameter reference
+- Body supports the same statements as handler bodies: transitions, extern calls, broadcast, variable bindings
+- Generates `erlang:send_after` in init and re-arms after each execution
+- Timers start after `on :init` handler completes
 
 ## What works in invariants
 
@@ -79,6 +159,7 @@ Key files:
 - `never(phase == :state and emitted({:msg, _}))` — verified by graph walk
 - `never(transition from: :a, to: :b)` — verified by graph walk
 - Resilience timeout transitions included in graph and verified
+- Proven invariants cannot depend on extern results (see Extern Declarations)
 
 ### Liveness (monitored)
 - `always(phase != :idle implies eventually(phase == :done))` — runtime via gen_statem state timeouts
@@ -86,24 +167,94 @@ Key files:
 - Timeout duration can come from agent parameters
 
 ## Extern declarations
-- Declared in `extern do ... end` block
-- Untrusted by default — try/catch wrapped in generated code
-- A `proven` safety invariant whose verification path crosses an extern result
-  is rejected at compile time. The check is path-precise: the verifier walks
-  each handler in the relevant state and tracks which variables are tainted by
-  extern call results. The error fires only when a prohibited emit (or
-  transition) sits inside a conditional whose condition data-depends on a
-  tainted variable. Externs whose results are only used for transitions, used
-  unconditionally before a non-prohibited emit, or sit in a handler whose state
-  isn't covered by the invariant are fine. To resolve a triggered error: remove
-  the extern dependency from the conditional, downgrade the invariant to
-  `monitored`, or restructure the handler so the prohibited emit is unreachable
-  regardless of extern results.
+
+Three types of extern blocks:
+
+### Elixir externs
+```vor
+extern do
+  MyApp.Storage.save(key: atom, value: map) :: atom
+  Vor.TestHelpers.Echo.reflect(value: term) :: term
+end
+```
+Generates `'Elixir.MyApp.Storage':save(Key, Value)`.
+
+### Erlang externs
+```vor
+extern do
+  Erlang.erlang.system_time(unit: atom) :: integer
+  Erlang.lists.sort(list: list) :: list
+end
+```
+Generates `erlang:system_time(Unit)` — raw Erlang module atom, no `Elixir.` prefix.
+
+### Gleam externs
+```vor
+extern gleam do
+  vordb/counter.empty() :: term
+  vordb/counter.increment(counter: term, node_id: binary, amount: integer) :: term
+  vordb/counter.value(counter: term) :: integer
+  vordb/counter.merge_stores(local: map, remote: map) :: map
+  vordb/or_set.empty() :: term
+  vordb/or_set.add_element(state: term, element: binary, tag: term) :: term
+end
+```
+Slash-separated module paths map to `@`-separated BEAM atoms: `vordb/counter` → `'vordb@counter'`. Deep paths work: `vordb/storage/rocks` → `'vordb@storage@rocks'`.
+
+### Keyword parameter names
+Vor keywords (`state`, `protocol`, `transition`, `emit`, `broadcast`, `agent`, `every`, etc.) are accepted as parameter names in extern declarations. Foreign functions can use any identifier as a parameter name.
+
+### Extern trust boundary
+
+All extern calls are:
+- Wrapped in try/catch — failures don't crash the agent
+- Untrusted by default — the compiler cannot verify what they return
+
+**Proven invariants cannot depend on extern results.** If a handler path that could violate a `proven` invariant contains a conditional whose condition depends on an extern call result, and the prohibited emit/transition is inside that conditional, compilation fails. The verifier tracks which variables are tainted by extern call results and checks whether prohibited emits sit behind extern-dependent conditions.
+
+This is path-precise: externs whose results are only used for transitions, used unconditionally before a non-prohibited emit, or sit in a handler whose state isn't covered by the invariant are fine.
+
+To resolve a triggered error:
+- Remove the extern dependency from the conditional
+- Change the invariant from `proven` to `monitored`
+- Restructure the handler so the prohibited emit is unreachable regardless of extern results
+
+### Gleam type boundary validation
+
+When a `package-interface.json` file is available (generated by `gleam export package-interface`), the Vor compiler validates Gleam extern declarations:
+
+- Function exists in the declared module
+- Parameter count (arity) matches
+- Parameter types are compatible (using type mapping)
+- Return type is compatible
+
+Type mapping:
+
+| Gleam type | Vor type | Compatibility |
+|---|---|---|
+| `Int` | `integer` | Exact match |
+| `String` | `binary` | Exact match |
+| `Bool` | `atom` | Compatible |
+| `List(a)` | `list` | Compatible |
+| `Dict(k, v)` | `map` | Compatible |
+| `Nil` | `atom` | Compatible |
+| `Result(a, e)` | `term` | Compatible |
+| Custom types | `term` | Compatible |
+| Any | `term` | Always compatible (opt-out) |
+
+Declaring `:: term` opts out of return type validation for that extern. Validation is optional — if no interface file is found, compilation proceeds without type checks.
+
+Build sequence:
+```bash
+gleam build                           # compile Gleam modules
+gleam export package-interface        # generate type metadata
+mix compile                           # Vor reads JSON, validates, compiles
+```
 
 ## Parameterized agents
 - Params declared after agent name: `agent Foo(x: integer, y: binary) do`
 - Passed as keyword list to init: `GenServer.start_link(Foo, [x: 10, y: "hi"])`
-- Available in handlers, relations, and liveness timeout expressions
+- Available in handlers, relations, liveness timeout expressions, and init handlers
 - Immutable after init
 - Stored in Data map alongside data fields
 
@@ -136,13 +287,11 @@ System supervisor starts a Registry and all agents in dependency order.
 
 ### Broadcast
 
-`broadcast {:msg, fields}` sends a message to all agents this agent has
-outbound connections to in the system block. The message must match a
-`sends` declaration in the protocol.
+`broadcast {:msg, fields}` sends a message to all agents this agent has outbound connections to in the system block.
 
 - Always asynchronous (cast)
 - Works alongside `emit` (reply) and `send :target` (directed) in the same handler
-- Works in resilience handlers and if/else bodies
+- Works in resilience handlers, if/else bodies, and every blocks
 - Requires a system block — compile error if used in a standalone agent
 - Generated code iterates `__vor_connections__` and sends via the registry
 - Gracefully handles missing peers (skips if not found in registry)
@@ -150,47 +299,47 @@ outbound connections to in the system block. The message must match a
 ## Handler completeness checking
 
 ### Mandatory else for call handlers
-If a handler contains any `emit`, every code path through that handler must reach an emit. Specifically:
+If a handler contains any `emit`, every code path must reach an emit:
 - If an `if` block contains an emit, the `else` block is mandatory and must also emit
-- A default emit after an if block satisfies this (the if can lack an else if the emit follows it)
-- Nested if/else is checked recursively — each level must have complete coverage
-- Cast handlers (no emit) are exempt — else is optional
+- A default emit after an if block satisfies this
+- Nested if/else is checked recursively
+- Cast handlers (no emit) are exempt
 
 Produces `{:error, %{type: :incomplete_handler}}` on failure.
 
 ### Handler coverage for protocol accepts
-Every `accepts` declaration in the protocol must have at least one handler with a matching message tag. Guards may restrict which messages are handled, but the base pattern must exist.
+Every `accepts` declaration in the protocol must have at least one handler with a matching message tag.
 
 Produces `{:error, %{type: :missing_handler}}` on failure.
 
 ### Catch-all handler generation
-For message tags that have guarded handlers, the compiler automatically generates catch-all clauses:
-- Call messages: reply with `{:error, :no_matching_handler}` instead of crashing
+For message tags with guarded handlers, the compiler generates catch-all clauses:
+- Call messages: reply with `{:error, :no_matching_handler}`
 - Cast messages: silently ignored (`keep_state_and_data`)
 
-This prevents process crashes when no guard matches at runtime.
-
 ### Pattern matching depth
-Vor handlers match one level deep: message tag + named fields. Nested destructuring is not supported. To inspect nested data, bind the field and use an extern call:
-
-```vor
-on {:msg, entries: E} do
-  first = ListHelper.head(list: E)
-end
-```
+Vor handlers match one level deep: message tag + named fields. Nested destructuring is not supported. Bind the field and use map/list operations or extern calls for deeper access.
 
 ## Bidirectional relations
 
 Relations support forward lookup, reverse lookup, and arithmetic inversion.
 
 **Fact-based relations** can be queried from any field:
-- Forward: `solve tier(client: C, max: M)` with C bound fills M
-- Reverse: `solve tier(client: C, max: 100)` with max bound fills C
+```vor
+relation port_mapping(service: S, port: P) do
+  fact(service: :http, port: 80)
+  fact(service: :https, port: 443)
+end
+```
 
 **Equation-based relations** are automatically inverted at compile time:
-- `relation temp(celsius: C, fahrenheit: F) do F = C * 9 / 5 + 32 end`
+```vor
+relation temp(celsius: C, fahrenheit: F) do
+  F = C * 9 / 5 + 32
+end
+```
 - Forward: provide C, get F
-- Inverse: provide F, get C (compiler generates C = (F - 32) * 5 / 9)
+- Inverse: provide F, get C (compiler generates `C = (F - 32) * 5 / 9`)
 - Limited to linear arithmetic (+, -, *, /)
 
 ## Resilience blocks
@@ -204,11 +353,7 @@ resilience do
 end
 ```
 
-Resilience handlers are generated as regular handler clauses and included in the state graph. The safety verifier checks them.
-
-## Transition ordering
-
-Transitions are applied before emits in the same handler. An emit after a transition reads the post-transition state.
+Resilience handlers are generated as regular handler clauses and included in the state graph. The safety verifier checks them — recovery paths cannot introduce new safety violations.
 
 ## Guard asymmetry
 
@@ -222,37 +367,58 @@ Safety invariants tagged `proven` are verified by walking the state transition g
 - `never(phase == :state and emitted({:tag, _}))` — no emit of a message type in a given state
 - `never(transition from: :a, to: :b)` — no direct transition between two states
 
-Invariant bodies that use unsupported constructs will produce a compile error when tagged `proven`. Change to `monitored` for properties the verifier cannot yet check.
+The verifier fails closed:
+- Unsupported invariant patterns produce a compile error when tagged `proven`
+- Invariants that the verifier cannot verify are never silently accepted
+- Extern-dependent conditionals on the verification path produce a compile error
+
+Change to `monitored` for properties the verifier cannot yet check.
 
 ## TLA+ specifications
 
-The `tla/` directory contains TLA+ specs for the compiler's most critical
-modules:
+The `tla/` directory contains TLA+ specs for the compiler's most critical modules:
 
 - `VorSafetyVerifier.tla` — correctness of safety invariant verification
 - `VorGraphExtraction.tla` — correctness of state graph extraction
 
-If you modify `lib/vor/verification/safety.ex` or `lib/vor/graph.ex`,
-review the corresponding TLA+ spec to ensure the algorithm still matches.
-Run TLC to verify if you have the TLA+ tools installed.
+If you modify `lib/vor/verification/safety.ex` or `lib/vor/graph.ex`, review the corresponding TLA+ spec. Run TLC to verify if you have the TLA+ tools installed.
 
-These specs verify the algorithm, not the Elixir code directly. They
-define the contract; the Elixir code must satisfy it.
+These specs verify the algorithm, not the Elixir code directly. They define the contract; the Elixir code must satisfy it.
+
+## Working examples
+
+Five examples in the `examples/` directory:
+
+- `lock.vor` — distributed lock with FIFO wait queue, proven safety ("no grant when held"), liveness timeout
+- `circuit_breaker.vor` — three-state circuit breaker, proven safety ("no forward when open"), liveness recovery
+- `gcounter.vor` + `gcounter_cluster.vor` — G-Counter CRDT with periodic gossip, zero externs
+- `rate_limiter.vor` — parameterized rate limiter with ETS externs
+- `raft.vor` + `raft_cluster.vor` — three-node Raft consensus with leader election
+
+Additional CRDT types verified in tests (not separate example files):
+- PN-Counter — two nested map_merge(:max) calls, zero externs
+- Version-based OR-Set — entries + tombstones with map_merge(:max), zero externs
 
 ## Known limitations
 
-1. No list or collection operations native to the language — use extern calls
+1. No list/map iteration (map, filter, fold, for-each) — use extern calls for operations that need to traverse collections
 2. No string operations native to the language — use extern calls
 3. No explicit default values for data fields (`state x: integer = 5`) — uses implicit type defaults
 4. No pattern matching on extern return values beyond simple comparison
 5. No `match`/`case` expressions — only if/else
-6. No nested pattern matching in handler patterns — match tag + top-level fields only, use externs for deeper destructuring
+6. No nested pattern matching in handler patterns — match tag + top-level fields only
 7. No guard coverage analysis (whether guards partition the input space) — catch-all handlers cover this at runtime
+8. No nested builtin calls — `map_put(map_put(...), ...)` doesn't parse. Bind intermediate variables.
+9. Multi-agent verification not yet supported — safety invariants verify single-agent properties only. Cluster-wide properties require testing or external tools like TLA+.
 
 ## Known design debt
 
 ### Atom interning
 
-The lexer and lowering phases use `String.to_atom/1` on source-derived identifiers. On the BEAM, atoms are not garbage collected, so compiling large or untrusted source files can grow the atom table permanently. This is acceptable for the current prototype stage but must be addressed before the compiler runs in a long-lived service or accepts untrusted input.
+The lexer and lowering phases use `String.to_atom/1` on source-derived identifiers. On the BEAM, atoms are not garbage collected, so compiling large or untrusted source files can grow the atom table permanently. Acceptable for the current stage but must be addressed before the compiler runs in a long-lived service or accepts untrusted input.
 
-Future fix: keep source names as binaries through lexer/parser/lowering, convert to atoms only at codegen for the final Erlang abstract format.
+Future fix: keep source names as binaries through lexer/parser/lowering, convert to atoms only at codegen.
+
+### Warning visibility
+
+Some analysis warnings are computed but not surfaced to the user during compilation. Dead accepts warnings are surfaced from `compile_system/1`. Other warnings in lowering and verification may be computed and dropped. Worth a sweep when moving toward production use.
