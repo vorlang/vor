@@ -88,7 +88,17 @@ Key files:
 ## Extern declarations
 - Declared in `extern do ... end` block
 - Untrusted by default — try/catch wrapped in generated code
-- Proven invariants that depend on extern results produce warnings
+- A `proven` safety invariant whose verification path crosses an extern result
+  is rejected at compile time. The check is path-precise: the verifier walks
+  each handler in the relevant state and tracks which variables are tainted by
+  extern call results. The error fires only when a prohibited emit (or
+  transition) sits inside a conditional whose condition data-depends on a
+  tainted variable. Externs whose results are only used for transitions, used
+  unconditionally before a non-prohibited emit, or sit in a handler whose state
+  isn't covered by the invariant are fine. To resolve a triggered error: remove
+  the extern dependency from the conditional, downgrade the invariant to
+  `monitored`, or restructure the handler so the prohibited emit is unreachable
+  regardless of extern results.
 
 ## Parameterized agents
 - Params declared after agent name: `agent Foo(x: integer, y: binary) do`

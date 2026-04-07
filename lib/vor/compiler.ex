@@ -72,20 +72,34 @@ defmodule Vor.Compiler do
         safety_invariants = get_safety_bodies(ir)
 
         results = Enum.map(safety_invariants, fn {name, body_tokens} ->
-          result = Vor.Verification.Safety.verify_body(body_tokens, graph)
+          result = Vor.Verification.Safety.verify_body(body_tokens, graph, ir)
           {name, result}
         end)
 
-        # Check for unsupported invariants first (soundness: fail closed)
+        # Check for extern-gated proven invariants (fail closed: a proof
+        # cannot depend on what an extern returns)
+        extern_gated = Enum.filter(results, fn
+          {_name, {:error, {:extern_gated_emit, _}}} -> true
+          {_name, {:error, {:extern_gated_transition, _}}} -> true
+          _ -> false
+        end)
+
         unsupported = Enum.filter(results, fn
           {_name, {:error, {:unsupported_invariant, _}}} -> true
           _ -> false
         end)
 
-        case unsupported do
-          [{name, {:error, {:unsupported_invariant, msg}}} | _] ->
+        cond do
+          extern_gated != [] ->
+            [{name, {:error, kind_info}} | _] = extern_gated
+            {:error, %{type: :extern_gated_invariant, name: name,
+                        message: format_extern_gated_message(name, kind_info)}}
+
+          unsupported != [] ->
+            [{name, {:error, {:unsupported_invariant, msg}}} | _] = unsupported
             {:error, %{type: :unsupported_invariant, name: name, message: msg}}
-          [] -> :ok
+
+          true -> :ok
         end
         |> case do
           {:error, _} = err -> err
@@ -110,6 +124,48 @@ defmodule Vor.Compiler do
         :ok
     end
   end
+
+  defp format_extern_gated_message(name, {:extern_gated_emit, %{state: state, tag: tag, handler: handler}}) do
+    pat = handler.pattern.tag
+    """
+    Safety invariant "#{name}" cannot be proven
+
+      In handler on {:#{pat}, ...} when #{state_field_pretty(handler)} == :#{state}:
+        The emit {:#{tag}, ...} is inside a conditional whose condition
+        depends on the result of an extern call. Proven invariants must be
+        verifiable from Vor-visible code alone. The compiler cannot determine
+        what the extern returns, so it cannot prove the invariant holds on
+        all paths.
+
+      Options:
+        - Remove the extern dependency from the conditional
+        - Change the invariant from 'proven' to 'monitored'
+        - Restructure the handler so the prohibited emit is unreachable
+          regardless of extern results
+    """
+  end
+
+  defp format_extern_gated_message(name, {:extern_gated_transition, %{from: from, to: to, handler: handler}}) do
+    pat = handler.pattern.tag
+    """
+    Safety invariant "#{name}" cannot be proven
+
+      In handler on {:#{pat}, ...} when #{state_field_pretty(handler)} == :#{from}:
+        The transition to :#{to} is inside a conditional whose condition
+        depends on the result of an extern call. Proven invariants must be
+        verifiable from Vor-visible code alone.
+
+      Options:
+        - Remove the extern dependency from the conditional
+        - Change the invariant from 'proven' to 'monitored'
+        - Restructure the handler so the prohibited transition is unreachable
+          regardless of extern results
+    """
+  end
+
+  defp state_field_pretty(%Vor.IR.Handler{guard: %Vor.IR.GuardExpr{field: f}}), do: f
+  defp state_field_pretty(%Vor.IR.Handler{guard: %Vor.IR.CompoundGuardExpr{left: %Vor.IR.GuardExpr{field: f}}}), do: f
+  defp state_field_pretty(_), do: :phase
 
   defp get_safety_bodies(ir) do
     ir.invariants

@@ -24,8 +24,8 @@ The "Mainstream" column describes the dominant paradigm (Java, Python, TypeScrip
 | **Debugging** | Stack traces, breakpoints, print statements | Invariant violation traces. Compiler trace shows each pipeline stage. State graph extraction and visualization |
 | | | |
 | **Key difficulty** | Complexity scales with human cognitive limits. Concurrency bugs. Integration debt | Expression language limits require extern calls for data operations. Verification limited to single-agent local properties. Conditional codegen complexity in gen_statem |
-| **Escape hatches** | N/A — everything is manual | Drop to Erlang/Elixir/Gleam via extern declarations. Untrusted by default — try/catch wrapped, compiler warns if proven invariants depend on extern results. Gleam externs are type-validated at the boundary |
-| **Maturity** | Decades of tooling, libraries, talent pool | Working compiler with 287+ tests, TLA+-verified verifier, five examples including Raft consensus and CRDTs. Compilation <5ms, verification <2ms. Active development |
+| **Escape hatches** | N/A — everything is manual | Drop to Erlang/Elixir/Gleam via extern declarations. Untrusted by default — try/catch wrapped, proven invariants cannot depend on extern results. Gleam externs are type-validated at the boundary |
+| **Maturity** | Decades of tooling, libraries, talent pool | Working compiler with 287+ tests, TLA+-verified verifier, five examples with verified invariants. Compilation <5ms, verification <2ms. Active development |
 
 ### What about Erlang and Elixir?
 
@@ -77,17 +77,17 @@ They don't compete — they complement each other. Vor verifies the coordination
 
 ### The AI question
 
-Vor's declarative structure — where the spec is the program and properties are first-class — is designed to be AI-friendly. An AI writing a Vor program gets its work checked by the compiler: invariants must hold, protocols must match, handlers must cover all accepted messages. The compiler catches the AI's mistakes the same way it catches a human's.
+Vor's declarative structure — where the spec is the program and properties are first-class — means that AI-generated code gets the same compiler checks as human-written code. Invariants must hold, protocols must match, handlers must cover all accepted messages. The compiler catches mistakes regardless of who made them.
 
-This isn't AI synthesis in the speculative sense of "AI generates implementations from properties." It's more practical: AI writes `.vor` files the same way it writes `.py` or `.ex` files, but the Vor compiler provides stronger guarantees about what it produces. The spec-as-program principle means there's no gap between what the AI was asked to build and what the compiler verifies. All five examples — rate limiter, circuit breaker, Raft, G-Counter, and distributed lock — were developed with AI assistance. The compiler caught real bugs in AI-generated code during development.
-
-Full AI synthesis — where the human provides only properties and the AI provides the implementation — is part of the language design vision but not yet implemented. The verification story works today without it.
+All five examples were developed with AI assistance. The compiler caught real bugs in AI-generated code during development — missing handlers, invariant violations, protocol mismatches. This isn't a feature of Vor; it's a consequence of the design. A language where the spec is the program is inherently checkable, whether the author is human or machine.
 
 ### The honest risks
 
 **Expressiveness limits.** Vor's handler expression language is simpler than Erlang, Elixir, or Gleam. Complex data operations (list iteration, map traversal, string processing) require extern calls. This is by design — Vor handles the protocol layer, Gleam/Elixir handles the data layer — but it means Vor programs are always hybrid. The boundary between "what Vor verifies" and "what Gleam/Elixir does" requires judgment.
 
-**Single-agent verification.** Vor can verify properties of individual agents but not distributed properties across a cluster. The Raft example verifies that each node's state machine is locally correct, but "at most one leader per term" — the key Raft safety property — requires reasoning about message interleavings across agents, which is exactly what TLA+ does well and Vor doesn't do yet. Multi-agent runtime monitoring is a planned direction.
+**Single-agent verification.** Vor verifies properties of individual agents — not distributed properties across a cluster. The distributed lock example demonstrates this clearly: "never grant the lock while held" is proven exhaustively for the lock agent. But a property like "at most one leader per term" across a Raft cluster requires reasoning about message interleavings between multiple agents, which Vor doesn't do. Multi-agent runtime monitoring is a planned direction; TLA+ remains the right tool for protocol-level distributed verification.
+
+**The extern trust boundary.** Proven invariants cannot depend on extern results — the compiler enforces this. But the more logic that lives behind externs, the less the compiler can verify. A Vor program where most handlers are thin wrappers around extern calls gets the protocol verification but loses the handler-level guarantees. The goal is to keep enough logic in Vor that the verification is meaningful while delegating data processing to Gleam/Elixir where type safety (not behavioral verification) is the right tool.
 
 **Adoption.** New programming languages face a steep adoption curve regardless of technical merit. Vor's audience — BEAM developers who need verification, or formal methods practitioners who need executable specs — is small. The project's viability depends on finding the right early users, not on broad appeal. A CRDT-based distributed database (VorDB) is the first real consumer, driving language features through practical use.
 
@@ -95,4 +95,4 @@ If Vor never gains adoption, it's still a working demonstration that verificatio
 
 ---
 
-*vorlang.org  ·  Targets: BEAM/OTP  ·  License: MIT  ·  Status: Working compiler, 287+ tests, five examples including Raft and CRDTs*
+*vorlang.org  ·  Targets: BEAM/OTP  ·  License: MIT  ·  Status: Working compiler, 287+ tests, five examples with verified invariants*

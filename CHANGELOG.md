@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-04-07
+- **Extern boundary is now an error for proven safety invariants** — A `proven` safety invariant whose verification path crosses an extern result is rejected with a compile error (`:extern_gated_invariant`). The check is path-precise: the safety verifier walks each handler in the relevant state, tracks which variables are tainted by extern call results, and reports an error only when a prohibited emit (or transition) sits inside a conditional whose condition data-depends on a tainted variable. Externs that don't influence the prohibited emit/transition (extern result used only for a transition, used unconditionally before a non-prohibited emit, in a handler whose state isn't covered by the invariant, etc.) remain fine. Consistent with the fail-closed soundness philosophy. Options when triggered: remove the extern dependency from the conditional, downgrade the invariant from `proven` to `monitored`, or restructure the handler so the prohibited emit is unreachable regardless of extern results.
+
 ## 2026-04-02
 - **Lightweight type tracking** — Compiler tracks types through handler bodies and errors on guaranteed crashes: arithmetic on map, map_get on integer, list_head on map, etc. Operations on `term` (message variables, Elixir extern results) produce no diagnostics. Types inferred from state declarations, parameters, and built-in operation signatures.
 - **Gleam extern support** — `extern gleam do vordb/counter.value(counter: term) :: integer end` with slash-separated module paths converted to `@`-atoms. Handler calls use same slash notation. Optional type validation against `package-interface.json`. Mixed agents with gleam + erlang + elixir externs supported.
