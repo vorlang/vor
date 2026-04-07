@@ -121,7 +121,6 @@ GenServer.call(pid, {:request, %{client: "alice", payload: "hello"}})
 
 ## Background
 
-- [vorlang.org](https://vorlang.org) -- project site, examples, and language overview
 - [One-pager](docs/onepager.md) -- technical overview
 - [Paradigm comparison](docs/comparison.md) -- Mainstream vs Vor
 
