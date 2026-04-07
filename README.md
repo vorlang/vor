@@ -119,6 +119,10 @@ GenServer.call(pid, {:request, %{client: "alice", payload: "hello"}})
 # => {:ok, %{payload: "hello", remaining: 4}}
 ```
 
+## Built with Vor
+
+- [VorDB](https://github.com/vorlang/vordb) -- a CRDT-based distributed database, the first real consumer driving Vor's language features through practical use
+
 ## Background
 
 - [One-pager](docs/onepager.md) -- technical overview
