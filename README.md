@@ -121,7 +121,7 @@ GenServer.call(pid, {:request, %{client: "alice", payload: "hello"}})
 
 ## Background
 
-- [The Vor Manifesto](https://vorlang.org) -- why this language needs to exist
+- [vorlang.org](https://vorlang.org) -- project site, examples, and language overview
 - [One-pager](docs/onepager.md) -- technical overview
 - [Paradigm comparison](docs/comparison.md) -- Mainstream vs Vor
 
