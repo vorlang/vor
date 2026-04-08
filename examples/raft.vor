@@ -10,7 +10,6 @@ agent RaftNode(
     Vor.Examples.RaftHelpers.log_last_index(log: list) :: integer
     Vor.Examples.RaftHelpers.log_last_term(log: list) :: integer
     Vor.Examples.RaftHelpers.log_up_to_date(candidate_last_index: integer, candidate_last_term: integer, my_log: list) :: atom
-    Vor.Examples.RaftHelpers.majority(cluster_size: integer) :: integer
   end
 
   state role: :follower | :candidate | :leader
@@ -82,8 +81,12 @@ agent RaftNode(
   on {:vote_granted, term: T, voter: V} when role == :candidate and T == current_term do
     new_votes = vote_count + 1
     transition vote_count: new_votes
-    maj = Vor.Examples.RaftHelpers.majority(cluster_size: cluster_size)
-    if new_votes >= maj do
+    %% Native majority check: vote_count > cluster_size / 2 is equivalent
+    %% to vote_count >= floor(cluster_size / 2) + 1, i.e. a strict majority.
+    %% Done in Vor (not via an extern) so the multi-agent model checker
+    %% can evaluate the gate precisely instead of treating it as :unknown.
+    half = cluster_size / 2
+    if new_votes > half do
       transition role: :leader
       broadcast {:append_entries, term: current_term, leader_id: node_id, entries: [], leader_commit: commit_index}
     end

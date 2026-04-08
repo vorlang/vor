@@ -226,7 +226,7 @@ defmodule Vor.Compiler do
     {:ok, agent_irs, system_ir}
   end
 
-  defp lower_system_block(%Vor.AST.System{name: name, agents: agents, connections: connections}, agent_irs) do
+  defp lower_system_block(%Vor.AST.System{name: name, agents: agents, connections: connections, invariants: invariants}, agent_irs) do
     %Vor.IR.SystemIR{
       name: name,
       registry: Module.concat([Vor, System, name, Registry]),
@@ -254,6 +254,9 @@ defmodule Vor.Compiler do
         from_atom = if is_atom(from), do: from, else: String.to_atom(from)
         to_atom = if is_atom(to), do: to, else: String.to_atom(to)
         %{from: from_atom, to: to_atom}
+      end),
+      invariants: Enum.map(invariants || [], fn %Vor.AST.SystemSafety{name: n, tier: tier, body: body} ->
+        %Vor.IR.SystemInvariant{name: n, tier: tier, body: body}
       end)
     }
   end

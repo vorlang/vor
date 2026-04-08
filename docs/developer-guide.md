@@ -296,6 +296,52 @@ System supervisor starts a Registry and all agents in dependency order.
 - Generated code iterates `__vor_connections__` and sends via the registry
 - Gracefully handles missing peers (skips if not found in registry)
 
+### System-level safety invariants (Phase 1)
+
+System blocks may declare system-level safety invariants over the combined
+state of all agents. The Phase-1 invariant grammar is:
+
+```vor
+safety "name" proven do
+  never(count(agents where FIELD == :VALUE) OP N)
+end
+```
+
+where `OP` is one of `>`, `>=`, `==`, `<`, `<=`. The invariant is parsed
+during `mix compile` and stored on `IR.SystemIR.invariants`, but the
+exploration is **not** run during normal compilation.
+
+To run model checking, use `mix vor.check`:
+
+```
+mix vor.check                    # check all examples/*.vor
+mix vor.check path/to/file.vor   # check a specific file
+mix vor.check --depth 30         # custom BFS depth bound
+mix vor.check --max-states 200000
+```
+
+The explorer (`Vor.Explorer`):
+- Builds an initial `ProductState` from each agent instance's IR (first
+  declared enum value, type defaults for data fields, params override)
+- Generates successors by (a) delivering each pending message and
+  (b) injecting a representative external client message for each
+  `accepts` declaration
+- Drops successors whose fingerprint equals the parent's (no-op deliveries)
+  before they enter the visited set
+- Sorts pending messages in fingerprints so ordering between distinct
+  sender/receiver pairs is collapsed
+- Reports `:proven` on BFS completion, `:bounded` when caps are hit, or a
+  counterexample trace on the first violation
+
+The simulator (`Vor.Explorer.Simulator`) interprets the existing
+`IR.Handler` action tree directly. Extern call results and any expression
+that touches them are represented as `:unknown`; conditionals on `:unknown`
+fan out into both branches (the conservative over-approximation from the
+multi-agent design doc).
+
+Phase 1 limitations: no state abstraction, no timeout modeling, no
+`exists`/`for_all` quantifiers, no symmetry or partial-order reduction.
+
 ## Handler completeness checking
 
 ### Mandatory else for call handlers

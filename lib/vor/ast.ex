@@ -144,7 +144,7 @@ defmodule Vor.AST do
   end
 
   defmodule System do
-    defstruct [:name, :agents, :connections, :meta]
+    defstruct [:name, :agents, :connections, :meta, invariants: []]
   end
 
   defmodule AgentInstance do
@@ -153,6 +153,18 @@ defmodule Vor.AST do
 
   defmodule Connect do
     defstruct [:from, :to, :meta]
+  end
+
+  # System-level safety invariant. Phase 1 supports the restricted form:
+  #
+  #     safety "name" proven do
+  #       never(count(agents where FIELD == :VALUE) OP N)
+  #     end
+  #
+  # body is a structured tuple, e.g.:
+  #   {:never, {:count_gt, {:agents_where, :role, :==, :leader}, 1}}
+  defmodule SystemSafety do
+    defstruct [:name, :tier, :body, :meta]
   end
 
   defmodule Solve do

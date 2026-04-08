@@ -121,7 +121,13 @@ defmodule Vor.IR do
   end
 
   defmodule SystemIR do
-    defstruct [:name, :registry, :agents, :connections]
+    defstruct [:name, :registry, :agents, :connections, invariants: []]
+  end
+
+  # System-level safety invariant (Phase 1: count(agents where ...) only).
+  # body is a structured tuple — see parser/lowering.
+  defmodule SystemInvariant do
+    defstruct [:name, :tier, :body]
   end
 
   defmodule AgentInstanceIR do

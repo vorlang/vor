@@ -45,35 +45,101 @@ defmodule Vor.Parser do
   # --- System block ---
 
   defp parse_system([{:keyword, meta, :system}, {:identifier, _, name}, {:keyword, _, :do} | rest]) do
-    case parse_system_entries(rest, [], []) do
-      {:ok, agents, connections, rest} ->
-        {:ok, %AST.System{name: name, agents: agents, connections: connections, meta: meta}, rest}
+    case parse_system_entries(rest, [], [], []) do
+      {:ok, agents, connections, invariants, rest} ->
+        {:ok, %AST.System{name: name, agents: agents, connections: connections,
+                           invariants: invariants, meta: meta}, rest}
       {:error, _} = err -> err
     end
   end
 
-  defp parse_system_entries([{:keyword, _, :end} | rest], agents, connections) do
-    {:ok, Enum.reverse(agents), Enum.reverse(connections), rest}
+  defp parse_system_entries([{:keyword, _, :end} | rest], agents, connections, invariants) do
+    {:ok, Enum.reverse(agents), Enum.reverse(connections), Enum.reverse(invariants), rest}
   end
 
   # agent :name, Type(params)
   defp parse_system_entries([{:keyword, _, :agent}, {:atom, meta, name}, {:delimiter, _, :comma},
-                              {:identifier, _, type}, {:delimiter, _, :open_paren} | rest], agents, connections) do
+                              {:identifier, _, type}, {:delimiter, _, :open_paren} | rest], agents, connections, invariants) do
     case parse_system_params(rest) do
       {:ok, params, rest} ->
         instance = %AST.AgentInstance{name: name, type: type, params: params, meta: meta}
-        parse_system_entries(rest, [instance | agents], connections)
+        parse_system_entries(rest, [instance | agents], connections, invariants)
       {:error, _} = err -> err
     end
   end
 
   # connect :from -> :to
-  defp parse_system_entries([{:keyword, meta, :connect}, {:atom, _, from}, {:operator, _, :arrow}, {:atom, _, to} | rest], agents, connections) do
+  defp parse_system_entries([{:keyword, meta, :connect}, {:atom, _, from}, {:operator, _, :arrow}, {:atom, _, to} | rest], agents, connections, invariants) do
     conn = %AST.Connect{from: from, to: to, meta: meta}
-    parse_system_entries(rest, agents, [conn | connections])
+    parse_system_entries(rest, agents, [conn | connections], invariants)
   end
 
-  defp parse_system_entries([token | _], _a, _c), do: {:error, {:unexpected_in_system, token}}
+  # safety "name" proven do never(count(agents where FIELD == :VALUE) OP N) end
+  defp parse_system_entries([{:keyword, _, :safety} | _] = tokens, agents, connections, invariants) do
+    case parse_system_safety(tokens) do
+      {:ok, inv, rest} -> parse_system_entries(rest, agents, connections, [inv | invariants])
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_system_entries([token | _], _a, _c, _i), do: {:error, {:unexpected_in_system, token}}
+
+  defp parse_system_safety([{:keyword, meta, :safety}, {:string, _, name},
+                            {:keyword, _, tier}, {:keyword, _, :do} | rest])
+       when tier in [:proven, :checked, :monitored] do
+    case parse_system_invariant_body(rest) do
+      {:ok, body, [{:keyword, _, :end} | rest]} ->
+        {:ok, %AST.SystemSafety{name: name, tier: tier, body: body, meta: meta}, rest}
+
+      {:ok, _body, [token | _]} ->
+        {:error, {:expected_end_of_system_invariant, token}}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp parse_system_safety([token | _]),
+    do: {:error, {:expected_system_safety, token}}
+
+  # never(count(agents where FIELD == :VALUE) OP N)
+  defp parse_system_invariant_body([
+         {:keyword, _, :never}, {:delimiter, _, :open_paren},
+         {:identifier, _, :count}, {:delimiter, _, :open_paren},
+         {:identifier, _, :agents}, {:keyword, _, :where},
+         {:identifier, _, field}, {:operator, _, op_eq}, {:atom, _, value},
+         {:delimiter, _, :close_paren}, {:operator, _, op}, {:integer, _, n},
+         {:delimiter, _, :close_paren} | rest
+       ])
+       when op_eq in [:==, :!=] and op in [:>, :>=, :<, :<=, :==] do
+    cmp = case op_eq do
+      :== -> :==
+      :!= -> :!=
+    end
+
+    field_atom = if is_atom(field), do: field, else: String.to_atom(field)
+    value_atom = if is_atom(value), do: value, else: String.to_atom(value)
+    count_node = {:agents_where, field_atom, cmp, value_atom}
+
+    body =
+      case op do
+        :> -> {:never, {:count_gt, count_node, n}}
+        :>= -> {:never, {:count_gte, count_node, n}}
+        :== -> {:never, {:count_eq, count_node, n}}
+        # Negated forms — phase 1 keeps the same internal representation but
+        # rewrites the comparison.
+        :< -> {:never, {:count_lt, count_node, n}}
+        :<= -> {:never, {:count_lte, count_node, n}}
+      end
+
+    {:ok, body, rest}
+  end
+
+  defp parse_system_invariant_body([token | _]),
+    do: {:error, {:unsupported_system_invariant, token}}
+
+  defp parse_system_invariant_body([]),
+    do: {:error, :unexpected_eof}
 
   # Parse system agent params: either empty () or key: value pairs
   defp parse_system_params([{:delimiter, _, :close_paren} | rest]), do: {:ok, [], rest}
@@ -738,10 +804,14 @@ defmodule Vor.Parser do
     end
   end
 
-  # var = mod/sub.function(...) — Gleam extern call with binding
+  # var = mod/sub.function(...) — Gleam extern call with binding.
+  # The look-ahead requires another identifier after the slash so that plain
+  # arithmetic like `half = cluster_size / 2` falls through to the arithmetic
+  # clauses below.
   defp parse_handler_body([{:identifier, meta, bind_var}, {:operator, _, :equals},
-                            {:identifier, _, first_seg}, {:operator, _, :slash} | rest], acc) do
-    case collect_gleam_module_path([first_seg], [{:operator, nil, :slash} | rest]) do
+                            {:identifier, _, first_seg}, {:operator, _, :slash},
+                            {:identifier, _, _} = next_seg | rest], acc) do
+    case collect_gleam_module_path([first_seg], [{:operator, nil, :slash}, next_seg | rest]) do
       {:ok, mod_atom, func, [{:delimiter, _, :open_paren} | rest]} ->
         case parse_extern_args(rest) do
           {:ok, args, rest} ->
@@ -785,9 +855,12 @@ defmodule Vor.Parser do
     end
   end
 
-  # mod/sub.function(...) — Gleam extern call without binding
-  defp parse_handler_body([{:identifier, meta, first_seg}, {:operator, _, :slash} | rest], acc) do
-    case collect_gleam_module_path([first_seg], [{:operator, nil, :slash} | rest]) do
+  # mod/sub.function(...) — Gleam extern call without binding. Look-ahead
+  # requires another identifier after the slash so plain arithmetic doesn't
+  # accidentally match.
+  defp parse_handler_body([{:identifier, meta, first_seg}, {:operator, _, :slash},
+                            {:identifier, _, _} = next_seg | rest], acc) do
+    case collect_gleam_module_path([first_seg], [{:operator, nil, :slash}, next_seg | rest]) do
       {:ok, mod_atom, func, [{:delimiter, _, :open_paren} | rest]} ->
         case parse_extern_args(rest) do
           {:ok, args, rest} ->
