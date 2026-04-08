@@ -10,22 +10,22 @@ The "Mainstream" column describes the dominant paradigm (Java, Python, TypeScrip
 | **Computation primitive** | Functions (unidirectional input → output) | Relations (bidirectional) + directional handlers for effects |
 | **State model** | Mutable variables, objects, shared memory | Relational knowledge (timeless) + process state (temporal), explicitly separated |
 | | | |
-| **Correctness approach** | Tests (unit, integration, e2e). Mostly after the fact | Two tiers: proven (compiler-verified via graph traversal) and monitored (runtime enforcement with declared recovery) |
+| **Correctness approach** | Tests (unit, integration, e2e). Mostly after the fact | Three levels: proven (compiler-verified single-agent), model-checked (multi-agent product state exploration), monitored (runtime enforcement with declared recovery) |
 | **Invariants** | Implicit in code logic. Asserts, type checks | First-class temporal logic (TLA+-style). Safety + liveness. Each tagged with guarantee tier. Compiler fails closed on unverifiable properties |
-| **Spec vs. impl gap** | Large. Design docs drift from code immediately | Zero. The spec compiles directly to BEAM bytecode. No drift possible |
+| **Spec vs. impl gap** | Large. Design docs drift from code immediately | Zero. The spec compiles directly to BEAM bytecode. Model checker runs on the same code. No drift possible |
 | | | |
-| **Type safety** | Static types (Java, Go, TypeScript) or dynamic (Python, Ruby) | Layered: coordination verification (proven), Gleam boundary validation (type-checked), internal type tracking (in progress) |
+| **Type safety** | Static types (Java, Go, TypeScript) or dynamic (Python, Ruby) | Layered: coordination verification (proven), Gleam boundary validation (type-checked), internal type tracking (compile-time crash detection) |
 | **Concurrency model** | Threads, locks, async/await. Error-prone shared state | Agents as OTP processes. Topology declared in system blocks. Protocols checked at compile time |
 | **Failure handling** | Try/catch, error codes. Ad-hoc per codebase | Declared resilience policies. Recovery handlers are verified against safety invariants. Violations are observable events |
 | **Composition** | Function calls, imports, dependency injection | Protocol unification. Agents compose if message tags and field names align. Compiler checks compatibility |
 | | | |
-| **Multi-agent coordination** | Ad-hoc messaging, shared databases, message queues | System blocks with Registry-based discovery. Send for directed messages, broadcast for fan-out. Automatic re-registration on restart |
-| **Change process** | Edit code → test → review → deploy | Update spec → compiler re-verifies → BEAM binary reloaded. Invariants checked on every change |
-| **Debugging** | Stack traces, breakpoints, print statements | Invariant violation traces. Compiler trace shows each pipeline stage. State graph extraction and visualization |
+| **Multi-agent verification** | Ad-hoc testing, Jepsen if you're lucky | Product state exploration via `mix vor.check`. All message interleavings checked. Counterexample traces on violation |
+| **Change process** | Edit code → test → review → deploy | Update spec → compiler re-verifies → model checker re-explores → BEAM binary reloaded |
+| **Debugging** | Stack traces, breakpoints, print statements | Invariant violation traces. Counterexample traces showing exact message interleavings. State graph extraction and visualization |
 | | | |
-| **Key difficulty** | Complexity scales with human cognitive limits. Concurrency bugs. Integration debt | Expression language limits require extern calls for data operations. Verification limited to single-agent local properties. Conditional codegen complexity in gen_statem |
+| **Key difficulty** | Complexity scales with human cognitive limits. Concurrency bugs. Integration debt | Expression language limits require extern calls for data operations. State space explosion for large multi-agent systems. Conditional codegen complexity in gen_statem |
 | **Escape hatches** | N/A — everything is manual | Drop to Erlang/Elixir/Gleam via extern declarations. Untrusted by default — try/catch wrapped, proven invariants cannot depend on extern results. Gleam externs are type-validated at the boundary |
-| **Maturity** | Decades of tooling, libraries, talent pool | Working compiler with 287+ tests, TLA+-verified verifier, five examples with verified invariants. Compilation <5ms, verification <2ms. Active development |
+| **Maturity** | Decades of tooling, libraries, talent pool | Working compiler with 328+ tests, TLA+-verified verifier, embedded model checker, five examples with verified invariants. Compilation <5ms, verification <2ms. Active development |
 
 ### What about Erlang and Elixir?
 
@@ -33,7 +33,7 @@ Erlang and Elixir already occupy a different position from the mainstream column
 
 What Erlang and Elixir don't have is verification of the things that go wrong even on the BEAM: state machines with missing handlers or illegal transitions, stuck processes that never terminate, protocol mismatches between GenServers where one side sends a message the other doesn't expect, and invariants that exist only as comments or tests rather than as compiler-checked properties.
 
-Vor doesn't replace OTP — it compiles to OTP. A Vor agent is a gen_server or gen_statem at runtime, supervised and distributed like any other BEAM process. Vor adds the layer above: the state machine is declared and verified, the protocol is checked at compile time, and the invariants are enforced. Everything below that layer is the same BEAM you already trust.
+Vor doesn't replace OTP — it compiles to OTP. A Vor agent is a gen_server or gen_statem at runtime, supervised and distributed like any other BEAM process. Vor adds the layer above: the state machine is declared and verified, the protocol is checked at compile time, the invariants are enforced, and multi-agent systems are model-checked. Everything below that layer is the same BEAM you already trust.
 
 ### How Vor differs from verification tools
 
@@ -41,25 +41,25 @@ A reasonable alternative to Vor: use TLA+ or P to verify your design, then imple
 
 **The two-artifact problem.** You now have a TLA+ spec and an Erlang implementation. They're written in different languages, live in different files, and use different tools. On day one they match. On day thirty, someone fixes a production bug by editing the Erlang code without updating the TLA+ spec. On day ninety, someone adds a feature to the spec but the implementation diverges in a subtle way. On day three hundred, nobody trusts the spec anymore and it becomes shelfware. This isn't hypothetical — it's the documented experience of almost every team that adopts formal methods alongside a production codebase. The spec drifts from the code because nothing enforces their alignment.
 
-**Stubs aren't implementations.** A verified TLA+ model can tell you that your state machine design is correct. It can generate the skeleton of a gen_statem with the right states and transitions. But the skeleton is empty — someone still has to write the handler bodies, the timer management, the error responses, the data transformations. That's where most bugs live. The stub gives you correct structure but unverified behavior. It's like having a verified blueprint but no building inspector.
+**Stubs aren't implementations.** A verified TLA+ model can tell you that your state machine design is correct. It can generate the skeleton of a gen_statem with the right states and transitions. But the skeleton is empty — someone still has to write the handler bodies, the timer management, the error responses, the data transformations. That's where most bugs live. The stub gives you correct structure but unverified behavior.
 
-**Verification and execution live in different worlds.** TLA+ checks properties against a mathematical model. The Erlang code runs on the BEAM. Between them is a manual translation step that no tool verifies. Did the developer faithfully translate every TLA+ state transition into a gen_statem clause? Did they handle every message that the TLA+ model says can arrive in each state? Did they implement the timer backoff exactly as the model specifies? These are exactly the questions where bugs hide, and no tool answers them.
+**The tools don't share semantics.** TLA+ thinks in terms of state predicates and temporal formulas. Erlang thinks in terms of processes and message passing. Translating between them is manual and error-prone. This is why formal methods adoption remains low despite decades of advocacy — the cognitive overhead of maintaining two mental models is high.
 
-**The tools don't share semantics.** TLA+ thinks in terms of state predicates and temporal formulas. Erlang thinks in terms of processes and message passing. P thinks in terms of events and state machines. Each tool has its own abstraction, and translating between them is a manual, error-prone process. The developer must be fluent in both the verification language and the implementation language, and must mentally maintain the mapping between them. This is why formal methods adoption remains low despite decades of advocacy — the cognitive overhead of maintaining two mental models is high.
+**Stateright showed another way.** Stateright (Rust) demonstrated that an embedded model checker — one that runs on the actual implementation code, not a separate spec — is practical and effective. Vor brings this approach to the BEAM. The `.vor` file is both the specification and the implementation. `mix vor.check` model-checks the real code, exploring message interleavings across agents and reporting counterexample traces when invariants are violated. No separate spec to drift.
 
-**Erla+: the closest comparable work.** Erla+ (presented at the Erlang Workshop at ICFP 2024) translates PlusCal models into both TLA+ for verification and executable Erlang programs. It directly addresses the two-artifact problem by generating both artifacts from one source. The key difference from Vor: Erla+ starts from PlusCal (a specification language) and generates Erlang. Vor IS the code — the `.vor` file is both the specification and the implementation, written in a language designed for programming, not for specification. Erla+ gives you TLA+'s full model checking power but constrains you to PlusCal's expressiveness. Vor gives you a practical programming language with focused verification built in.
+**Erla+: the closest comparable work.** Erla+ (presented at the Erlang Workshop at ICFP 2024) translates PlusCal models into both TLA+ for verification and executable Erlang programs. It directly addresses the two-artifact problem by generating both artifacts from one source. The key difference from Vor: Erla+ starts from PlusCal (a specification language) and generates Erlang. Vor IS the code — the `.vor` file is both the specification and the implementation, written in a language designed for programming, not for specification. Erla+ gives you TLA+'s full model checking power but constrains you to PlusCal's expressiveness. Vor gives you a practical programming language with an embedded model checker.
 
-**What Vor does instead.** In Vor, there is one artifact. The state machine declaration, the handler behavior, the invariants, and the executable code are all in the same `.vor` file, in the same language, processed by the same compiler. When you change a handler, the compiler re-checks it against the invariants. When you add an invariant, the compiler verifies it against the existing handlers. Nothing drifts because there's nothing to drift from. The verified model and the running code are the same thing.
+**What Vor does instead.** In Vor, there is one artifact. The state machine declaration, the handler behavior, the invariants, and the executable code are all in the same `.vor` file, in the same language, processed by the same compiler. The model checker runs on the same code that runs in production. When you change a handler, the compiler re-checks it against the invariants and the model checker re-explores the system. Nothing drifts because there's nothing to drift from.
 
-The tradeoff is real: existing verification tools (TLA+, SPIN, Alloy) are more mature, more expressive, and better understood than Vor's invariant system. Vor's compile-time verification is currently limited to local single-agent properties — it can't verify distributed invariants like "at most one leader per term" across a cluster. But the properties it can check are checked against the actual executable code, not against a separate model that might not match reality. A weaker guarantee about the real system beats a stronger guarantee about a model that's drifted from the system.
+The tradeoff is real: TLA+'s model checker (TLC) is more mature, more expressive, and handles larger state spaces than Vor's explorer. Vor's multi-agent verification is bounded — for large state spaces, it reports "verified within bounds" rather than claiming exhaustive proof. But the properties it can check are checked against the actual executable code, not against a separate model that might not match reality.
 
 ### How Vor complements Gleam
 
 **Gleam** asks "what if Erlang had types?" Gleam adds static type safety to the BEAM with a clean, modern syntax and excellent developer experience. It catches type errors, enforces exhaustive pattern matching, eliminates null-related crashes, and ensures every error case is handled.
 
-**Vor** asks "what if your state machine was proven correct?" Vor adds compile-time verification of state machine properties, protocol compatibility, and temporal invariants. It catches illegal state transitions, missing message handlers, stuck processes, and protocol mismatches.
+**Vor** asks "what if your state machine was proven correct — and your distributed system was model-checked?" Vor adds compile-time verification of state machine properties, protocol compatibility, temporal invariants, and multi-agent model checking. It catches illegal state transitions, missing message handlers, stuck processes, protocol mismatches, and distributed coordination bugs.
 
-They don't compete — they complement each other. Vor verifies the coordination layer (state machines, protocols, invariants). Gleam verifies the data processing layer (types, patterns, error handling). Together they cover both classes of bugs that plague distributed systems.
+They don't compete — they complement each other. Vor verifies the coordination layer (state machines, protocols, invariants, multi-agent properties). Gleam verifies the data processing layer (types, patterns, error handling). Together they cover both classes of bugs that plague distributed systems.
 
 **The Vor-Gleam boundary.** Vor's `extern gleam` support creates a type-checked interface between the two languages. The Vor compiler reads Gleam's `package-interface.json` and validates that extern declarations match Gleam's actual function signatures. This means the boundary between verified coordination (Vor) and type-safe data processing (Gleam) is itself verified — no untyped gap between the layers.
 
@@ -68,8 +68,9 @@ They don't compete — they complement each other. Vor verifies the coordination
 | Illegal state transitions | Yes — compile time | No concept of state machines |
 | Missing message handlers | Yes — compile time | No concept of protocol coverage |
 | Protocol mismatches between agents | Yes — compile time | No inter-module contract checking |
+| Distributed coordination bugs | Yes — model checking | No multi-agent verification |
 | Stuck processes | Yes — runtime monitoring | No concept of liveness |
-| Type errors in data processing | In progress (internal type tracking) | Yes — compile time |
+| Type errors in data processing | Yes — internal type tracking | Yes — compile time |
 | Missing error handling | Partial (emit completeness) | Yes — exhaustive patterns |
 | Null crashes | No | Yes — no null type |
 | CRDT merge correctness | Yes — verified merge operations | No — types correct but semantics unchecked |
@@ -77,22 +78,22 @@ They don't compete — they complement each other. Vor verifies the coordination
 
 ### The AI question
 
-Vor's declarative structure — where the spec is the program and properties are first-class — means that AI-generated code gets the same compiler checks as human-written code. Invariants must hold, protocols must match, handlers must cover all accepted messages. The compiler catches mistakes regardless of who made them.
+Vor's declarative structure — where the spec is the program and properties are first-class — means that AI-generated code gets the same compiler checks as human-written code. Invariants must hold, protocols must match, handlers must cover all accepted messages, and the model checker explores the same message interleavings regardless of who wrote the code.
 
-All five examples were developed with AI assistance. The compiler caught real bugs in AI-generated code during development — missing handlers, invariant violations, protocol mismatches. This isn't a feature of Vor; it's a consequence of the design. A language where the spec is the program is inherently checkable, whether the author is human or machine.
+All five examples were developed with AI assistance. The compiler caught real bugs in AI-generated code during development — missing handlers, invariant violations, protocol mismatches. The multi-agent model checker found a false positive in the Raft example that led to moving a critical check from an extern call into native Vor arithmetic — improving the verification story. This isn't a feature of Vor; it's a consequence of the design.
 
 ### The honest risks
 
 **Expressiveness limits.** Vor's handler expression language is simpler than Erlang, Elixir, or Gleam. Complex data operations (list iteration, map traversal, string processing) require extern calls. This is by design — Vor handles the protocol layer, Gleam/Elixir handles the data layer — but it means Vor programs are always hybrid. The boundary between "what Vor verifies" and "what Gleam/Elixir does" requires judgment.
 
-**Single-agent verification.** Vor verifies properties of individual agents — not distributed properties across a cluster. The distributed lock example demonstrates this clearly: "never grant the lock while held" is proven exhaustively for the lock agent. But a property like "at most one leader per term" across a Raft cluster requires reasoning about message interleavings between multiple agents, which Vor doesn't do. Multi-agent runtime monitoring is a planned direction; TLA+ remains the right tool for protocol-level distributed verification.
+**State space explosion.** Multi-agent model checking faces the same state space explosion as TLA+/TLC. For systems with many agents, many states, or unbounded integers, the explorer may hit configured bounds before exhaustive exploration. Vor reports this honestly — "bounded verification, no violation found within N states" — and never claims exhaustive proof when bounds are exceeded. State abstraction (Phase 2) will help by collapsing irrelevant fields.
 
-**The extern trust boundary.** Proven invariants cannot depend on extern results — the compiler enforces this. But the more logic that lives behind externs, the less the compiler can verify. A Vor program where most handlers are thin wrappers around extern calls gets the protocol verification but loses the handler-level guarantees. The goal is to keep enough logic in Vor that the verification is meaningful while delegating data processing to Gleam/Elixir where type safety (not behavioral verification) is the right tool.
+**The extern trust boundary.** Proven invariants cannot depend on extern results — the compiler enforces this. But the more logic that lives behind externs, the less the compiler and model checker can verify. A Vor program where most handlers are thin wrappers around extern calls gets the protocol verification but loses the handler-level and model-checking guarantees. The goal is to keep enough logic in Vor that the verification is meaningful.
 
 **Adoption.** New programming languages face a steep adoption curve regardless of technical merit. Vor's audience — BEAM developers who need verification, or formal methods practitioners who need executable specs — is small. The project's viability depends on finding the right early users, not on broad appeal. A CRDT-based distributed database (VorDB) is the first real consumer, driving language features through practical use.
 
-If Vor never gains adoption, it's still a working demonstration that verification and execution can live in one artifact on a production runtime. If it does gain adoption, the BEAM ecosystem gets a verification layer it's never had.
+If Vor never gains adoption, it's still a working demonstration that verification, model checking, and execution can live in one artifact on a production runtime. If it does gain adoption, the BEAM ecosystem gets a verification layer it's never had.
 
 ---
 
-*vorlang.org  ·  Targets: BEAM/OTP  ·  License: MIT  ·  Status: Working compiler, 287+ tests, five examples with verified invariants*
+*vorlang.org  ·  Targets: BEAM/OTP  ·  License: MIT  ·  Status: Working compiler, 328+ tests, embedded model checker, five examples with verified invariants*

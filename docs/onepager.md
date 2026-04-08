@@ -10,7 +10,7 @@
 
 Vor is a programming language that compiles to Erlang/OTP on the BEAM — the same compilation model as Elixir. At runtime, a Vor agent is indistinguishable from a hand-written gen_server or gen_statem. Erlang, Elixir, Gleam, and Vor coexist seamlessly in one VM.
 
-What Vor adds is a verification layer that OTP doesn't provide. You declare state machines with enumerated states, message protocols with typed interfaces, and invariants as temporal logic properties. The compiler verifies these declarations — checking that state transitions are valid, that protocols are compatible, and that safety properties hold — before producing BEAM bytecode. Named for the Norse goddess who witnesses oaths, Vor programs are binding declarations that the compiler enforces.
+What Vor adds is a verification layer that OTP doesn't provide. You declare state machines with enumerated states, message protocols with typed interfaces, and invariants as temporal logic properties. The compiler verifies these declarations — checking that state transitions are valid, that protocols are compatible, and that safety properties hold — before producing BEAM bytecode. For multi-agent systems, `mix vor.check` model-checks system-level invariants by exploring all reachable combined states through all possible message interleavings. Named for the Norse goddess who witnesses oaths, Vor programs are binding declarations that the compiler enforces.
 
 ## Core Primitives
 
@@ -18,7 +18,9 @@ What Vor adds is a verification layer that OTP doesn't provide. You declare stat
 
 **Protocols** — Typed message interfaces for agents. `accepts` declares what an agent receives. `emits` declares synchronous replies. `sends` declares messages forwarded to other agents. Protocol composition is checked at compile time when agents are wired together in a system block — tag mismatches and field name mismatches are compile errors.
 
-**Invariants** — Temporal properties in the tradition of TLA+. Safety invariants ("this must never happen") are tagged `proven` and verified at compile time by exhaustive graph traversal. Liveness invariants ("this must eventually happen") are tagged `monitored` and enforced at runtime via gen_statem state timeouts. The compiler rejects `proven` invariants it cannot verify — it fails closed, never silently accepting unverifiable properties.
+**Invariants** — Temporal properties in the tradition of TLA+. Safety invariants ("this must never happen") are tagged `proven` and verified at compile time by exhaustive graph traversal. Liveness invariants ("this must eventually happen") are tagged `monitored` and enforced at runtime via gen_statem state timeouts. The compiler rejects `proven` invariants it cannot verify — it fails closed, never silently accepting unverifiable properties. Proven invariants cannot depend on extern results.
+
+**Multi-Agent Model Checking** — System-level safety invariants are verified by product state exploration via `mix vor.check`. The explorer constructs all reachable combined states, systematically delivers messages in every possible order, and checks invariants at every reachable state. Counterexample traces show the exact message interleaving that causes a violation. Only state-changing successors are explored. Bounded verification reports honestly when the state space exceeds configured limits.
 
 **Resilience** — Declarative failure handling. What happens when a liveness invariant is violated, when a process is stuck, when recovery is needed. Resilience handlers are generated as regular handler clauses and included in the state graph — the safety verifier checks them too, ensuring the recovery path doesn't introduce new bugs.
 
@@ -40,9 +42,9 @@ Vor's approach to type safety is layered and complementary to the BEAM ecosystem
 
 **Gleam boundary validation (today).** Extern declarations are validated against Gleam's type metadata. The extern boundary — where Vor's verified coordination meets Gleam's typed data processing — is type-checked in both directions.
 
-**Internal type tracking (in progress).** The compiler propagates types through handler body expressions, using declared state field types and built-in operation signatures. Guaranteed crashes (map operations on integers, arithmetic on maps) are caught at compile time. Gleam extern return types flow through the handler body, extending type coverage beyond the extern boundary.
+**Internal type tracking (today).** The compiler propagates types through handler body expressions, using declared state field types and built-in operation signatures. Guaranteed crashes (map operations on integers, arithmetic on maps) are caught at compile time. Gleam extern return types flow through the handler body, extending type coverage beyond the extern boundary.
 
-**Long-term direction.** E-graph-based equality saturation for verifying CRDT merge properties (commutativity, associativity, idempotency). User-defined CRDT merge functions with compiler-verified algebraic properties. Multi-agent runtime monitoring for system-level invariants.
+**Long-term direction.** E-graph-based equality saturation for verifying CRDT merge properties (commutativity, associativity, idempotency). User-defined CRDT merge functions with compiler-verified algebraic properties.
 
 ## What's Working
 
@@ -50,16 +52,19 @@ The compiler is real and tested:
 
 - Full pipeline: `.vor` source → Lexer → Parser → AST → IR → Verification → Erlang codegen → BEAM binary
 - Compile-time safety verification via state graph traversal
+- Multi-agent model checking via product state exploration (`mix vor.check`)
 - Runtime liveness monitoring via gen_statem state timeouts
+- Internal type tracking through handler body expressions
 - Bidirectional relation solver with compile-time equation inversion
 - Protocol composition checking across multi-agent systems
 - Registry-based inter-agent messaging with `send` and `broadcast`
 - Gleam extern support with compile-time type boundary validation
+- Extern proven boundary enforcement (compile error, not warning)
 - Init handlers for persistent agent startup
 - Native map operations (get, put, merge, has, delete, size, sum) with LWW and max merge strategies
 - Native list operations (head, tail, append, prepend, length, empty)
 - TLA+ specifications verifying the safety verifier and graph extraction algorithms
-- 287+ tests, 9 property-based test suites, adversarial edge case testing, performance benchmarks
+- 328+ tests, 9 property-based test suites, adversarial edge case testing, performance benchmarks
 - Five working examples with verified invariants and multi-agent coordination
 - CRDT examples verified native: G-Counter, PN-Counter, version-based OR-Set — zero extern calls
 - Compilation under 5ms for any agent, verification under 2ms for any graph
@@ -74,17 +79,15 @@ The compiler is real and tested:
 
 **Rate limiter** — gen_server with extern calls to ETS, parameterized limits, per-client tracking. Demonstrates the Vor-Elixir boundary: protocol logic in Vor, storage in Elixir.
 
-**Raft consensus** — three-node cluster with leader election, conditional vote granting, and leader promotion on majority. Demonstrates multi-agent coordination with native `send` and `broadcast`. Each node's local state machine is verified (e.g., "followers don't emit client responses"). Note: cluster-wide properties like "at most one leader per term" require multi-agent verification, which Vor doesn't yet support — these are currently validated through testing, not compiler proof.
+**Raft consensus** — three-node cluster with leader election, conditional vote granting, and leader promotion on majority. Demonstrates multi-agent coordination with native `send` and `broadcast`. System-level invariant "at most one leader" verified via `mix vor.check` — the model checker explores message interleavings across the cluster. Each node's local state machine is also verified with single-agent invariants.
 
 ## Boundaries
 
 Vor is suited to anything involving state machines, message protocols, or correctness requirements: telecom protocol stacks, distributed consensus, CRDT-based data stores, payment processing, workflow orchestration, IoT coordination. Its primitives add particular value where getting the state machine wrong has real consequences.
 
-**What Vor verifies:** single-agent state machine properties (safety invariants proven at compile time), handler coverage, protocol composition across connected agents, liveness with declared recovery. These are the properties that are hardest to test and most dangerous to get wrong.
+**What Vor verifies:** single-agent state machine properties (safety invariants proven at compile time), multi-agent system properties (via product state exploration), handler coverage, protocol composition across connected agents, liveness with declared recovery, type correctness through handler bodies.
 
 **What Vor monitors:** liveness invariants at runtime, with automatic recovery. Violations are observable events, not silent failures.
-
-**What Vor doesn't yet verify:** multi-agent distributed properties (e.g., global invariants across a cluster). These require reasoning about message interleavings and are validated through testing or external tools like TLA+. Multi-agent runtime monitoring is a planned direction.
 
 **What Vor delegates:** complex data transformation, database access, HTTP, string processing, and anything that's data processing rather than protocol logic. These fall to Gleam (type-safe, validated at the boundary) or Elixir/Erlang (via extern declarations). The boundary is clean — Vor handles the protocol layer where verification matters, Gleam/Elixir handles the data layer where expressiveness matters.
 
@@ -92,21 +95,21 @@ Vor is suited to anything involving state machines, message protocols, or correc
 
 **Safety invariant violated at compile time:** compilation fails with a clear error pointing to the specific handler and state that violates the property.
 
-**Proven invariant depends on extern:** compilation fails. A `proven` invariant must be verifiable from Vor-visible code alone. Extern results are opaque to the verifier — if the proof path requires knowing what an extern returns, the compiler rejects it rather than guessing.
+**System-level invariant violation found by model checker:** `mix vor.check` reports the exact counterexample trace — which message was delivered to which agent in which order to produce the violating state.
 
-**Unsupported proven invariant:** compilation fails. The compiler rejects invariant bodies it cannot analyze rather than silently accepting them.
+**Proven invariant depends on extern:** compilation fails. A `proven` invariant must be verifiable from Vor-visible code alone.
 
-**Type mismatch at Gleam boundary:** the compiler warns when an extern declaration doesn't match Gleam's actual function signature — wrong arity, wrong parameter types, or wrong return type.
+**Type mismatch at Gleam boundary:** the compiler warns when an extern declaration doesn't match Gleam's actual function signature.
 
-**Liveness invariant violated at runtime:** the resilience handler fires — transitioning state, broadcasting recovery messages, or escalating. Violations are observable events, not silent failures.
+**Type error in handler body:** the compiler reports guaranteed crashes (map operations on integers, arithmetic on maps) at compile time.
 
-**Escape hatch crashes:** extern call failures are caught by try/catch wrappers. The agent's OTP supervision handles recovery.
+**Liveness invariant violated at runtime:** the resilience handler fires — transitioning state, broadcasting recovery messages, or escalating.
 
 **Protocol mismatch:** the compiler rejects systems where connected agents' send/accept declarations don't match on message tags or field names.
 
 ## Intellectual Heritage
 
-**Erlang/OTP** (processes, fault tolerance, hot code loading — Vor's runtime foundation) · **TLA+** (temporal logic, safety/liveness, specification-first design — Vor's verification foundation, also used to verify Vor's own verifier) · **Prolog & miniKanren** (relational programming, bidirectional computation) · **Alloy** (first-order relational logic — the only other formal tool with first-class relations).
+**Erlang/OTP** (processes, fault tolerance, hot code loading — Vor's runtime foundation) · **TLA+** (temporal logic, safety/liveness, specification-first design — Vor's verification foundation, also used to verify Vor's own verifier) · **Stateright** (embedded model checking on executable code — inspiration for multi-agent verification) · **Prolog & miniKanren** (relational programming, bidirectional computation) · **Alloy** (first-order relational logic — the only other formal tool with first-class relations).
 
 ## Design Principles
 
@@ -124,4 +127,4 @@ Vor is suited to anything involving state machines, message protocols, or correc
 
 ---
 
-*vorlang.org  ·  Targets: BEAM/OTP  ·  License: MIT  ·  Status: Working compiler, 287+ tests, five examples with verified invariants*
+*vorlang.org  ·  Targets: BEAM/OTP  ·  License: MIT  ·  Status: Working compiler, 328+ tests, embedded model checker, five examples with verified invariants*

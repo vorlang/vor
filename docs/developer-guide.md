@@ -2,7 +2,7 @@
 
 This document describes the current state of the Vor compiler. It is an internal reference for anyone working on the compiler, including AI coding agents. Update this document as features are added.
 
-Last updated after: Gleam extern support, type boundary validation, extern proven boundary enforcement, 287+ tests
+Last updated after: Multi-agent model checking (Phase 1), internal type tracking, extern proven boundary enforcement, native Raft majority, 328+ tests
 
 ## Architecture
 
@@ -20,6 +20,13 @@ Key files:
 - `lib/vor/verification/safety.ex` — Safety invariant verification
 - `lib/vor/gleam/interface.ex` — Gleam package-interface.json parser
 - `lib/vor/gleam/validator.ex` — Gleam type boundary validation
+- `lib/vor/type_env.ex` — Type environment for handler body type tracking
+- `lib/vor/explorer.ex` — Multi-agent product state exploration (entry point + BFS)
+- `lib/vor/explorer/product_state.ex` — Product state representation
+- `lib/vor/explorer/simulator.ex` — IR handler action interpreter
+- `lib/vor/explorer/successor.ex` — Successor state computation
+- `lib/vor/explorer/invariant.ex` — System-level invariant evaluation
+- `lib/mix/tasks/vor.check.ex` — Mix task for multi-agent model checking
 
 ## Agent compilation targets
 
@@ -153,6 +160,29 @@ The handler body is compiled as a sequential chain. Each statement sees the resu
 - Generates `erlang:send_after` in init and re-arms after each execution
 - Timers start after `on :init` handler completes
 
+## Internal type tracking
+
+The compiler propagates types through handler body expressions and reports diagnostics for type-incompatible operations.
+
+### Type sources
+- State field declarations: `state count: integer` → count is `integer`
+- Parameter declarations: types declared in agent parameters
+- Built-in operation results: `map_put` returns `map`, `list_length` returns `integer`, etc.
+- Gleam extern return types: validated against `package-interface.json`
+- Elixir/Erlang extern return types: always `term`
+- Message pattern variables: always `term` (caller could send anything)
+
+### Diagnostic levels
+- **Error** (blocks compilation): guaranteed crash — e.g., `store + 1` where `store` is `map`, `map_get(count, :key, 0)` where `count` is `integer`
+- **Warning** (compiles): likely problem — e.g., assigning `map` result to `integer` field via transition
+- **No diagnostic**: any operation on `term` — the developer may know more than the compiler
+
+### Key rules
+- `term` is the escape hatch — operations on `term` produce no diagnostics
+- Declaring extern return type as `:: term` opts out of type tracking for that value
+- Gleam extern return types flow through handler body when interface is loaded
+- If/else branches are tracked independently — diagnostics from both branches collected
+
 ## What works in invariants
 
 ### Safety (proven)
@@ -165,6 +195,11 @@ The handler body is compiled as a sequential chain. Each statement sees the resu
 - `always(phase != :idle implies eventually(phase == :done))` — runtime via gen_statem state timeouts
 - Requires matching resilience handler
 - Timeout duration can come from agent parameters
+
+### System-level safety (proven via model checking)
+- `never(count(agents where FIELD == VALUE) > N)` — verified by product state exploration
+- Checked via `mix vor.check`, not during `mix compile`
+- See Multi-Agent Model Checking section below
 
 ## Extern declarations
 
@@ -296,51 +331,80 @@ System supervisor starts a Registry and all agents in dependency order.
 - Generated code iterates `__vor_connections__` and sends via the registry
 - Gracefully handles missing peers (skips if not found in registry)
 
-### System-level safety invariants (Phase 1)
+## Multi-agent model checking
 
-System blocks may declare system-level safety invariants over the combined
-state of all agents. The Phase-1 invariant grammar is:
+### Overview
+
+System blocks can declare system-level safety invariants. These are verified by product state exploration via `mix vor.check` — NOT during standard `mix compile`.
 
 ```vor
-safety "name" proven do
-  never(count(agents where FIELD == :VALUE) OP N)
+system RaftCluster do
+  agent :n1, RaftNode(node_id: :n1, cluster_size: 3)
+  agent :n2, RaftNode(node_id: :n2, cluster_size: 3)
+  agent :n3, RaftNode(node_id: :n3, cluster_size: 3)
+
+  connect :n1 -> :n2
+  connect :n1 -> :n3
+  connect :n2 -> :n1
+  connect :n2 -> :n3
+  connect :n3 -> :n1
+  connect :n3 -> :n2
+
+  safety "at most one leader" proven do
+    never(count(agents where role == :leader) > 1)
+  end
 end
 ```
 
-where `OP` is one of `>`, `>=`, `==`, `<`, `<=`. The invariant is parsed
-during `mix compile` and stored on `IR.SystemIR.invariants`, but the
-exploration is **not** run during normal compilation.
+### Execution
 
-To run model checking, use `mix vor.check`:
-
-```
-mix vor.check                    # check all examples/*.vor
-mix vor.check path/to/file.vor   # check a specific file
-mix vor.check --depth 30         # custom BFS depth bound
-mix vor.check --max-states 200000
+```bash
+mix compile              # parses system invariants, does NOT run exploration
+mix vor.check            # runs multi-agent exploration
+mix vor.check --depth 30 # custom depth bound
+mix vor.check --max-states 200000  # custom state count bound
 ```
 
-The explorer (`Vor.Explorer`):
-- Builds an initial `ProductState` from each agent instance's IR (first
-  declared enum value, type defaults for data fields, params override)
-- Generates successors by (a) delivering each pending message and
-  (b) injecting a representative external client message for each
-  `accepts` declaration
-- Drops successors whose fingerprint equals the parent's (no-op deliveries)
-  before they enter the visited set
-- Sorts pending messages in fingerprints so ordering between distinct
-  sender/receiver pairs is collapsed
-- Reports `:proven` on BFS completion, `:bounded` when caps are hit, or a
-  counterexample trace on the first violation
+### How it works
 
-The simulator (`Vor.Explorer.Simulator`) interprets the existing
-`IR.Handler` action tree directly. Extern call results and any expression
-that touches them are represented as `:unknown`; conditionals on `:unknown`
-fan out into both branches (the conservative over-approximation from the
-multi-agent design doc).
+1. Constructs initial product state (all agents in initial states, no pending messages)
+2. BFS explores successor states by:
+   - Delivering pending messages to recipients (all orderings explored)
+   - Protocol-driven external events (any `accepts` message from outside the system)
+   - Liveness timeout firings (resilience handlers)
+3. At each reachable product state, checks all system-level invariants
+4. If violation found: reports counterexample trace (exact message sequence)
+5. If state space exhausted with no violation: reports proven
+6. If bounds exceeded: reports bounded verification (honest, not proven)
 
-Phase 1 limitations: no state abstraction, no timeout modeling, no
-`exists`/`for_all` quantifiers, no symmetry or partial-order reduction.
+### Key design decisions
+
+- **Simulator interprets IR directly** — no separate transition table. The simulator walks `IR.Handler.actions` to compute state changes and outgoing messages. Trade-off: must handle every IR action shape; unsupported actions become no-ops (conservative).
+- **`:unknown` propagation** — extern results are `:unknown`. Arithmetic, comparisons, and value references that touch `:unknown` propagate it. Conditionals on `:unknown` fan out into both branches (conservative over-approximation).
+- **State-change-only exploration** — successors that don't change any agent state or pending messages are discarded immediately. Deduplication via product state fingerprint (sorted pending messages).
+- **Fingerprint sorts pending messages** — collapses message ordering between distinct sender/receiver pairs, matching BEAM delivery semantics.
+
+### Invariant syntax (Phase 1)
+
+```vor
+safety "name" proven do
+  never(count(agents where FIELD OP VALUE) COMP N)
+end
+```
+
+- `FIELD` — state field name declared in agent type
+- `OP` — `==` or `!=`
+- `VALUE` — atom literal
+- `COMP` — `>`, `>=`, `==`, `<`, `<=`
+- `N` — integer literal
+
+### Counterexample traces
+
+When a violation is found, the trace shows each step: which message was delivered to which agent, the resulting state of all agents, and any pending messages. The developer can walk the trace to understand exactly how the violating state was reached.
+
+### Bounded verification
+
+If depth or state count bounds are exceeded before exhaustive exploration, the explorer reports "bounded verification passed" — it never claims "proven" without exploring the complete reachable state space. The developer can increase bounds or use state abstraction (Phase 2) to reach exhaustive proof.
 
 ## Handler completeness checking
 
@@ -420,6 +484,8 @@ The verifier fails closed:
 
 Change to `monitored` for properties the verifier cannot yet check.
 
+System-level invariants are verified by product state exploration (see Multi-Agent Model Checking).
+
 ## TLA+ specifications
 
 The `tla/` directory contains TLA+ specs for the compiler's most critical modules:
@@ -439,7 +505,7 @@ Five examples in the `examples/` directory:
 - `circuit_breaker.vor` — three-state circuit breaker, proven safety ("no forward when open"), liveness recovery
 - `gcounter.vor` + `gcounter_cluster.vor` — G-Counter CRDT with periodic gossip, zero externs
 - `rate_limiter.vor` — parameterized rate limiter with ETS externs
-- `raft.vor` + `raft_cluster.vor` — three-node Raft consensus with leader election
+- `raft.vor` + `raft_cluster.vor` — three-node Raft consensus with leader election, native majority check, system-level invariant "at most one leader" verifiable via `mix vor.check`
 
 Additional CRDT types verified in tests (not separate example files):
 - PN-Counter — two nested map_merge(:max) calls, zero externs
@@ -455,7 +521,8 @@ Additional CRDT types verified in tests (not separate example files):
 6. No nested pattern matching in handler patterns — match tag + top-level fields only
 7. No guard coverage analysis (whether guards partition the input space) — catch-all handlers cover this at runtime
 8. No nested builtin calls — `map_put(map_put(...), ...)` doesn't parse. Bind intermediate variables.
-9. Multi-agent verification not yet supported — safety invariants verify single-agent properties only. Cluster-wide properties require testing or external tools like TLA+.
+9. Multi-agent model checking is bounded — state space explosion for systems with many agents or unbounded integers. State abstraction (Phase 2) will help. Explorer reports honestly when bounds are exceeded.
+10. System-level invariant syntax is limited to `count(agents where ...)` — `exists`, `for_all`, and named agent field references are Phase 3.
 
 ## Known design debt
 
