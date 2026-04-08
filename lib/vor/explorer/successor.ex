@@ -24,26 +24,66 @@ defmodule Vor.Explorer.Successor do
   same agent type share the same IR object.
 
   `system_ir` carries the connection topology used by `broadcast`.
+
+  Optional `opts`:
+
+    * `:relevance` — per-instance relevance map from `Vor.Explorer.Relevance`.
+      When supplied, abstracted state fields are masked with `:abstracted`
+      after every successor is computed so the visited set can collapse
+      irrelevant variation.
+    * `:integer_bound` — saturation cap (default 3). Tracked integer fields
+      are clamped to `[0, integer_bound]` after each successor.
+    * `:max_queue` — bounded network-buffer cap on pending messages (default
+      10). When delivering a message would push the queue past this cap, the
+      surplus outgoing messages are silently dropped — modelling a lossy
+      network at the edge. Increase the cap for stronger guarantees.
   """
-  def successors(%ProductState{} = ps, instance_irs, %IR.SystemIR{} = system_ir) do
-    delivered = pending_message_deliveries(ps, instance_irs, system_ir)
-    external = external_message_events(ps, instance_irs, system_ir)
+  def successors(%ProductState{} = ps, instance_irs, %IR.SystemIR{} = system_ir, opts \\ []) do
+    relevance = Keyword.get(opts, :relevance)
+    integer_bound = Keyword.get(opts, :integer_bound, 3)
+    max_queue = Keyword.get(opts, :max_queue, 10)
+
+    delivered = pending_message_deliveries(ps, instance_irs, system_ir, max_queue)
+    external = external_message_events(ps, instance_irs, system_ir, max_queue)
 
     (delivered ++ external)
+    |> Enum.map(&post_process(&1, relevance, integer_bound))
     |> Enum.reject(&ProductState.same_as_parent?(&1, ps))
     |> Enum.uniq_by(&ProductState.fingerprint/1)
+  end
+
+  # Apply integer saturation + abstraction to a freshly computed successor.
+  # When no `relevance` is supplied (Phase-1 callers) the successor is
+  # returned unchanged.
+  defp post_process(%ProductState{} = ps, nil, _bound), do: ps
+
+  defp post_process(%ProductState{agents: agents} = ps, relevance, bound) do
+    new_agents =
+      Enum.into(agents, %{}, fn {name, state} ->
+        case Map.get(relevance, name) do
+          nil ->
+            {name, state}
+
+          %{tracked_int: tracked_int} = inst_relevance ->
+            saturated = ProductState.saturate_integers(state, tracked_int, bound)
+            abstracted = ProductState.abstract_agent_state(saturated, inst_relevance)
+            {name, abstracted}
+        end
+      end)
+
+    %ProductState{ps | agents: new_agents}
   end
 
   # ----------------------------------------------------------------------
   # Pending message delivery
   # ----------------------------------------------------------------------
 
-  defp pending_message_deliveries(%ProductState{pending_messages: pending} = ps, instance_irs, system_ir) do
+  defp pending_message_deliveries(%ProductState{pending_messages: pending} = ps, instance_irs, system_ir, max_queue) do
     pending
     |> Enum.with_index()
     |> Enum.flat_map(fn {{from, to, msg}, idx} ->
       remaining = List.delete_at(pending, idx)
-      dispatch(ps, to, msg, remaining, instance_irs, system_ir, {:deliver, from, to, msg})
+      dispatch(ps, to, msg, remaining, instance_irs, system_ir, {:deliver, from, to, msg}, max_queue)
     end)
   end
 
@@ -51,7 +91,7 @@ defmodule Vor.Explorer.Successor do
   # External event injection
   # ----------------------------------------------------------------------
 
-  defp external_message_events(%ProductState{} = ps, instance_irs, system_ir) do
+  defp external_message_events(%ProductState{} = ps, instance_irs, system_ir, max_queue) do
     Enum.flat_map(system_ir.agents, fn instance ->
       ir = Map.get(instance_irs, instance.name)
       accepts = accepts_messages(ir)
@@ -59,7 +99,7 @@ defmodule Vor.Explorer.Successor do
       Enum.flat_map(accepts, fn message_spec ->
         msg = build_representative_message(message_spec)
         dispatch(ps, instance.name, msg, ps.pending_messages, instance_irs, system_ir,
-          {:external, instance.name, msg})
+          {:external, instance.name, msg}, max_queue)
       end)
     end)
   end
@@ -98,7 +138,7 @@ defmodule Vor.Explorer.Successor do
   # successor product states.
   # ----------------------------------------------------------------------
 
-  defp dispatch(%ProductState{} = ps, to_name, msg, remaining_pending, instance_irs, system_ir, action) do
+  defp dispatch(%ProductState{} = ps, to_name, msg, remaining_pending, instance_irs, system_ir, action, max_queue) do
     case Map.get(instance_irs, to_name) do
       nil ->
         []
@@ -116,9 +156,11 @@ defmodule Vor.Explorer.Successor do
             handler
             |> Simulator.simulate(agent_state, msg, to_name, connections)
             |> Enum.map(fn {new_state, outgoing} ->
+              new_pending = cap_queue(remaining_pending ++ outgoing, max_queue)
+
               %ProductState{
                 agents: Map.put(ps.agents, to_name, new_state),
-                pending_messages: remaining_pending ++ outgoing,
+                pending_messages: new_pending,
                 depth: ps.depth + 1,
                 last_action: action
               }
@@ -126,6 +168,15 @@ defmodule Vor.Explorer.Successor do
         end
     end
   end
+
+  # Bounded network buffer: drop the surplus from the tail of the queue.
+  # This is a deliberately lossy model — increasing `max_queue` recovers
+  # stronger guarantees at the cost of state-space growth.
+  defp cap_queue(queue, max_queue) when is_integer(max_queue) and max_queue >= 0 do
+    Enum.take(queue, max_queue)
+  end
+
+  defp cap_queue(queue, _), do: queue
 
   defp pick_handler(%IR.Agent{handlers: handlers}, {tag, fields}, agent_state) do
     matching = Enum.filter(handlers, fn h ->

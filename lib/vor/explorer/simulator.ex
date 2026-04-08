@@ -186,11 +186,11 @@ defmodule Vor.Explorer.Simulator do
 
   defp eval_expr(other, state, env), do: eval_value_ref(other, state, env)
 
-  defp eval_value_ref({:bound_var, name}, _state, env), do: Map.get(env, name, :unknown)
+  defp eval_value_ref({:bound_var, name}, _state, env), do: read_local(env, name)
   defp eval_value_ref({:param, name}, state, env) do
     case Map.fetch(env, name) do
-      {:ok, v} -> v
-      :error -> Map.get(state, name, :unknown)
+      {:ok, v} -> normalise(v)
+      :error -> read_state(state, name)
     end
   end
   defp eval_value_ref({:integer, n}, _state, _env), do: n
@@ -237,7 +237,12 @@ defmodule Vor.Explorer.Simulator do
   defp eval_guard(nil, _state, _env), do: true
 
   defp eval_guard(%IR.GuardExpr{field: field, op: op, value: value}, state, env) do
-    actual = Map.get(env, field, Map.get(state, field, :unknown))
+    actual =
+      case Map.fetch(env, field) do
+        {:ok, v} -> normalise(v)
+        :error -> read_state(state, field)
+      end
+
     expected = case value do
       {:atom, a} when is_binary(a) -> String.to_atom(a)
       {:atom, a} -> a
@@ -288,10 +293,20 @@ defmodule Vor.Explorer.Simulator do
     end)
   end
 
-  defp resolve_target({:bound_var, name}, env), do: Map.get(env, name, :unknown)
-  defp resolve_target({:param, name}, env), do: Map.get(env, name, :unknown)
+  defp resolve_target({:bound_var, name}, env), do: read_local(env, name)
+  defp resolve_target({:param, name}, env), do: read_local(env, name)
   defp resolve_target(name, _env) when is_atom(name), do: name
   defp resolve_target(_, _env), do: :unknown
 
   defp dedupe_results(results), do: Enum.uniq(results)
+
+  # Phase-2 abstraction support: state fields masked as `:abstracted` are
+  # opaque to the simulator and resolve to `:unknown`, propagating through
+  # arithmetic and conditionals so the explorer fans out into both branches.
+  defp read_state(state, name), do: normalise(Map.get(state, name, :unknown))
+
+  defp read_local(env, name), do: normalise(Map.get(env, name, :unknown))
+
+  defp normalise(:abstracted), do: :unknown
+  defp normalise(value), do: value
 end

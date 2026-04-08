@@ -102,6 +102,18 @@ defmodule Vor.Parser do
   defp parse_system_safety([token | _]),
     do: {:error, {:expected_system_safety, token}}
 
+  # System invariant body parser. Phase 1 supported only `never(count(...))`.
+  # Phase 3 also recognises:
+  #
+  #   * never(exists VAR, VAR where COND)
+  #   * never(exists VAR where COND)
+  #   * for_all agents, COND
+  #   * never(NAMED_REF_BOOLEAN_EXPR)
+  #
+  # COND inside `exists` uses qualified references (`A.field`); inside
+  # `for_all` references are unqualified; the never-named form uses
+  # `agent_name.field` references.
+
   # never(count(agents where FIELD == :VALUE) OP N)
   defp parse_system_invariant_body([
          {:keyword, _, :never}, {:delimiter, _, :open_paren},
@@ -126,8 +138,6 @@ defmodule Vor.Parser do
         :> -> {:never, {:count_gt, count_node, n}}
         :>= -> {:never, {:count_gte, count_node, n}}
         :== -> {:never, {:count_eq, count_node, n}}
-        # Negated forms — phase 1 keeps the same internal representation but
-        # rewrites the comparison.
         :< -> {:never, {:count_lt, count_node, n}}
         :<= -> {:never, {:count_lte, count_node, n}}
       end
@@ -135,11 +145,194 @@ defmodule Vor.Parser do
     {:ok, body, rest}
   end
 
+  # never(exists VAR_A, VAR_B where COND)
+  defp parse_system_invariant_body([
+         {:keyword, _, :never}, {:delimiter, _, :open_paren},
+         {:identifier, _, :exists},
+         {:identifier, _, var_a}, {:delimiter, _, :comma}, {:identifier, _, var_b},
+         {:keyword, _, :where} | rest
+       ]) do
+    var_a_atom = to_ident_atom(var_a)
+    var_b_atom = to_ident_atom(var_b)
+    bindings = MapSet.new([var_a_atom, var_b_atom])
+
+    case parse_invariant_condition(rest, {:exists, bindings}) do
+      {:ok, cond_node, [{:delimiter, _, :close_paren} | rest]} ->
+        {:ok, {:never, {:exists_pair, var_a_atom, var_b_atom, cond_node}}, rest}
+
+      {:ok, _, [token | _]} ->
+        {:error, {:expected_close_paren, token}}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # never(exists VAR where COND)
+  defp parse_system_invariant_body([
+         {:keyword, _, :never}, {:delimiter, _, :open_paren},
+         {:identifier, _, :exists}, {:identifier, _, var}, {:keyword, _, :where} | rest
+       ]) do
+    var_atom = to_ident_atom(var)
+    bindings = MapSet.new([var_atom])
+
+    case parse_invariant_condition(rest, {:exists, bindings}) do
+      {:ok, cond_node, [{:delimiter, _, :close_paren} | rest]} ->
+        {:ok, {:never, {:exists_single, var_atom, cond_node}}, rest}
+
+      {:ok, _, [token | _]} ->
+        {:error, {:expected_close_paren, token}}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # for_all agents, COND
+  defp parse_system_invariant_body([
+         {:identifier, _, :for_all}, {:identifier, _, :agents}, {:delimiter, _, :comma} | rest
+       ]) do
+    case parse_invariant_condition(rest, :for_all) do
+      {:ok, cond_node, rest} ->
+        {:ok, {:for_all, cond_node}, rest}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # never(NAMED_REF_BOOLEAN_EXPR) — terms are `agent_name.field OP value`
+  defp parse_system_invariant_body([
+         {:keyword, _, :never}, {:delimiter, _, :open_paren} | rest
+       ]) do
+    case parse_invariant_condition(rest, :named) do
+      {:ok, cond_node, [{:delimiter, _, :close_paren} | rest]} ->
+        {:ok, {:never, cond_node}, rest}
+
+      {:ok, _, [token | _]} ->
+        {:error, {:expected_close_paren, token}}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
   defp parse_system_invariant_body([token | _]),
     do: {:error, {:unsupported_system_invariant, token}}
 
   defp parse_system_invariant_body([]),
     do: {:error, :unexpected_eof}
+
+  # ----------------------------------------------------------------------
+  # Phase-3 invariant condition parser
+  # ----------------------------------------------------------------------
+  #
+  # Parses boolean expressions of the form
+  #
+  #     TERM (and TERM | or TERM)*
+  #
+  # where TERM is a comparison whose shape depends on `mode`:
+  #
+  #   * `:exists` — `VAR.field OP value` or `VAR.field OP VAR.field`
+  #     (the `bindings` set restricts which identifiers count as quantifier
+  #     vars; anything else is treated as a syntax error)
+  #   * `:for_all` — unqualified `field OP value`
+  #   * `:named` — `agent_name.field OP value`
+  #
+  # Supports right-associative chains. `and` binds tighter than `or` (the
+  # parser collects an `and`-chain first, then folds `or`s on top).
+
+  defp parse_invariant_condition(tokens, mode) do
+    case parse_invariant_or(tokens, mode) do
+      {:ok, _node, _rest} = ok -> ok
+      {:error, _} = err -> err
+    end
+  end
+
+  defp parse_invariant_or(tokens, mode) do
+    with {:ok, left, rest} <- parse_invariant_and(tokens, mode) do
+      case rest do
+        [{:keyword, _, :or} | rest2] ->
+          with {:ok, right, rest3} <- parse_invariant_or(rest2, mode) do
+            {:ok, {:or, left, right}, rest3}
+          end
+
+        _ ->
+          {:ok, left, rest}
+      end
+    end
+  end
+
+  defp parse_invariant_and(tokens, mode) do
+    with {:ok, left, rest} <- parse_invariant_term(tokens, mode) do
+      case rest do
+        [{:keyword, _, :and} | rest2] ->
+          with {:ok, right, rest3} <- parse_invariant_and(rest2, mode) do
+            {:ok, {:and, left, right}, rest3}
+          end
+
+        _ ->
+          {:ok, left, rest}
+      end
+    end
+  end
+
+  # exists/named ref: IDENT.IDENT OP …
+  defp parse_invariant_term([{:identifier, _, ref}, {:operator, _, :dot}, {:identifier, _, field},
+                             {:operator, _, op} | rest], mode)
+       when op in [:==, :!=] do
+    field_atom = to_ident_atom(field)
+    ref_atom = to_ident_atom(ref)
+
+    left =
+      case mode do
+        {:exists, _bindings} -> {:agent_field, ref_atom, field_atom}
+        :named -> {:named_agent_field, ref_atom, field_atom}
+        :for_all -> {:agent_field, ref_atom, field_atom}
+      end
+
+    parse_invariant_rhs(left, op, rest, mode)
+  end
+
+  # for_all unqualified: IDENT OP …
+  defp parse_invariant_term([{:identifier, _, field}, {:operator, _, op} | rest], :for_all)
+       when op in [:==, :!=] do
+    left = {:field, to_ident_atom(field)}
+    parse_invariant_rhs(left, op, rest, :for_all)
+  end
+
+  defp parse_invariant_term([token | _], _mode), do: {:error, {:unexpected_in_invariant, token}}
+  defp parse_invariant_term([], _mode), do: {:error, :unexpected_eof}
+
+  # Right-hand side of a comparison: atom, integer, or another VAR.field
+  # ref (for cross-agent comparisons inside `exists`).
+  defp parse_invariant_rhs(left, op, [{:atom, _, val} | rest], _mode) do
+    {:ok, {op, left, to_ident_atom(val)}, rest}
+  end
+
+  defp parse_invariant_rhs(left, op, [{:integer, _, n} | rest], _mode) do
+    {:ok, {op, left, n}, rest}
+  end
+
+  defp parse_invariant_rhs(left, op, [{:identifier, _, ref}, {:operator, _, :dot}, {:identifier, _, field} | rest], mode) do
+    right =
+      case mode do
+        {:exists, _} -> {:agent_field, to_ident_atom(ref), to_ident_atom(field)}
+        :named -> {:named_agent_field, to_ident_atom(ref), to_ident_atom(field)}
+        :for_all -> {:agent_field, to_ident_atom(ref), to_ident_atom(field)}
+      end
+
+    {:ok, {op, left, right}, rest}
+  end
+
+  defp parse_invariant_rhs(_left, _op, [token | _], _mode),
+    do: {:error, {:expected_invariant_rhs, token}}
+
+  defp parse_invariant_rhs(_left, _op, [], _mode),
+    do: {:error, :unexpected_eof}
+
+  defp to_ident_atom(v) when is_atom(v), do: v
+  defp to_ident_atom(v) when is_binary(v), do: String.to_atom(v)
 
   # Parse system agent params: either empty () or key: value pairs
   defp parse_system_params([{:delimiter, _, :close_paren} | rest]), do: {:ok, [], rest}

@@ -94,10 +94,85 @@ defmodule Vor.Explorer.ProductState do
   are sorted so that two states differing only in queue order are treated as
   equal — this matches the BEAM message-delivery model where ordering between
   distinct sender/receiver pairs is not guaranteed.
+
+  Phase 2: state abstraction is encoded directly in the agent state map —
+  abstracted fields hold the symbolic value `:abstracted`. Two product states
+  with different concrete values for an abstracted field collapse to the
+  same fingerprint without any extra filtering work here.
   """
   def fingerprint(%__MODULE__{agents: agents, pending_messages: pending}) do
     {agents, Enum.sort(pending)}
   end
+
+  @doc """
+  Mask abstracted fields in every agent state with the symbolic value
+  `:abstracted`. Tracked state fields and parameters are left untouched.
+  Used at exploration time to drop irrelevant state-space dimensions.
+
+  `relevance` is the per-instance map produced by `Vor.Explorer.Relevance`.
+  """
+  def abstract(%__MODULE__{} = ps, relevance) when is_map(relevance) do
+    new_agents =
+      Enum.into(ps.agents, %{}, fn {name, state} ->
+        {name, abstract_agent_state(state, Map.get(relevance, name))}
+      end)
+
+    new_pending =
+      Enum.map(ps.pending_messages, fn {from, to, msg} ->
+        {from, to, abstract_message(msg)}
+      end)
+
+    %__MODULE__{ps | agents: new_agents, pending_messages: new_pending}
+  end
+
+  def abstract(%__MODULE__{} = ps, _), do: ps
+
+  @doc """
+  Apply abstraction to a single agent's state. Public so the explorer can
+  re-abstract a successor's modified agent in place.
+  """
+  def abstract_agent_state(state, nil), do: state
+
+  def abstract_agent_state(state, %{abstracted: abstracted}) when is_map(state) do
+    Enum.into(state, %{}, fn {field, value} ->
+      if MapSet.member?(abstracted, field), do: {field, :abstracted}, else: {field, value}
+    end)
+  end
+
+  def abstract_agent_state(state, _), do: state
+
+  # Pending message field values may also carry abstracted state — replace
+  # any non-literal value with `:abstracted` so two messages that differ only
+  # in opaque payload data fingerprint identically.
+  defp abstract_message({tag, fields}) when is_map(fields) do
+    {tag, Enum.into(fields, %{}, fn {k, v} -> {k, abstract_value(v)} end)}
+  end
+
+  defp abstract_message(msg), do: msg
+
+  defp abstract_value(:unknown), do: :abstracted
+  defp abstract_value(v), do: v
+
+  @doc """
+  Saturate any tracked integer field whose value exceeds `bound`. Negative
+  values are clamped to zero — Phase-1 examples never produce negatives, but
+  this keeps the cap symmetric.
+  """
+  def saturate_integers(state, tracked_int, bound) when is_integer(bound) do
+    Enum.into(state, %{}, fn
+      {field, value} when is_integer(value) ->
+        if MapSet.member?(tracked_int, field) do
+          {field, value |> max(0) |> min(bound)}
+        else
+          {field, value}
+        end
+
+      pair ->
+        pair
+    end)
+  end
+
+  def saturate_integers(state, _tracked_int, _bound), do: state
 
   @doc """
   True when a successor's tracked state is identical to its parent. Used to

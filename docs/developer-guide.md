@@ -2,7 +2,7 @@
 
 This document describes the current state of the Vor compiler. It is an internal reference for anyone working on the compiler, including AI coding agents. Update this document as features are added.
 
-Last updated after: Multi-agent model checking (Phase 1), internal type tracking, extern proven boundary enforcement, native Raft majority, 328+ tests
+Last updated after: Multi-agent model checking (Phase 3: quantifiers + named agent refs + symmetry reduction), internal type tracking, extern proven boundary enforcement, native Raft majority, 349+ tests
 
 ## Architecture
 
@@ -404,7 +404,139 @@ When a violation is found, the trace shows each step: which message was delivere
 
 ### Bounded verification
 
-If depth or state count bounds are exceeded before exhaustive exploration, the explorer reports "bounded verification passed" — it never claims "proven" without exploring the complete reachable state space. The developer can increase bounds or use state abstraction (Phase 2) to reach exhaustive proof.
+If depth or state count bounds are exceeded before exhaustive exploration, the explorer reports "bounded verification passed" — it never claims "proven" without exploring the complete reachable state space. The developer can increase bounds via `--depth`, `--max-states`, or `--integer-bound`.
+
+### State abstraction (Phase 2)
+
+`Vor.Explorer.Relevance` computes which state fields are *relevant* for each
+system-level invariant before BFS starts. A field is relevant when it is
+referenced directly in the invariant body OR when it appears in a guard or
+conditional that gates a transition to an already-relevant field
+(transitive closure with local-binding propagation through `var = expr`).
+
+Irrelevant state fields are masked with the symbolic value `:abstracted`
+after every successor. The simulator treats `:abstracted` exactly like
+`:unknown`: opaque to arithmetic and comparisons, fans conditionals into
+both branches. This is sound — if the invariant holds for ALL possible
+values of the abstracted fields, it holds for the real values.
+
+Parameters are immutable after init. Relevance separates them from tracked
+state: their values are still read by the simulator (they appear concretely
+in the agent state map) but they are not state-space dimensions, so they
+don't bloat the visited set.
+
+### Integer saturation
+
+Tracked integer fields can otherwise grow unboundedly (`vote_count`,
+`current_term`, etc.). After every successor the explorer caps tracked
+integers to `[0, integer_bound]` (default 3, `--integer-bound N` to
+override). This is standard bounded model checking: bugs typically manifest
+within small concrete values, and saturation forces convergence so the BFS
+can terminate.
+
+### Bounded message queue
+
+Pending messages can also accumulate without bound — broadcasts and chained
+sends grow the buffer faster than deliveries shrink it. The explorer caps
+the queue at `max_queue` (default 10, `--max-queue N` to override) by
+truncating surplus outgoing messages from the tail of the new queue. This
+is the lossy-network model: at saturation new sends are silently dropped
+rather than refusing the delivery. Combined with state abstraction and
+integer saturation, this lets Raft reach `:proven` in 8008 states at
+depth 10.
+
+### Quantified invariants (Phase 3)
+
+System-level safety invariants accept three additional shapes alongside
+`never(count(...))`:
+
+```vor
+%% exists pair: at least two distinct agents satisfying both clauses
+safety "no two holders" proven do
+  never(exists A, B where A.phase == :held and B.phase == :held)
+end
+
+%% exists pair with cross-agent comparison
+safety "leaders agree on term" proven do
+  never(exists A, B where A.role == :leader and B.role == :leader
+    and A.current_term != B.current_term)
+end
+
+%% exists single
+safety "someone is leader" proven do
+  exists A where A.role == :leader
+end
+
+%% for_all (unqualified field references)
+safety "modes are valid" proven do
+  for_all agents, mode == :idle or mode == :active
+end
+
+%% named agent reference
+safety "n1 stays follower" proven do
+  never(n1.role == :leader)
+end
+```
+
+The evaluator (`Vor.Explorer.Invariant`) walks an operand-resolution model:
+- `{:agent_field, var, field}` resolves against quantifier bindings
+- `{:named_agent_field, name, field}` resolves against the product state
+  by instance name
+- `{:field, name}` resolves against the current `for_all` binding
+
+`Vor.Explorer.Relevance.invariant_fields/1` extracts referenced fields from
+all of these so abstraction stays sound under the new shapes.
+
+`exists` and `for_all` are recognised **positionally** inside system
+invariant bodies — they are NOT reserved keywords, so existing code that
+uses them as variable names (e.g. `exists = map_has(data, :key)`) continues
+to compile.
+
+### Symmetry reduction (Phase 3)
+
+`Vor.Explorer.Symmetry` automatically detects homogeneous fully-symmetric
+systems and applies symmetry reduction. A run is symmetry-eligible when:
+
+1. Every system instance shares the same agent type, AND
+2. Every instance has the same `(outbound, inbound)` connection counts
+   (covers fully-connected meshes and other symmetric topologies), AND
+3. No active invariant references a specific named agent (any
+   `{:named_agent_field, _, _}` term disables reduction).
+
+When enabled, the BFS deduplicates against a canonical fingerprint that
+sorts the agent state list and strips sender/receiver identity from
+pending messages. For three identical Raft nodes the maximum theoretical
+reduction is 3! = 6×; in practice the message canonicalization adds a bit
+more, so Raft now reaches `:proven` in **1001 states** (vs 8008 without
+symmetry — about 8× reduction).
+
+`mix vor.check` prints the result line:
+
+```
+Symmetry: enabled (3 identical agents, 6× reduction)
+```
+
+Use `--no-symmetry` to force the explorer to keep agent identities
+distinct (useful for sanity checking that a proof doesn't accidentally
+rely on the reduction).
+
+`mix vor.check` prints the per-run abstraction summary alongside the
+result:
+
+```
+Checking examples/raft_cluster.vor...
+    Tracked fields:    current_term, role, vote_count
+    Abstracted fields: commit_index, log, voted_for
+    Integer bound:     3
+  ~ Bounded verification (5000 states, depth 9)
+```
+
+Phase-2 modules:
+- `lib/vor/explorer/relevance.ex` — relevance analysis
+- `lib/vor/explorer/product_state.ex` — `abstract/2`, `abstract_agent_state/2`, `saturate_integers/3`
+- `lib/vor/explorer/simulator.ex` — `:abstracted` reads return `:unknown`
+- `lib/vor/explorer/successor.ex` — post-process abstraction + saturation
+- `lib/vor/explorer.ex` — wires relevance through `verify_system/4` and stats
 
 ## Handler completeness checking
 

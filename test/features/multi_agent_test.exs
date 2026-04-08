@@ -97,8 +97,34 @@ defmodule Vor.Features.MultiAgentTest do
 
   defp build_initial(source) do
     {:ok, result} = Vor.Compiler.compile_system(source)
-    agent_irs = Map.new(result.agents, fn {name, %{ir: ir}} -> {name, ir} end)
-    {result.system_ir, agent_irs}
+
+    # Key by instance name (matching what Vor.Explorer builds at runtime).
+    # Multiple instances of the same agent type share the same IR object.
+    instance_irs =
+      Enum.into(result.system_ir.agents, %{}, fn instance ->
+        ir =
+          case Map.get(result.agents, instance.type_name) do
+            %{ir: ir} -> ir
+            _ -> nil
+          end
+
+        {instance.name, ir}
+      end)
+
+    {result.system_ir, instance_irs}
+  end
+
+  # Some Milestone-3 tests look up handlers via the agent type name. Provide
+  # a separate helper for that.
+  defp first_handler(instance_irs, _type_name, msg_tag) do
+    ir =
+      instance_irs
+      |> Map.values()
+      |> Enum.find(fn ir -> ir != nil end)
+
+    Enum.find(ir.handlers, fn h ->
+      h.pattern.tag == to_string(msg_tag) or h.pattern.tag == msg_tag
+    end)
   end
 
   test "initial product state has one entry per declared agent instance" do
@@ -198,11 +224,6 @@ defmodule Vor.Features.MultiAgentTest do
   # ----------------------------------------------------------------------
   # Milestone 3: handler simulation
   # ----------------------------------------------------------------------
-
-  defp first_handler(agent_irs, type_name, msg_tag) do
-    ir = agent_irs[type_name]
-    Enum.find(ir.handlers, fn h -> h.pattern.tag == to_string(msg_tag) or h.pattern.tag == msg_tag end)
-  end
 
   test "simulator applies a transition and produces no outgoing messages" do
     source = """
@@ -717,6 +738,719 @@ defmodule Vor.Features.MultiAgentTest do
     # Insert the invariant just before the final `end` of the system block.
     [body, _last_end] = Regex.split(~r/\nend\s*\z/, source, parts: 2)
     body <> invariant <> "\nend\n"
+  end
+
+  # ----------------------------------------------------------------------
+  # Phase 2: state abstraction and integer saturation
+  # ----------------------------------------------------------------------
+
+  test "relevance.invariant_fields extracts the agent field referenced in count(...)" do
+    inv = %Vor.IR.SystemInvariant{
+      name: "at most one leader",
+      tier: :proven,
+      body: {:never, {:count_gt, {:agents_where, :role, :==, :leader}, 1}}
+    }
+
+    assert :role in Vor.Explorer.Relevance.invariant_fields(inv)
+  end
+
+  test "relevance computes transitive closure through guards and conditionals" do
+    source = """
+    agent TestNode do
+      state role: :follower | :candidate | :leader
+      state current_term: integer
+      state vote_count: integer
+      state commit_index: integer
+
+      protocol do
+        accepts {:vote_granted, term: integer}
+        accepts {:noop}
+        emits {:ok}
+      end
+
+      on {:vote_granted, term: T} when role == :candidate and T == current_term do
+        new_votes = vote_count + 1
+        transition vote_count: new_votes
+        if new_votes > 1 do
+          transition role: :leader
+          emit {:ok}
+        else
+          emit {:ok}
+        end
+      end
+
+      on {:noop} do
+        transition commit_index: 1
+        emit {:ok}
+      end
+    end
+
+    system Cluster do
+      agent :a, TestNode()
+      agent :b, TestNode()
+
+      safety "at most one leader" proven do
+        never(count(agents where role == :leader) > 1)
+      end
+    end
+    """
+
+    {system_ir, agent_irs} = build_initial(source)
+    relevance = Vor.Explorer.Relevance.compute(system_ir, agent_irs, system_ir.invariants)
+
+    info = relevance[:a]
+
+    assert :role in info.tracked_state, "role is invariant field"
+    assert :vote_count in info.tracked_state, "vote_count gates the role transition (via new_votes)"
+    assert :current_term in info.tracked_state, "current_term appears in the candidate guard"
+    refute :commit_index in info.tracked_state, "commit_index never influences a role transition"
+    assert :commit_index in info.abstracted
+  end
+
+  test "parameters are excluded from tracked state" do
+    source = """
+    agent ParamNode(cluster_size: integer) do
+      state role: :follower | :leader
+      state vote_count: integer
+
+      protocol do
+        accepts {:tick}
+        emits {:ok}
+      end
+
+      on {:tick} when role == :follower do
+        transition vote_count: vote_count + 1
+        if vote_count > cluster_size do
+          transition role: :leader
+          emit {:ok}
+        else
+          emit {:ok}
+        end
+      end
+    end
+
+    system Cluster do
+      agent :a, ParamNode(cluster_size: 3)
+      agent :b, ParamNode(cluster_size: 3)
+
+      safety "at most one leader" proven do
+        never(count(agents where role == :leader) > 1)
+      end
+    end
+    """
+
+    {system_ir, agent_irs} = build_initial(source)
+    relevance = Vor.Explorer.Relevance.compute(system_ir, agent_irs, system_ir.invariants)
+
+    info = relevance[:a]
+    assert :cluster_size in info.params
+    refute :cluster_size in info.tracked_state
+    assert :role in info.tracked_state
+    assert :vote_count in info.tracked_state
+  end
+
+  test "ProductState.abstract masks abstracted fields with :abstracted" do
+    ps = %Vor.Explorer.ProductState{
+      agents: %{
+        a: %{role: :follower, vote_count: 0, commit_index: 7},
+        b: %{role: :leader, vote_count: 2, commit_index: 99}
+      }
+    }
+
+    relevance = %{
+      a: %{
+        tracked_state: MapSet.new([:role, :vote_count]),
+        tracked_int: MapSet.new([:vote_count]),
+        abstracted: MapSet.new([:commit_index]),
+        params: MapSet.new()
+      },
+      b: %{
+        tracked_state: MapSet.new([:role, :vote_count]),
+        tracked_int: MapSet.new([:vote_count]),
+        abstracted: MapSet.new([:commit_index]),
+        params: MapSet.new()
+      }
+    }
+
+    abstracted = Vor.Explorer.ProductState.abstract(ps, relevance)
+    assert abstracted.agents[:a].commit_index == :abstracted
+    assert abstracted.agents[:b].commit_index == :abstracted
+    # Tracked fields untouched
+    assert abstracted.agents[:a].role == :follower
+    assert abstracted.agents[:b].vote_count == 2
+  end
+
+  test "abstracted fingerprints collapse states differing only in abstracted fields" do
+    relevance = %{
+      a: %{
+        tracked_state: MapSet.new([:role]),
+        tracked_int: MapSet.new(),
+        abstracted: MapSet.new([:commit_index]),
+        params: MapSet.new()
+      }
+    }
+
+    ps1 = Vor.Explorer.ProductState.abstract(
+      %Vor.Explorer.ProductState{agents: %{a: %{role: :follower, commit_index: 5}}},
+      relevance
+    )
+
+    ps2 = Vor.Explorer.ProductState.abstract(
+      %Vor.Explorer.ProductState{agents: %{a: %{role: :follower, commit_index: 999}}},
+      relevance
+    )
+
+    assert Vor.Explorer.ProductState.fingerprint(ps1) ==
+             Vor.Explorer.ProductState.fingerprint(ps2)
+  end
+
+  test "saturate_integers caps tracked integer fields at the bound" do
+    state = %{vote_count: 7, current_term: 99, commit_index: 12}
+    tracked_int = MapSet.new([:vote_count, :current_term])
+
+    saturated = Vor.Explorer.ProductState.saturate_integers(state, tracked_int, 3)
+    assert saturated.vote_count == 3
+    assert saturated.current_term == 3
+    # Untracked integer left alone
+    assert saturated.commit_index == 12
+  end
+
+  test "simulator treats :abstracted as :unknown — guards on abstracted fields fan out" do
+    source = """
+    agent ExternBranch do
+      state phase: :a | :b | :c
+      state count: integer
+
+      protocol do
+        accepts {:tick}
+        emits {:ok}
+      end
+
+      on {:tick} when phase == :a do
+        if count > 0 do
+          transition phase: :b
+        else
+          transition phase: :c
+        end
+        emit {:ok}
+      end
+    end
+
+    system Cluster do
+      agent :x, ExternBranch()
+    end
+    """
+
+    {_system_ir, agent_irs} = build_initial(source)
+    handler = first_handler(agent_irs, :ExternBranch, :tick)
+
+    # Pass an :abstracted value for count — simulator should branch both ways
+    results =
+      Vor.Explorer.Simulator.simulate(handler, %{phase: :a, count: :abstracted},
+        {:tick, %{}}, :x, [])
+
+    phases = results |> Enum.map(fn {s, _} -> s.phase end) |> Enum.sort()
+    assert :b in phases
+    assert :c in phases
+  end
+
+  test "raft cluster reaches exhaustive proven with state abstraction + queue bound" do
+    raft_source = File.read!("examples/raft_cluster.vor")
+
+    augmented =
+      String.replace(raft_source, ~r/\nend\s*\z/, """
+
+        safety "at most one leader" proven do
+          never(count(agents where role == :leader) > 1)
+        end
+      end
+      """)
+
+    # Phase 2 with the message-queue cap should let the BFS exhaust the
+    # reachable product state space for the augmented Raft cluster.
+    result =
+      Vor.Explorer.check_file(augmented,
+        max_depth: 30,
+        max_states: 50_000,
+        integer_bound: 3,
+        max_queue: 10
+      )
+
+    case result do
+      {:ok, :proven, stats} ->
+        IO.puts("Raft Phase-2 proven: #{stats.states_explored} states, depth #{stats.max_depth_reached}")
+        first = stats.relevance |> Map.values() |> hd()
+        assert :role in first.tracked_state
+        assert :vote_count in first.tracked_state
+        assert :commit_index in first.abstracted
+        assert true
+
+      {:ok, :bounded, stats} ->
+        flunk(
+          "Expected raft to reach :proven with abstraction + queue bound; " <>
+          "got bounded after #{stats.states_explored} states at depth #{stats.max_depth_reached}"
+        )
+
+      {:error, :violation, name, _trace, _stats} ->
+        flunk("Unexpected violation: #{name}")
+    end
+  end
+
+  test "max_queue caps the pending message buffer" do
+    # A broadcast-heavy agent: each external start triggers a broadcast to
+    # both peers, so without a queue cap the buffer would grow unboundedly
+    # as deliveries chain. With max_queue: 2 the surplus is dropped.
+    source = """
+    agent Hub do
+      protocol do
+        accepts {:start}
+        accepts {:hello, from: atom}
+        emits {:ok}
+        sends {:hello, from: atom}
+      end
+
+      on {:start} do
+        broadcast {:hello, from: :me}
+        emit {:ok}
+      end
+
+      on {:hello, from: F} do
+        broadcast {:hello, from: :me}
+        emit {:ok}
+      end
+    end
+
+    system Cluster do
+      agent :a, Hub()
+      agent :b, Hub()
+      agent :c, Hub()
+      connect :a -> :b
+      connect :a -> :c
+      connect :b -> :a
+      connect :b -> :c
+      connect :c -> :a
+      connect :c -> :b
+
+      safety "at most zero leaders" proven do
+        never(count(agents where role == :leader) > 1)
+      end
+    end
+    """
+
+    {system_ir, instance_irs} = build_initial(source)
+
+    # No relevance applied here — this is a Phase-1 successors call with
+    # only `max_queue` opted in. The cap should still apply.
+    seed = %Vor.Explorer.ProductState{
+      agents: %{a: %{}, b: %{}, c: %{}},
+      pending_messages: [
+        {:a, :b, {:hello, %{from: :me}}},
+        {:a, :c, {:hello, %{from: :me}}}
+      ]
+    }
+
+    capped = Vor.Explorer.Successor.successors(seed, instance_irs, system_ir, max_queue: 2)
+
+    Enum.each(capped, fn ps ->
+      assert length(ps.pending_messages) <= 2,
+             "expected pending queue to be capped at 2, got #{length(ps.pending_messages)}"
+    end)
+  end
+
+  test "Phase 1 fingerprint behavior unchanged when no relevance is supplied" do
+    # successors/3 (no opts) keeps Phase-1 semantics: no abstraction, no
+    # saturation, fingerprint over the full agent state map.
+    source = """
+    agent Node do
+      state role: :follower | :leader
+
+      protocol do
+        accepts {:promote}
+        emits {:ok}
+      end
+
+      on {:promote} when role == :follower do
+        transition role: :leader
+        emit {:ok}
+      end
+    end
+
+    system Cluster do
+      agent :a, Node()
+    end
+    """
+
+    {system_ir, agent_irs} = build_initial(source)
+    ps = Vor.Explorer.ProductState.initial(system_ir, agent_irs)
+    succs = Vor.Explorer.Successor.successors(ps, agent_irs, system_ir)
+
+    # External {:promote} → role becomes :leader
+    assert Enum.any?(succs, fn s -> s.agents[:a].role == :leader end)
+  end
+
+  # ----------------------------------------------------------------------
+  # Phase 3: quantifiers and named agent references
+  # ----------------------------------------------------------------------
+
+  test "exists pair invariant parses" do
+    source = """
+    agent Holder do
+      state phase: :free | :held
+
+      protocol do
+        accepts {:acquire}
+        emits {:ok}
+      end
+
+      on {:acquire} when phase == :free do
+        transition phase: :held
+        emit {:ok}
+      end
+    end
+
+    system Cluster do
+      agent :a, Holder()
+      agent :b, Holder()
+      connect :a -> :b
+      connect :b -> :a
+
+      safety "no two holders" proven do
+        never(exists A, B where A.phase == :held and B.phase == :held)
+      end
+    end
+    """
+
+    {:ok, result} = Vor.Compiler.compile_system(source)
+    assert [%{body: {:never, {:exists_pair, :A, :B, _}}}] = result.system_ir.invariants
+  end
+
+  test "for_all invariant parses" do
+    source = """
+    agent Modal do
+      state mode: :idle | :active | :error
+
+      protocol do
+        accepts {:activate}
+        emits {:ok}
+      end
+
+      on {:activate} when mode == :idle do
+        transition mode: :active
+        emit {:ok}
+      end
+    end
+
+    system Cluster do
+      agent :a, Modal()
+      agent :b, Modal()
+
+      safety "no errors" proven do
+        for_all agents, mode == :idle or mode == :active
+      end
+    end
+    """
+
+    {:ok, result} = Vor.Compiler.compile_system(source)
+    assert [%{body: {:for_all, _}}] = result.system_ir.invariants
+  end
+
+  test "named agent reference invariant parses" do
+    source = """
+    agent Node do
+      state role: :follower | :leader
+
+      protocol do
+        accepts {:promote}
+        emits {:ok}
+      end
+
+      on {:promote} when role == :follower do
+        transition role: :leader
+        emit {:ok}
+      end
+    end
+
+    system Cluster do
+      agent :n1, Node()
+      agent :n2, Node()
+
+      safety "n1 stays follower" proven do
+        never(n1.role == :leader)
+      end
+    end
+    """
+
+    {:ok, result} = Vor.Compiler.compile_system(source)
+    assert [%{body: {:never, {:==, {:named_agent_field, :n1, :role}, :leader}}}] =
+             result.system_ir.invariants
+  end
+
+  test "exists pair detects two simultaneous holders" do
+    source = """
+    agent Holder do
+      state phase: :free | :held
+
+      protocol do
+        accepts {:acquire}
+        emits {:ok}
+      end
+
+      on {:acquire} when phase == :free do
+        transition phase: :held
+        emit {:ok}
+      end
+    end
+
+    system TwoHolders do
+      agent :a, Holder()
+      agent :b, Holder()
+      connect :a -> :b
+      connect :b -> :a
+
+      safety "no two holders" proven do
+        never(exists A, B where A.phase == :held and B.phase == :held)
+      end
+    end
+    """
+
+    assert {:error, :violation, "no two holders", _trace, _stats} =
+             Vor.Explorer.check_file(source, max_depth: 10, max_states: 1_000)
+  end
+
+  test "for_all holds on a system that never enters error mode" do
+    source = """
+    agent SafeNode do
+      state mode: :idle | :active
+
+      protocol do
+        accepts {:activate}
+        emits {:ok}
+      end
+
+      on {:activate} when mode == :idle do
+        transition mode: :active
+        emit {:ok}
+      end
+    end
+
+    system SafeCluster do
+      agent :a, SafeNode()
+      agent :b, SafeNode()
+
+      safety "modes are valid" proven do
+        for_all agents, mode == :idle or mode == :active
+      end
+    end
+    """
+
+    assert {:ok, :proven, _} =
+             Vor.Explorer.check_file(source, max_depth: 10, max_states: 1_000)
+  end
+
+  test "named agent reference detects violation" do
+    source = """
+    agent Node do
+      state role: :follower | :leader
+
+      protocol do
+        accepts {:promote}
+        emits {:ok}
+      end
+
+      on {:promote} when role == :follower do
+        transition role: :leader
+        emit {:ok}
+      end
+    end
+
+    system Cluster do
+      agent :n1, Node()
+      agent :n2, Node()
+
+      safety "n1 stays follower" proven do
+        never(n1.role == :leader)
+      end
+    end
+    """
+
+    # n1 can receive an external :promote — violation expected.
+    assert {:error, :violation, "n1 stays follower", _trace, _stats} =
+             Vor.Explorer.check_file(source, max_depth: 10, max_states: 1_000)
+  end
+
+  test "relevance.invariant_fields handles exists_pair, for_all, named refs" do
+    inv1 = %Vor.IR.SystemInvariant{
+      name: "test1",
+      tier: :proven,
+      body:
+        {:never,
+         {:exists_pair, :A, :B,
+          {:and, {:==, {:agent_field, :A, :role}, :leader},
+           {:!=, {:agent_field, :A, :term}, {:agent_field, :B, :term}}}}}
+    }
+
+    fields1 = Vor.Explorer.Relevance.invariant_fields(inv1)
+    assert :role in fields1
+    assert :term in fields1
+
+    inv2 = %Vor.IR.SystemInvariant{
+      name: "test2",
+      tier: :proven,
+      body:
+        {:for_all,
+         {:or, {:==, {:field, :mode}, :idle}, {:==, {:field, :mode}, :active}}}
+    }
+
+    assert :mode in Vor.Explorer.Relevance.invariant_fields(inv2)
+
+    inv3 = %Vor.IR.SystemInvariant{
+      name: "test3",
+      tier: :proven,
+      body: {:never, {:==, {:named_agent_field, :n1, :role}, :leader}}
+    }
+
+    assert :role in Vor.Explorer.Relevance.invariant_fields(inv3)
+  end
+
+  # ----------------------------------------------------------------------
+  # Phase 3: symmetry reduction
+  # ----------------------------------------------------------------------
+
+  test "symmetry detected for homogeneous fully-connected system" do
+    source = """
+    agent Node do
+      state role: :follower | :leader
+
+      protocol do
+        accepts {:promote}
+        emits {:ok}
+      end
+
+      on {:promote} when role == :follower do
+        transition role: :leader
+        emit {:ok}
+      end
+    end
+
+    system Cluster do
+      agent :n1, Node()
+      agent :n2, Node()
+      agent :n3, Node()
+      connect :n1 -> :n2
+      connect :n1 -> :n3
+      connect :n2 -> :n1
+      connect :n2 -> :n3
+      connect :n3 -> :n1
+      connect :n3 -> :n2
+
+      safety "at most one leader" proven do
+        never(count(agents where role == :leader) > 1)
+      end
+    end
+    """
+
+    {system_ir, _} = build_initial(source)
+    assert Vor.Explorer.Symmetry.can_reduce?(system_ir)
+    assert Vor.Explorer.Symmetry.enabled?(system_ir, system_ir.invariants, :auto)
+  end
+
+  test "symmetry not detected for heterogeneous system" do
+    source = """
+    agent Producer do
+      protocol do
+        accepts {:start}
+        emits {:ok}
+        sends {:item, n: integer}
+      end
+
+      on {:start} do
+        send :sink {:item, n: 1}
+        emit {:ok}
+      end
+    end
+
+    agent Consumer do
+      protocol do
+        accepts {:item, n: integer}
+        emits {:ok}
+      end
+
+      on {:item, n: N} do
+        emit {:ok}
+      end
+    end
+
+    system Pipeline do
+      agent :source, Producer()
+      agent :sink, Consumer()
+      connect :source -> :sink
+    end
+    """
+
+    {system_ir, _} = build_initial(source)
+    refute Vor.Explorer.Symmetry.can_reduce?(system_ir)
+  end
+
+  test "named-agent invariant disables symmetry even on a homogeneous system" do
+    source = """
+    agent Node do
+      state role: :follower | :leader
+
+      protocol do
+        accepts {:promote}
+        emits {:ok}
+      end
+
+      on {:promote} when role == :follower do
+        transition role: :leader
+        emit {:ok}
+      end
+    end
+
+    system Cluster do
+      agent :n1, Node()
+      agent :n2, Node()
+
+      safety "n1 never leads" proven do
+        never(n1.role == :leader)
+      end
+    end
+    """
+
+    {system_ir, _} = build_initial(source)
+    assert Vor.Explorer.Symmetry.can_reduce?(system_ir)
+    refute Vor.Explorer.Symmetry.enabled?(system_ir, system_ir.invariants, :auto)
+  end
+
+  test "symmetry reduction shrinks the explored state space" do
+    raft_source = File.read!("examples/raft_cluster.vor")
+
+    augmented =
+      String.replace(raft_source, ~r/\nend\s*\z/, """
+
+        safety "at most one leader" proven do
+          never(count(agents where role == :leader) > 1)
+        end
+      end
+      """)
+
+    {:ok, :proven, with_sym} =
+      Vor.Explorer.check_file(augmented,
+        max_depth: 30,
+        max_states: 50_000,
+        symmetry: :auto
+      )
+
+    {:ok, :proven, without_sym} =
+      Vor.Explorer.check_file(augmented,
+        max_depth: 30,
+        max_states: 50_000,
+        symmetry: false
+      )
+
+    assert with_sym.symmetry == true
+    assert without_sym.symmetry == false
+    assert with_sym.states_explored < without_sym.states_explored
   end
 
   test "system invariant parses but compile does not run model checking" do
