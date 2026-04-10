@@ -104,7 +104,7 @@ Symmetry:          enabled (3 identical agents, 6× reduction)
 ✓ Proven (1001 states, depth 10)
 ```
 
-The model checker uses state abstraction to track only invariant-relevant fields, integer saturation to bound numeric dimensions, and symmetry reduction to collapse equivalent agent permutations. Same code that runs in production. No separate spec.
+The model checker uses cone-of-influence abstraction, integer saturation, and symmetry reduction. Same code that runs in production. No separate spec.
 
 ## What's working
 
@@ -116,7 +116,7 @@ The model checker uses state abstraction to track only invariant-relevant fields
 **Verification:**
 - Compile-time safety invariants proven by exhaustive state graph traversal
 - Multi-agent model checking via product state exploration (`mix vor.check`)
-- State abstraction, integer saturation, queue bounding, symmetry reduction
+- Cone-of-influence abstraction, integer saturation, queue bounding, symmetry reduction
 - System-level invariants: `count`, `exists`, `for_all`, cross-agent comparisons, named agent references
 - Raft "at most one leader" proven exhaustively in 1,001 states
 - Extern proven boundary — proven invariants cannot depend on extern results (compile error)
@@ -132,11 +132,15 @@ The model checker uses state abstraction to track only invariant-relevant fields
 - Bidirectional relations with compile-time equation inversion
 - Multi-agent systems with `send`, `broadcast`, Registry-based discovery
 - Gleam extern support with compile-time type boundary validation
-- Erlang, Elixir, and Gleam externs in the same agent
 
 **Testing:**
-- 349+ tests, 9 property-based test suites, zero compiler warnings
-- Five examples: distributed lock, circuit breaker, Raft consensus, G-Counter CRDT, rate limiter
+- 351+ tests, 9 property-based test suites, zero compiler warnings
+- All five examples fully native — zero Elixir externs:
+  - Distributed lock: native list ops, proven safety, liveness timeout
+  - Circuit breaker: pure state machine, proven safety, liveness recovery
+  - Raft consensus: native arithmetic + list ops, model-checked leader uniqueness
+  - G-Counter CRDT: native map ops, periodic gossip, zero externs
+  - Rate limiter: native map ops, per-client tracking
 - Three CRDT types verified native (zero externs): G-Counter, PN-Counter, OR-Set
 
 ## Try it
