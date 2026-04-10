@@ -226,7 +226,7 @@ defmodule Vor.Compiler do
     {:ok, agent_irs, system_ir}
   end
 
-  defp lower_system_block(%Vor.AST.System{name: name, agents: agents, connections: connections, invariants: invariants}, agent_irs) do
+  defp lower_system_block(%Vor.AST.System{name: name, agents: agents, connections: connections, invariants: invariants, chaos: chaos}, agent_irs) do
     %Vor.IR.SystemIR{
       name: name,
       registry: Module.concat([Vor, System, name, Registry]),
@@ -257,7 +257,22 @@ defmodule Vor.Compiler do
       end),
       invariants: Enum.map(invariants || [], fn %Vor.AST.SystemSafety{name: n, tier: tier, body: body} ->
         %Vor.IR.SystemInvariant{name: n, tier: tier, body: body}
-      end)
+      end),
+      chaos: lower_chaos(chaos)
+    }
+  end
+
+  defp lower_chaos(nil), do: nil
+  defp lower_chaos(%Vor.AST.ChaosConfig{} = c) do
+    %Vor.IR.ChaosConfig{
+      duration_ms: c.duration_ms,
+      seed: c.seed,
+      kill: c.kill,
+      partition: c.partition,
+      delay: c.delay,
+      drop: c.drop,
+      workload: c.workload,
+      check: c.check
     }
   end
 

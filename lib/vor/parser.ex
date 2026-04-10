@@ -49,6 +49,9 @@ defmodule Vor.Parser do
       {:ok, agents, connections, invariants, rest} ->
         {:ok, %AST.System{name: name, agents: agents, connections: connections,
                            invariants: invariants, meta: meta}, rest}
+      {:ok, agents, connections, invariants, rest, chaos} ->
+        {:ok, %AST.System{name: name, agents: agents, connections: connections,
+                           invariants: invariants, chaos: chaos, meta: meta}, rest}
       {:error, _} = err -> err
     end
   end
@@ -82,7 +85,28 @@ defmodule Vor.Parser do
     end
   end
 
+  # chaos do ... end
+  defp parse_system_entries([{:identifier, _, :chaos}, {:keyword, _, :do} | rest], agents, connections, invariants) do
+    case parse_chaos_items(rest, %AST.ChaosConfig{}) do
+      {:ok, chaos, rest} -> parse_system_entries(rest, agents, connections, invariants, chaos)
+      {:error, _} = err -> err
+    end
+  end
+
   defp parse_system_entries([token | _], _a, _c, _i), do: {:error, {:unexpected_in_system, token}}
+
+  # When a chaos block was parsed, thread it through subsequent entries
+  defp parse_system_entries([{:keyword, _, :end} | rest], agents, connections, invariants, chaos) do
+    {:ok, Enum.reverse(agents), Enum.reverse(connections), Enum.reverse(invariants), rest, chaos}
+  end
+
+  defp parse_system_entries(tokens, agents, connections, invariants, chaos) do
+    case parse_system_entries(tokens, agents, connections, invariants) do
+      {:ok, a, c, i, rest} -> {:ok, a, c, i, rest, chaos}
+      {:ok, a, c, i, rest, _} -> {:ok, a, c, i, rest, chaos}
+      {:error, _} = err -> err
+    end
+  end
 
   defp parse_system_safety([{:keyword, meta, :safety}, {:string, _, name},
                             {:keyword, _, tier}, {:keyword, _, :do} | rest])
@@ -333,6 +357,84 @@ defmodule Vor.Parser do
 
   defp to_ident_atom(v) when is_atom(v), do: v
   defp to_ident_atom(v) when is_binary(v), do: String.to_atom(v)
+
+  # ------------------------------------------------------------------
+  # Chaos block parser
+  # ------------------------------------------------------------------
+
+  defp parse_chaos_items([{:keyword, _, :end} | rest], config) do
+    {:ok, config, rest}
+  end
+
+  # duration 30s | duration 5m | duration 30000
+  defp parse_chaos_items([{:identifier, _, :duration} | rest], config) do
+    {ms, rest} = parse_chaos_duration(rest)
+    parse_chaos_items(rest, %{config | duration_ms: ms})
+  end
+
+  # seed 42
+  defp parse_chaos_items([{:identifier, _, :seed}, {:integer, _, n} | rest], config) do
+    parse_chaos_items(rest, %{config | seed: n})
+  end
+
+  # kill every: MIN..MAXs
+  defp parse_chaos_items([{:identifier, _, :kill}, {kw_or_id, _, :every}, {:delimiter, _, :colon} | rest], config)
+       when kw_or_id in [:identifier, :keyword] do
+    {range, rest} = parse_chaos_range(rest)
+    parse_chaos_items(rest, %{config | kill: %{every: range}})
+  end
+
+  # partition duration: MIN..MAXs
+  defp parse_chaos_items([{:identifier, _, :partition}, {:identifier, _, :duration}, {:delimiter, _, :colon} | rest], config) do
+    {range, rest} = parse_chaos_range(rest)
+    parse_chaos_items(rest, %{config | partition: %{duration: range}})
+  end
+
+  # delay by: MIN..MAXms
+  defp parse_chaos_items([{:identifier, _, :delay}, {:identifier, _, :by}, {:delimiter, _, :colon} | rest], config) do
+    {range, rest} = parse_chaos_range(rest)
+    parse_chaos_items(rest, %{config | delay: %{by: range}})
+  end
+
+  # drop probability: N (integer percentage, e.g. 1 = 1%)
+  defp parse_chaos_items([{:identifier, _, :drop}, {:identifier, _, :probability}, {:delimiter, _, :colon}, {:integer, _, n} | rest], config) do
+    parse_chaos_items(rest, %{config | drop: %{probability: n / 100}})
+  end
+
+  # check every: Nms
+  defp parse_chaos_items([{:identifier, _, :check}, {kw_or_id, _, :every}, {:delimiter, _, :colon} | rest], config)
+       when kw_or_id in [:identifier, :keyword] do
+    {ms, rest} = parse_chaos_duration(rest)
+    parse_chaos_items(rest, %{config | check: %{every: ms}})
+  end
+
+  # workload rate: N
+  defp parse_chaos_items([{:identifier, _, :workload}, {:identifier, _, :rate}, {:delimiter, _, :colon}, {:integer, _, rate} | rest], config) do
+    parse_chaos_items(rest, %{config | workload: %{rate: rate}})
+  end
+
+  defp parse_chaos_items([token | _], _config) do
+    {:error, {:unexpected_in_chaos, token}}
+  end
+
+  # Duration: INTEGER UNIT? (s, m, ms) or bare integer (ms)
+  defp parse_chaos_duration([{:integer, _, n}, {:identifier, _, :s} | rest]), do: {n * 1000, rest}
+  defp parse_chaos_duration([{:integer, _, n}, {:identifier, _, :m} | rest]), do: {n * 60_000, rest}
+  defp parse_chaos_duration([{:integer, _, n}, {:identifier, _, :ms} | rest]), do: {n, rest}
+  defp parse_chaos_duration([{:integer, _, n} | rest]), do: {n, rest}
+
+  # Range: MIN..MAX UNIT?
+  defp parse_chaos_range([{:integer, _, min}, {:operator, _, :range}, {:integer, _, max}, {:identifier, _, :s} | rest]) do
+    {{min * 1000, max * 1000}, rest}
+  end
+
+  defp parse_chaos_range([{:integer, _, min}, {:operator, _, :range}, {:integer, _, max}, {:identifier, _, :ms} | rest]) do
+    {{min, max}, rest}
+  end
+
+  defp parse_chaos_range([{:integer, _, min}, {:operator, _, :range}, {:integer, _, max} | rest]) do
+    {{min, max}, rest}
+  end
 
   # Parse system agent params: either empty () or key: value pairs
   defp parse_system_params([{:delimiter, _, :close_paren} | rest]), do: {:ok, [], rest}

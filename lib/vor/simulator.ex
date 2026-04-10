@@ -2,16 +2,17 @@ defmodule Vor.Simulator do
   @moduledoc """
   Chaos simulation for Vor system blocks.
 
-  Starts real OTP processes via the system's supervisor, periodically kills
-  random agents (letting supervisors restart them), and checks declared
-  safety invariants against live state. Reports a timeline of events with
-  pass/fail outcome and seed for reproducibility.
+  Starts real OTP processes via a proxy-aware supervisor, injects faults
+  (kill, partition, delay), and checks declared safety invariants against
+  live state. Reports a timeline of events with pass/fail outcome and a
+  reproducible seed.
 
-  Phase 1 scope: kill injection + invariant checking. No message
-  interception, no workload generation, no chaos-block syntax.
+  Phase 2 adds message interception via `Vor.Simulator.MessageProxy` —
+  proxy processes between connected agents that can delay, drop, or
+  partition messages.
   """
 
-  alias Vor.Simulator.{InvariantChecker, Timeline}
+  alias Vor.Simulator.{InvariantChecker, MessageProxy, SupervisorBuilder, Timeline, Workload}
 
   @doc """
   Compile, load, and simulate a `.vor` file containing a system block.
@@ -27,14 +28,15 @@ defmodule Vor.Simulator do
 
   @doc """
   Run the simulation against an already-compiled system.
+  Config keys in `config` override chaos-block values from the file.
+  Missing keys fall back to the file's chaos config, then to defaults.
   """
   def run_system(system_info, config) do
+    config = merge_chaos_config(config, system_info[:chaos])
     :rand.seed(:exsss, {config.seed, config.seed + 1, config.seed + 2})
-    # Trap exits so a supervisor crash during kill injection doesn't take
-    # down the simulator process.
     Process.flag(:trap_exit, true)
 
-    case start_system(system_info) do
+    case SupervisorBuilder.start_link(system_info) do
       {:ok, sup_pid} ->
         Process.sleep(500)
 
@@ -81,14 +83,26 @@ defmodule Vor.Simulator do
         invariant_loop(pid_agent, system_info, config, timeline, deadline)
       end)
 
+    workload_rate = Map.get(config, :workload_rate, 0)
+
+    workload_task =
+      if workload_rate > 0 do
+        Task.async(fn ->
+          Workload.run(pid_agent, system_info, config, timeline, deadline)
+        end)
+      end
+
     Process.sleep(config.duration_ms)
 
     if injector, do: Task.shutdown(injector, :brutal_kill)
     Task.shutdown(checker, 5000)
+    if workload_task, do: Task.shutdown(workload_task, :brutal_kill)
+
     Agent.stop(pid_agent)
 
     events = Timeline.get(timeline)
     Agent.stop(timeline)
+
     stats = compute_stats(events)
 
     case find_violation(events) do
@@ -102,29 +116,109 @@ defmodule Vor.Simulator do
   # -------------------------------------------------------------------
 
   defp fault_loop(pid_agent, system_info, config, timeline, sup_pid, deadline) do
-    {kill_min, kill_max} = config.kill_interval
-    interval = kill_min + :rand.uniform(max(kill_max - kill_min, 1))
+    fault_interval = Map.get(config, :fault_interval, config.kill_interval)
+    {f_min, f_max} = fault_interval
+    interval = f_min + :rand.uniform(max(f_max - f_min, 1))
     Process.sleep(interval)
 
     if System.monotonic_time(:millisecond) < deadline do
-      pids = Agent.get(pid_agent, & &1)
+      fault_type = choose_fault_type(config)
 
-      if map_size(pids) > 0 do
-        {name, pid} = Enum.random(pids)
-        Timeline.record(timeline, :kill, %{agent: name, pid: pid})
+      case fault_type do
+        :kill ->
+          inject_kill(pid_agent, system_info, timeline, sup_pid)
 
-        if is_pid(pid) and Process.alive?(pid) do
-          Process.exit(pid, :kill)
-        end
+        :partition ->
+          inject_partition(pid_agent, config, timeline)
 
-        Process.sleep(300)
-
-        new_pids = discover_agents(system_info)
-        Agent.update(pid_agent, fn _ -> new_pids end)
-        Timeline.record(timeline, :restart, %{agent: name})
+        :delay ->
+          inject_delay(pid_agent, config, timeline)
       end
 
       fault_loop(pid_agent, system_info, config, timeline, sup_pid, deadline)
+    end
+  end
+
+  defp choose_fault_type(config) do
+    types = [:kill]
+    types = if Map.get(config, :enable_partitions, false), do: types ++ [:partition], else: types
+    types = if Map.get(config, :enable_delays, false), do: types ++ [:delay], else: types
+    Enum.random(types)
+  end
+
+  defp inject_kill(pid_agent, system_info, timeline, _sup_pid) do
+    pids = Agent.get(pid_agent, & &1)
+
+    if map_size(pids) > 0 do
+      {name, pid} = Enum.random(pids)
+      Timeline.record(timeline, :kill, %{agent: name, pid: pid})
+
+      if is_pid(pid) and Process.alive?(pid), do: Process.exit(pid, :kill)
+
+      Process.sleep(300)
+
+      new_pids = discover_agents(system_info)
+      Agent.update(pid_agent, fn _ -> new_pids end)
+      Timeline.record(timeline, :restart, %{agent: name})
+    end
+  end
+
+  defp inject_partition(pid_agent, config, timeline) do
+    pids = Agent.get(pid_agent, & &1)
+    agents = Map.keys(pids)
+
+    if length(agents) > 1 do
+      isolated = Enum.random(agents)
+      Timeline.record(timeline, :partition_start, %{isolated: isolated})
+
+      proxy_pid = pids[isolated]
+
+      try do
+        MessageProxy.set_policy(proxy_pid, %{policy: :partition})
+      catch
+        :exit, _ -> :ok
+      end
+
+      {dur_min, dur_max} = Map.get(config, :partition_duration, {1000, 5000})
+      duration = dur_min + :rand.uniform(max(dur_max - dur_min, 1))
+      Process.sleep(duration)
+
+      try do
+        MessageProxy.set_policy(proxy_pid, %{policy: :forward})
+      catch
+        :exit, _ -> :ok
+      end
+
+      Timeline.record(timeline, :partition_end, %{isolated: isolated, duration_ms: duration})
+    end
+  end
+
+  defp inject_delay(pid_agent, config, timeline) do
+    pids = Agent.get(pid_agent, & &1)
+
+    if map_size(pids) > 0 do
+      {name, proxy_pid} = Enum.random(pids)
+      delay_range = Map.get(config, :delay_range, 50..200)
+
+      Timeline.record(timeline, :delay_start, %{agent: name, range_ms: delay_range})
+
+      try do
+        MessageProxy.set_policy(proxy_pid, %{policy: :delay, delay_range: delay_range})
+      catch
+        :exit, _ -> :ok
+      end
+
+      {dur_min, dur_max} = Map.get(config, :delay_duration, {2000, 5000})
+      duration = dur_min + :rand.uniform(max(dur_max - dur_min, 1))
+      Process.sleep(duration)
+
+      try do
+        MessageProxy.set_policy(proxy_pid, %{policy: :forward})
+      catch
+        :exit, _ -> :ok
+      end
+
+      Timeline.record(timeline, :delay_end, %{agent: name})
     end
   end
 
@@ -137,7 +231,11 @@ defmodule Vor.Simulator do
 
     if System.monotonic_time(:millisecond) < deadline do
       pids = Agent.get(pid_agent, & &1)
-      result = InvariantChecker.check(pids, system_info.agent_info, system_info.invariants)
+
+      # Get real agent PIDs through the proxies
+      real_pids = get_real_pids(pids)
+
+      result = InvariantChecker.check(real_pids, system_info.agent_info, system_info.invariants)
 
       case result do
         :ok ->
@@ -157,17 +255,22 @@ defmodule Vor.Simulator do
     end
   end
 
+  defp get_real_pids(proxy_pids) do
+    Enum.into(proxy_pids, %{}, fn {name, proxy_pid} ->
+      real =
+        try do
+          MessageProxy.get_real_pid(proxy_pid)
+        catch
+          :exit, _ -> proxy_pid
+        end
+
+      {name, real}
+    end)
+  end
+
   # -------------------------------------------------------------------
   # System startup and discovery
   # -------------------------------------------------------------------
-
-  defp start_system(%{start_link: start_fn}) do
-    try do
-      start_fn.()
-    catch
-      kind, reason -> {:error, {kind, reason}}
-    end
-  end
 
   defp discover_agents(%{agent_names: names, registry: registry}) do
     Enum.reduce(names, %{}, fn name, acc ->
@@ -184,10 +287,22 @@ defmodule Vor.Simulator do
 
   defp compute_stats(events) do
     %{
-      faults_injected: Enum.count(events, fn {_, type, _} -> type == :kill end),
-      invariant_checks: Enum.count(events, fn {_, type, _} -> type in [:check_ok, :violation] end),
+      faults_injected:
+        Enum.count(events, fn {_, type, _} -> type in [:kill, :partition_start, :delay_start] end),
+      invariant_checks:
+        Enum.count(events, fn {_, type, _} -> type in [:check_ok, :violation] end),
       violations: Enum.count(events, fn {_, type, _} -> type == :violation end),
-      restarts: Enum.count(events, fn {_, type, _} -> type == :restart end)
+      restarts: Enum.count(events, fn {_, type, _} -> type == :restart end),
+      partitions: Enum.count(events, fn {_, type, _} -> type == :partition_start end),
+      delays: Enum.count(events, fn {_, type, _} -> type == :delay_start end),
+      workload_sent:
+        Enum.count(events, fn {_, type, _} -> type in [:workload_ok, :workload_error, :workload_timeout] end),
+      workload_ok:
+        Enum.count(events, fn {_, type, _} -> type == :workload_ok end),
+      workload_errors:
+        Enum.count(events, fn {_, type, _} -> type == :workload_error end),
+      workload_timeouts:
+        Enum.count(events, fn {_, type, _} -> type == :workload_timeout end)
     }
   end
 
@@ -206,36 +321,151 @@ defmodule Vor.Simulator do
   def compile_for_simulation(source) do
     case Vor.Compiler.compile_system_and_load(source) do
       {:ok, result} ->
-        agent_info =
-          Enum.into(result.system_ir.agents, %{}, fn instance ->
+        agents =
+          Enum.map(result.system_ir.agents, fn instance ->
             case Map.get(result.agents, instance.type_name) do
               %{ir: ir} ->
-                enum_field =
+                %{
+                  name: instance.name,
+                  module: ir.module,
+                  behaviour: ir.behaviour,
+                  params: instance.params
+                }
+
+              _ ->
+                %{
+                  name: instance.name,
+                  module: Module.concat([Vor, Agent, instance.type_name]),
+                  behaviour: :gen_server,
+                  params: instance.params
+                }
+            end
+          end)
+
+        agent_info =
+          Enum.into(agents, %{}, fn agent ->
+            enum_field =
+              case Map.get(result.agents, agent_type_for(result.system_ir, agent.name)) do
+                %{ir: ir} ->
                   case ir.state_fields do
                     [%{name: name} | _] -> name
                     _ -> nil
                   end
 
-                {instance.name,
-                 %{module: ir.module, enum_field: enum_field, behaviour: ir.behaviour}}
+                _ ->
+                  nil
+              end
+
+            {agent.name, %{module: agent.module, enum_field: enum_field, behaviour: agent.behaviour}}
+          end)
+
+        accepts_by_name =
+          Enum.into(result.system_ir.agents, %{}, fn instance ->
+            case Map.get(result.agents, instance.type_name) do
+              %{ir: ir} when not is_nil(ir.protocol) ->
+                accepts =
+                  Enum.map(ir.protocol.accepts || [], fn msg_type ->
+                    %{
+                      tag: msg_type.tag,
+                      fields: msg_type.fields
+                    }
+                  end)
+
+                {instance.name, accepts}
 
               _ ->
-                {instance.name, %{module: nil, enum_field: nil, behaviour: :gen_server}}
+                {instance.name, []}
             end
           end)
 
         {:ok,
          %{
-           system_module: result.system.module,
            registry: result.system.registry,
-           start_link: result.system.start_link,
-           agent_names: Enum.map(result.system_ir.agents, & &1.name),
+           agents: agents,
+           agent_names: Enum.map(agents, & &1.name),
            agent_info: agent_info,
-           invariants: result.system_ir.invariants
+           accepts_by_name: accepts_by_name,
+           connections: result.system_ir.connections,
+           invariants: result.system_ir.invariants,
+           chaos: result.system_ir.chaos
          }}
 
       {:error, _} = err ->
         err
     end
   end
+
+  defp agent_type_for(system_ir, instance_name) do
+    case Enum.find(system_ir.agents, fn a -> a.name == instance_name end) do
+      nil -> nil
+      inst -> inst.type_name
+    end
+  end
+
+  # -------------------------------------------------------------------
+  # Merge chaos-block file config with CLI-provided config.
+  # CLI keys take precedence; missing keys fall back to the file's chaos
+  # block, then to sensible defaults.
+  # -------------------------------------------------------------------
+
+  defp merge_chaos_config(cli, nil), do: apply_defaults(cli)
+  defp merge_chaos_config(cli, %Vor.IR.ChaosConfig{} = file), do: merge_chaos_config(cli, Map.from_struct(file))
+  defp merge_chaos_config(cli, file) when is_map(file) do
+    defaults = %{
+      duration_ms: file[:duration_ms] || 30_000,
+      seed: file[:seed] || :rand.uniform(1_000_000),
+      kill_interval: chaos_kill_interval(file[:kill]),
+      fault_interval: chaos_kill_interval(file[:kill]),
+      check_interval_ms: chaos_check_interval(file[:check]),
+      inject_faults: true,
+      enable_partitions: file[:partition] != nil,
+      enable_delays: file[:delay] != nil,
+      partition_duration: chaos_partition_duration(file[:partition]),
+      delay_range: chaos_delay_range(file[:delay]),
+      workload_rate: chaos_workload_rate(file[:workload]),
+      verbose: false
+    }
+
+    # CLI values override file defaults
+    Map.merge(defaults, cli)
+  end
+
+  defp apply_defaults(config) do
+    defaults = %{
+      duration_ms: 30_000,
+      seed: :rand.uniform(1_000_000),
+      kill_interval: {3000, 10000},
+      fault_interval: {3000, 10000},
+      check_interval_ms: 1000,
+      inject_faults: true,
+      enable_partitions: false,
+      enable_delays: false,
+      partition_duration: {1000, 5000},
+      delay_range: 50..200,
+      workload_rate: 0,
+      verbose: false
+    }
+
+    Map.merge(defaults, config)
+  end
+
+  defp chaos_kill_interval(nil), do: {3000, 10000}
+  defp chaos_kill_interval(%{every: {min, max}}), do: {min, max}
+  defp chaos_kill_interval(_), do: {3000, 10000}
+
+  defp chaos_check_interval(nil), do: 1000
+  defp chaos_check_interval(%{every: ms}), do: ms
+  defp chaos_check_interval(_), do: 1000
+
+  defp chaos_partition_duration(nil), do: {1000, 5000}
+  defp chaos_partition_duration(%{duration: {min, max}}), do: {min, max}
+  defp chaos_partition_duration(_), do: {1000, 5000}
+
+  defp chaos_delay_range(nil), do: 50..200
+  defp chaos_delay_range(%{by: {min, max}}), do: min..max
+  defp chaos_delay_range(_), do: 50..200
+
+  defp chaos_workload_rate(nil), do: 0
+  defp chaos_workload_rate(%{rate: r}), do: r
+  defp chaos_workload_rate(_), do: 0
 end

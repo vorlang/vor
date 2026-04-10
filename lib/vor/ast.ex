@@ -144,7 +144,7 @@ defmodule Vor.AST do
   end
 
   defmodule System do
-    defstruct [:name, :agents, :connections, :meta, invariants: []]
+    defstruct [:name, :agents, :connections, :meta, invariants: [], chaos: nil]
   end
 
   defmodule AgentInstance do
@@ -153,6 +153,18 @@ defmodule Vor.AST do
 
   defmodule Connect do
     defstruct [:from, :to, :meta]
+  end
+
+  defmodule ChaosConfig do
+    defstruct duration_ms: 30_000,
+              seed: nil,
+              kill: nil,
+              partition: nil,
+              delay: nil,
+              drop: nil,
+              workload: nil,
+              check: nil,
+              meta: nil
   end
 
   # System-level safety invariant. Phase 1 supports the restricted form:

@@ -40,7 +40,16 @@ defmodule Mix.Tasks.Vor.Simulate do
           kill_max: :integer,
           check_interval: :integer,
           verbose: :boolean,
-          faults: :boolean
+          faults: :boolean,
+          partition: :boolean,
+          delay: :boolean,
+          delay_min: :integer,
+          delay_max: :integer,
+          partition_dur_min: :integer,
+          partition_dur_max: :integer,
+          fault_interval_min: :integer,
+          fault_interval_max: :integer,
+          workload: :integer
         ]
       )
 
@@ -70,16 +79,34 @@ defmodule Mix.Tasks.Vor.Simulate do
           duration_ms: duration_ms,
           seed: seed,
           kill_interval: {kill_min, kill_max},
+          fault_interval: {
+            Keyword.get(opts, :fault_interval_min, kill_min),
+            Keyword.get(opts, :fault_interval_max, kill_max)
+          },
           check_interval_ms: check_interval,
           verbose: verbose,
-          inject_faults: inject_faults
+          inject_faults: inject_faults,
+          enable_partitions: Keyword.get(opts, :partition, false),
+          enable_delays: Keyword.get(opts, :delay, false),
+          delay_range: Keyword.get(opts, :delay_min, 50)..Keyword.get(opts, :delay_max, 200),
+          partition_duration: {
+            Keyword.get(opts, :partition_dur_min, 1000),
+            Keyword.get(opts, :partition_dur_max, 5000)
+          },
+          workload_rate: Keyword.get(opts, :workload, 0)
         }
 
         case Vor.Simulator.run_file(file, config) do
           {:ok, :pass, stats} ->
+            workload_info =
+              if Map.get(stats, :workload_sent, 0) > 0,
+                do:
+                  ", workload: #{stats.workload_sent} sent/#{stats.workload_ok} ok/#{stats.workload_errors} err/#{stats.workload_timeouts} timeout",
+                else: ""
+
             Mix.shell().info(
               "  ✓ PASS — #{stats.invariant_checks} checks, " <>
-                "#{stats.faults_injected} faults, 0 violations"
+                "#{stats.faults_injected} faults, 0 violations#{workload_info}"
             )
 
           {:error, :violation, name, details, stats} ->

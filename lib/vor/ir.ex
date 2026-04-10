@@ -121,7 +121,18 @@ defmodule Vor.IR do
   end
 
   defmodule SystemIR do
-    defstruct [:name, :registry, :agents, :connections, invariants: []]
+    defstruct [:name, :registry, :agents, :connections, invariants: [], chaos: nil]
+  end
+
+  defmodule ChaosConfig do
+    defstruct duration_ms: 30_000,
+              seed: nil,
+              kill: nil,
+              partition: nil,
+              delay: nil,
+              drop: nil,
+              workload: nil,
+              check: nil
   end
 
   # System-level safety invariant (Phase 1: count(agents where ...) only).
