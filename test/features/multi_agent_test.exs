@@ -668,6 +668,28 @@ defmodule Vor.Features.MultiAgentTest do
   # Native Raft majority check (no extern false positive)
   # ----------------------------------------------------------------------
 
+  # ----------------------------------------------------------------------
+  # Zero-extern Raft
+  # ----------------------------------------------------------------------
+
+  test "raft has no extern declarations" do
+    raft_source = File.read!("examples/raft.vor")
+    cluster_source = File.read!("examples/raft_cluster.vor")
+
+    refute String.contains?(raft_source, "extern do")
+    refute String.contains?(cluster_source, "extern do")
+    refute String.contains?(raft_source, "RaftHelpers")
+    refute String.contains?(cluster_source, "RaftHelpers")
+  end
+
+  test "no examples use Elixir externs" do
+    for file <- Path.wildcard("examples/*.vor") do
+      source = File.read!(file)
+      refute String.contains?(source, "extern do"),
+        "#{file} still has Elixir externs"
+    end
+  end
+
   test "raft majority check uses native arithmetic, not an extern" do
     raft_source = File.read!("examples/raft.vor")
     cluster_source = File.read!("examples/raft_cluster.vor")

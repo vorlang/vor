@@ -1,13 +1,10 @@
 defmodule Vor.Examples.RateLimiterTest do
   use ExUnit.Case
 
-  alias Vor.Examples.RateStore
-
   setup do
-    RateStore.reset()
     source = File.read!("examples/rate_limiter.vor")
     {:ok, result} = Vor.Compiler.compile_and_load(source)
-    {:ok, pid} = GenServer.start_link(result.module, [max_requests: 3, window_ms: 60_000])
+    {:ok, pid} = GenServer.start_link(result.module, [max_requests: 3])
     %{pid: pid, module: result.module}
   end
 
@@ -27,7 +24,7 @@ defmodule Vor.Examples.RateLimiterTest do
     GenServer.call(pid, {:request, %{client: "alice", payload: "req2"}})
     GenServer.call(pid, {:request, %{client: "alice", payload: "req3"}})
     result = GenServer.call(pid, {:request, %{client: "alice", payload: "req4"}})
-    assert {:rejected, %{client: "alice", retry_after: 60_000}} = result
+    assert {:rejected, %{client: "alice"}} = result
   end
 
   test "different clients have independent limits", %{pid: pid} do
@@ -40,16 +37,15 @@ defmodule Vor.Examples.RateLimiterTest do
   end
 
   test "parameterized with different limits" do
-    RateStore.reset()
     source = File.read!("examples/rate_limiter.vor")
     {:ok, result} = Vor.Compiler.compile_and_load(source)
-    {:ok, pid} = GenServer.start_link(result.module, [max_requests: 1, window_ms: 60_000])
+    {:ok, pid} = GenServer.start_link(result.module, [max_requests: 1])
 
     result1 = GenServer.call(pid, {:request, %{client: "alice", payload: "req1"}})
     assert {:ok, %{payload: "req1", remaining: 0}} = result1
 
     result2 = GenServer.call(pid, {:request, %{client: "alice", payload: "req2"}})
-    assert {:rejected, %{client: "alice", retry_after: 60_000}} = result2
+    assert {:rejected, %{client: "alice"}} = result2
 
     GenServer.stop(pid)
   end

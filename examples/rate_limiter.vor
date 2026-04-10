@@ -1,33 +1,26 @@
-agent RateLimiter(max_requests: integer, window_ms: integer) do
+agent RateLimiter(max_requests: integer) do
 
-  extern do
-    Vor.Examples.RateStore.increment(client: binary, window_ms: integer) :: integer
-    Vor.Examples.RateStore.count(client: binary, window_ms: integer) :: integer
-  end
+  %% Zero externs — per-client counts tracked in a native map.
+  %% This is a total-count rate limiter (no windowed reset).
 
-  relation rate_limit(client: client_id, max_requests: integer) do
-    fact(client: :default, max_requests: max_requests)
-  end
+  state counts: map
 
   protocol do
     accepts {:request, client: binary, payload: term}
     emits {:ok, payload: term, remaining: integer}
-    emits {:rejected, client: binary, retry_after: integer}
+    emits {:rejected, client: binary}
   end
 
   on {:request, client: C, payload: P} do
-    current = Vor.Examples.RateStore.increment(client: C, window_ms: window_ms)
-    if current <= max_requests do
-      emit {:ok, payload: P, remaining: max_requests - current}
+    current = map_get(counts, C, 0)
+    new_count = current + 1
+    transition counts: map_put(counts, C, new_count)
+    if new_count <= max_requests do
+      remaining = max_requests - new_count
+      emit {:ok, payload: P, remaining: remaining}
     else
-      emit {:rejected, client: C, retry_after: window_ms}
+      emit {:rejected, client: C}
     end
-  end
-
-  invariant "rate limit respected" monitored do
-    forall C, Max
-      where rate_limit(client: C, max_requests: Max)
-      -> Vor.Examples.RateStore.count(client: C, window_ms: window_ms) <= Max
   end
 
 end
