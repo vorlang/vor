@@ -1,237 +1,197 @@
-# Vor Compiler — Developer Guide
+# Vor Developer Guide
 
-This document describes the current state of the Vor compiler. It is an internal reference for anyone working on the compiler, including AI coding agents. Update this document as features are added.
-
-Last updated after: Multi-agent model checking (Phases 1-3), state abstraction, symmetry reduction, quantified invariants, 349+ tests
+Internal compiler reference for contributors and the coding agent.
 
 ## Architecture
 
-Pipeline: `.vor` source → Lexer → Parser → AST → IR (Lowering) → Analysis/Verification → Erlang codegen → BEAM binary
-
-Key files:
-- `lib/vor/lexer.ex` — NimbleParsec tokenizer
-- `lib/vor/parser.ex` — Recursive descent parser
-- `lib/vor/lowering.ex` — AST → IR transformation
-- `lib/vor/codegen/erlang.ex` — IR → Erlang abstract format
-- `lib/vor/compiler.ex` — Pipeline orchestrator
-- `lib/vor/analysis/completeness.ex` — Emit path analysis and handler coverage
-- `lib/vor/analysis/protocol_checker.ex` — Protocol conformance validation
-- `lib/vor/graph.ex` — State graph extraction
-- `lib/vor/verification/safety.ex` — Safety invariant verification
-- `lib/vor/gleam/interface.ex` — Gleam package-interface.json parser
-- `lib/vor/gleam/validator.ex` — Gleam type boundary validation
-- `lib/vor/type_env.ex` — Type environment for handler body type tracking
-- `lib/vor/explorer.ex` — Multi-agent product state exploration (entry point + BFS)
-- `lib/vor/explorer/product_state.ex` — Product state representation, abstraction, saturation
-- `lib/vor/explorer/simulator.ex` — IR handler action interpreter
-- `lib/vor/explorer/successor.ex` — Successor state computation
-- `lib/vor/explorer/invariant.ex` — System-level invariant evaluation (count, exists, for_all, named refs)
-- `lib/vor/explorer/relevance.ex` — Field relevance analysis for state abstraction
-- `lib/vor/explorer/symmetry.ex` — Symmetry detection and canonical fingerprinting
-- `lib/mix/tasks/vor.check.ex` — Mix task for multi-agent model checking
-
-## Agent compilation targets
-
-- Agent with no `state` declaration → gen_server
-- Agent with non-enum state fields only (`state count: integer`) → gen_server with state map
-- Agent with `state phase: :a | :b | :c` (enum union) → gen_statem
-- First enum-typed state field → gen_statem State atom
-- Additional state fields → entries in the Data/State map with type defaults (integer→0, atom→nil, map→%{}, list→[], binary→<<>>)
-- Parameters and state fields share the same map for both gen_server and gen_statem
-
-## Named agent registration
-
-Agents accept an optional `name` in the args keyword list. If present, passed to `GenServer.start_link/3` or `:gen_statem.start_link/4`. If absent, starts anonymously. System blocks handle naming automatically via the Registry.
-
-## Init handlers
-
-`on :init do ... end` runs once during agent startup, before accepting messages. Supports extern calls, variable bindings, transitions, if/else, map/list operations, parameter references. Does NOT support emit, send, broadcast (compile error). Only one per agent. Extern failures caught — state fields keep defaults. Runs after parameter extraction, before `every` timers start.
-
-## What works in handler bodies
-
-### Expressions
-- Arithmetic: +, -, *, / with any operand order (var OP var, var OP int, int OP var)
-- Variable binding from extern calls, arithmetic, pattern matching
-- Parameter and data field references in emits and extern args
-- Min/max: `min(a, b)`, `max(a, b)`
-- Atom literals in all expression positions
-- Noop: explicit no-operation statement
-
-### Map operations
-- `map_get(map, key, default)`, `map_put(map, key, value)`, `map_has(map, key)`, `map_delete(map, key)`, `map_size(map)`, `map_sum(map)`, `map_merge(map1, map2, strategy)`
-- Merge strategies: `:max`, `:min`, `:sum`, `:replace`, `:lww`
-- All operations work on state fields AND local variables
-
-### List operations
-- `list_head(list)`, `list_tail(list)`, `list_append(list, value)`, `list_prepend(list, value)`, `list_length(list)`, `list_empty(list)`
-- All handle empty lists safely
-
-### Conditionals
-- If/else with operators: `<=`, `>=`, `==`, `!=`, `>`, `<` and boolean `and`/`or`
-- Nested if/else, full statement set inside bodies
-- Variables scoped to their branch, all extern types work inside if blocks
-
-### Guards
-- Gen_statem: `==`, `in`, `>`, `<`, `>=`, `<=`, `and`/`or`
-- Gen_server: equality guards only (`when field == :atom`)
-
-### State management
-- Enum state fields → gen_statem State atom
-- Data fields → Data map with type defaults
-- Multiple transitions collapsed into single state change
-- Sequential compilation: each statement sees results of all previous statements
-
-### Periodic timers
-- `every interval_ms do ... end` — periodic execution with send_after
-- Interval from literal or parameter; timers start after `on :init` completes
-
-## Internal type tracking
-
-The compiler propagates types through handler body expressions:
-- **Error** (blocks compilation): guaranteed crashes — `store + 1` where store is map
-- **Warning** (compiles): likely problems — assigning map to integer field
-- **No diagnostic**: operations on `term`
-- Type sources: state declarations, parameters, built-in operation results, Gleam extern return types
-- Message pattern variables always `term`; `:: term` opts out of type tracking
-
-## What works in invariants
-
-### Safety (proven, single-agent)
-- `never(phase == :state and emitted({:msg, _}))` — verified by graph walk
-- `never(transition from: :a, to: :b)` — verified by graph walk
-- Resilience handlers included in graph and verified
-- Proven invariants cannot depend on extern results
-
-### Liveness (monitored)
-- `always(phase != :idle implies eventually(phase == :done))` — runtime via gen_statem state timeouts
-- Requires matching resilience handler; timeout from agent parameters
-
-### System-level safety (proven, multi-agent via `mix vor.check`)
-- `never(count(agents where FIELD OP VALUE) COMP N)`
-- `never(exists A, B where CONDITION)` — two distinct agents
-- `never(exists A where CONDITION)` — single agent
-- `for_all agents, CONDITION` — universal
-- Named agent references: `n1.role == :leader`
-- Cross-agent comparisons: `A.current_term != B.current_term`
-- Boolean composition with `and`/`or` in conditions
-
-## Extern declarations
-
-### Three types
-- **Elixir:** `extern do MyModule.func(arg: type) :: type end` → `'Elixir.MyModule':func(Arg)`
-- **Erlang:** `extern do Erlang.mod.func(arg: type) :: type end` → `mod:func(Arg)`
-- **Gleam:** `extern gleam do mod/sub.func(arg: type) :: type end` → `'mod@sub':func(Arg)`
-
-### Keyword parameter names
-Vor keywords accepted as parameter names in extern declarations.
-
-### Extern trust boundary
-- All extern calls wrapped in try/catch
-- Proven invariants cannot depend on extern results (path-precise taint tracking, compile error)
-- Resolution: remove extern dependency, change to `monitored`, or restructure handler
-
-### Gleam type boundary validation
-- Reads `package-interface.json` when available
-- Validates arity, parameter types, return types
-- Type mapping: Int→integer, String→binary, Bool→atom, List→list, Dict→map, custom→term
-- `:: term` opts out; validation optional (no JSON = no check)
-
-## Multi-agent model checking
-
-### Execution
-```bash
-mix compile              # parses system invariants, does NOT explore
-mix vor.check            # BFS exploration of product state space
-mix vor.check --depth 30 --max-states 200000 --integer-bound 5 --max-queue 15
-mix vor.check --no-symmetry
+```
+.vor source → Lexer (NimbleParsec) → Parser → AST → IR (Lowering)
+    → Analysis/Verification → Erlang codegen → BEAM binary
 ```
 
-### How it works
-1. Compute relevant fields (transitive closure from invariant through guards/conditionals)
-2. Abstract irrelevant fields to `:abstracted` (treated as `:unknown` during simulation)
-3. Saturate tracked integers at configured bound
-4. Construct initial product state (all agents in initial states)
-5. BFS explore successors: pending message delivery + protocol-driven external events + timeouts
-6. Dedup via fingerprint (abstracted, sorted messages; canonical under symmetry)
-7. Check all system invariants at each reachable state
-8. Report: proven / bounded / violation with counterexample trace
+Three verification levels:
+```
+mix compile        → single-agent safety proofs (ms)
+mix vor.check      → multi-agent model checking (seconds)
+mix vor.simulate   → chaos testing on real BEAM processes (minutes)
+```
 
-### State abstraction
-- Relevance analysis: invariant fields → guard-influencing fields → transitive closure
-- Parameters identified as constants (excluded from state dimensions)
-- Abstracted fields read as `:unknown` during simulation (conservative, both branches explored)
+## Compilation pipeline
 
-### Integer saturation
-- Tracked integer fields capped at configurable bound (default 3)
-- Prevents unbounded state space from numeric fields
-- Standard bounded model checking technique
+### Lexer (`lib/vor/lexer.ex`)
+NimbleParsec-based tokenizer. Handles keywords (`agent`, `state`, `protocol`, `on`, `emit`, `transition`, `safety`, `liveness`, `resilience`, `chaos`, `system`, `extern`, `invariant`, `where`, `sensitive`), operators, atoms, integers, strings, identifiers.
 
-### Queue bounding
-- Pending message queue capped at configurable bound (default 10)
-- Messages beyond the cap are dropped (models bounded network buffer)
+### Parser (`lib/vor/parser.ex`)
+Recursive descent. Produces AST nodes for agents, state declarations, protocol blocks, handlers, invariants, system blocks, chaos blocks, and extern declarations.
 
-### Symmetry reduction
-- Auto-detected for homogeneous fully-connected systems
-- Canonical fingerprint sorts agent states, strips sender/receiver identity from messages
-- Disabled for heterogeneous systems or invariants with named agent references
-- Raft: 1,001 states with symmetry vs 8,008 without (8× reduction)
+Key recent additions:
+- `where` clauses on `accepts` declarations (protocol constraints)
+- `sensitive` keyword after state type annotations
+- `chaos do ... end` blocks in system blocks
 
-### Simulator
-- Interprets IR.Handler.actions directly (no separate transition table)
-- `:unknown` propagated through arithmetic, comparisons, value refs
-- Conditionals on `:unknown` fan out into both branches
-- `:abstracted` fields treated same as `:unknown`
-- State-change-only exploration: skip no-op successors
+### AST (`lib/vor/ast.ex`)
+Structs for every syntactic construct. Key types:
+- `Agent` — top-level agent with params, states, protocol, handlers, invariants, externs
+- `StateDecl` — name, type, enum values (if any), sensitive flag
+- `Protocol` — accepts (with optional constraint), emits, sends
+- `Handler` — message pattern, guard, body (transitions, emits, sends, if/else, extern calls)
+- `Safety` / `Liveness` — invariant declarations with guarantee tier
+- `System` — agent instances, connections, system-level invariants, chaos config
+- `ChaosConfig` — duration, seed, kill/partition/delay/drop/workload/check settings
 
-### Counterexample traces
-Show each step: action taken, resulting agent states, pending messages. Developer can walk the trace to understand the exact message interleaving that caused the violation.
+### IR (`lib/vor/ir.ex`)
+Lowered representation consumed by both the verifier and codegen. Key difference from AST: handler bodies are action trees (transitions, conditionals, sends, emits) rather than raw syntax.
 
-## Multi-agent systems
+### Analysis
+- **Safety verifier** — exhaustive state graph traversal for `proven` invariants
+- **Handler completeness** — every `accepts` message has at least one handler
+- **Protocol composition** — `sends` tags match `accepts` tags in connected agents
+- **Internal type tracking** — type propagation through handler bodies
+- **Extern proven boundary** — rejects proven invariants that depend on extern results
 
-### Protocol declarations
-- `accepts` — incoming messages; `emits` — synchronous replies; `sends` — async forwards via Registry
+### Codegen (`lib/vor/codegen/erlang.ex`)
+Produces Erlang abstract format, compiled via `:compile.forms/2`. Two agent types:
+- gen_statem: agents with enum state fields
+- gen_server: agents without enum state fields
 
-### System blocks, protocol composition, send codegen, broadcast
-Same as before. Broadcast to all outbound connections, async, graceful missing-peer handling.
+Key codegen features:
+- `__vor_transition__/4` wrapper function — handles state updates with telemetry and sensitive field redaction
+- Telemetry calls generated at handler entry (received), state changes (transition), replies (emitted), and constraint violations
+- Protocol constraint checks generated as early-return guards before handler body
+- `__vor_agent_name__` stored in data map for telemetry metadata
 
-## Handler completeness, catch-all generation, pattern matching depth
-Mandatory else for call handlers with emit. Handler coverage for all `accepts`. Catch-all generation for guarded handlers. One-level-deep pattern matching only.
+## Module map
 
-## Bidirectional relations
-Fact-based (multi-directional lookup) and equation-based (automatic inversion, linear arithmetic only).
+### Core pipeline
+- `lib/vor/lexer.ex` — tokenizer
+- `lib/vor/parser.ex` — recursive descent parser
+- `lib/vor/ast.ex` — AST node structs
+- `lib/vor/ir.ex` — IR node structs
+- `lib/vor/lowering.ex` — AST → IR transformation
+- `lib/vor/compiler.ex` — orchestrates the pipeline
+- `lib/vor/codegen/erlang.ex` — IR → Erlang abstract format
 
-## Resilience blocks
-Declare recovery for liveness violations. Generated as regular handler clauses, included in state graph, verified by safety checker.
+### Verification
+- `lib/vor/verifier.ex` — single-agent safety verification
+- `lib/vor/graph.ex` — state graph extraction and Mermaid output
+- `lib/vor/type_tracker.ex` — internal type propagation
 
-## TLA+ specifications
-`VorSafetyVerifier.tla` and `VorGraphExtraction.tla` in `tla/` directory. Review when modifying the corresponding Elixir modules.
+### Multi-agent model checking
+- `lib/vor/explorer.ex` — product state BFS exploration
+- `lib/vor/explorer/product_state.ex` — combined agent state representation
+- `lib/vor/explorer/simulator.ex` — IR interpretation for handler simulation
+- `lib/vor/explorer/successor.ex` — successor state generation
+- `lib/vor/explorer/invariant.ex` — system-level invariant evaluation
+- `lib/vor/explorer/relevance.ex` — cone-of-influence field analysis
+- `lib/vor/explorer/symmetry.ex` — symmetry detection and canonicalization
 
-## Working examples
+### Chaos simulation
+- `lib/vor/simulator.ex` — orchestrator: starts system, runs fault/invariant/workload loops
+- `lib/vor/simulator/message_proxy.ex` — GenServer wrapping agents for message interception
+- `lib/vor/simulator/supervisor_builder.ex` — builds proxy-aware supervisor tree
+- `lib/vor/simulator/invariant_checker.ex` — queries live state, evaluates invariants
+- `lib/vor/simulator/timeline.ex` — timestamped event log
+- `lib/vor/simulator/workload.ex` — protocol-driven message generation
+- `lib/mix/tasks/vor.simulate.ex` — mix task with CLI flags
 
-- `lock.vor` — distributed lock, proven safety, liveness timeout
-- `circuit_breaker.vor` — three-state, proven safety, liveness recovery
-- `gcounter.vor` + `gcounter_cluster.vor` — G-Counter CRDT, zero externs
-- `rate_limiter.vor` — parameterized, ETS externs
-- `raft.vor` + `raft_cluster.vor` — three-node Raft, native majority check, "at most one leader" proven in 1,001 states via `mix vor.check`
-- Test-only CRDTs: PN-Counter, version-based OR-Set (zero externs)
+### Mix tasks
+- `lib/mix/tasks/vor.compile.ex` — compile .vor files
+- `lib/mix/tasks/vor.check.ex` — multi-agent model checking
+- `lib/mix/tasks/vor.simulate.ex` — chaos simulation
+- `lib/mix/tasks/vor.graph.ex` — state graph extraction
 
-## Known limitations
+## State field types
 
-1. No list/map iteration — use extern calls
-2. No string operations — use extern calls
-3. No explicit default values for data fields
-4. No pattern matching on extern return values beyond comparison
-5. No `match`/`case` expressions — only if/else
-6. No nested pattern matching in handler patterns
-7. No guard coverage analysis
-8. No nested builtin calls — bind intermediate variables
-9. Multi-agent model checking is bounded — state abstraction and symmetry help but large systems may exceed bounds
-10. System-level liveness not yet supported — safety only in the product graph (Phase 4)
+| Type | Default value | gen_statem | gen_server |
+|---|---|---|---|
+| Enum (`:a \| :b \| :c`) | First declared value | State atom | Data map field |
+| `integer` | 0 | Data map | Data map |
+| `atom` | `:nil` | Data map | Data map |
+| `map` | `%{}` | Data map | Data map |
+| `list` | `[]` | Data map | Data map |
+| `binary` | `""` | Data map | Data map |
+| `term` | `nil` | Data map | Data map |
 
-## Known design debt
+## Telemetry events
 
-### Atom interning
-`String.to_atom/1` on source identifiers. Must address before long-lived service or untrusted input.
+Generated automatically in codegen when `config :vor, telemetry: true` (default).
 
-### Warning visibility
-Some analysis warnings computed but not surfaced. Worth a sweep for production use.
+| Event | When | Metadata |
+|---|---|---|
+| `[:vor, :agent, :start]` | init callback | agent, type, initial_state |
+| `[:vor, :message, :received]` | handler entry | agent, message_tag, state |
+| `[:vor, :transition]` | state field change | agent, field, from, to |
+| `[:vor, :message, :emitted]` | emit/reply | agent, message_tag |
+| `[:vor, :constraint, :violated]` | protocol constraint failure | agent, message_tag, constraint |
+
+Sensitive fields: transitions emit `from: :redacted, to: :redacted` for fields declared with `sensitive`.
+
+Disable with `config :vor, telemetry: false` — codegen skips all telemetry calls.
+
+## Protocol constraints
+
+```vor
+accepts {:transfer, amount: integer} where amount > 0 and amount < 100000
+```
+
+Codegen generates a constraint check as the first expression in the handler. If the constraint fails:
+- Returns `{:error, {:constraint_violated, tag, description}}`
+- Emits `[:vor, :constraint, :violated]` telemetry
+- Handler body never executes
+
+Constraint expressions use the same grammar as handler guards: comparisons (`>`, `<`, `>=`, `<=`, `==`, `!=`), boolean operators (`and`, `or`), field references, integer and atom literals, cross-field comparisons.
+
+## Sensitive fields
+
+```vor
+state token: binary sensitive
+```
+
+The `sensitive` flag flows through AST → IR → codegen. The codegen builds a set of sensitive field names on each module. The `__vor_transition__/4` wrapper checks this set and redacts values in telemetry metadata.
+
+## Chaos simulation architecture
+
+```
+mix vor.simulate
+  ├── SupervisorBuilder (proxy-aware supervisor tree)
+  │     ├── Registry
+  │     ├── MessageProxy :n1 → real Agent :n1
+  │     ├── MessageProxy :n2 → real Agent :n2
+  │     └── MessageProxy :n3 → real Agent :n3
+  ├── Fault injector (parallel task)
+  │     └── kill / partition / delay at random intervals
+  ├── Workload generator (parallel task)
+  │     └── sends accepts-matching messages at configured rate
+  └── Invariant checker (parallel task)
+        └── queries :sys.get_state via proxy, evaluates invariants
+```
+
+Proxy processes register under agent names in the Registry. Real agents start inside proxies without registration. Other agents send to proxies unknowingly. Fault policies (:forward, :partition, :delay, :drop) applied per-proxy.
+
+## Model checker architecture
+
+Product state = all agent states + pending messages. BFS exploration from initial state.
+
+State space reduction:
+- **Cone-of-influence** — only track fields transitively relevant to the invariant
+- **Integer saturation** — bound tracked integers (default 3)
+- **Queue bounding** — bound pending message queue (default 10)
+- **Symmetry** — canonicalize agent ordering for homogeneous systems
+
+Handler simulation interprets IR action trees directly (same IR as codegen). Extern results are `:unknown` — conditionals on `:unknown` fork both branches (conservative over-approximation).
+
+## Test organization
+
+- `test/features/` — feature-level tests (telemetry, simulation, constraints, model checking)
+- `test/examples/` — example-specific tests (lock, circuit breaker, raft, gcounter, rate limiter)
+- `test/unit/` — unit tests for individual modules (lexer, parser, codegen)
+- `test/property/` — property-based tests (9 suites)
+
+## Two-language stack
+
+- **Vor** — coordination: state machines, protocols, invariants, verification, chaos, telemetry
+- **Gleam** — data processing: type-safe functions called through `extern gleam do ... end`
+
+Gleam extern type signatures are validated against `package-interface.json` at compile time. Extern results are opaque to the model checker (`:unknown`). Proven invariants cannot depend on extern results.
+
+All five shipped examples are fully native Vor — zero externs.

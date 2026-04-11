@@ -1,73 +1,151 @@
-# Vor — Paradigm Comparison
+# Vor — What it eliminates
 
-## Two approaches to building software
+## The typical distributed systems stack
 
-The "Mainstream" column describes the dominant paradigm (Java, Python, TypeScript, Go). Erlang and Elixir already solve many of these problems — immutable data, process isolation, message passing, supervision. Vor builds on the same BEAM runtime and adds a verification layer that OTP doesn't provide.
+Building a reliable distributed system in Java, Go, or Python requires assembling dozens of tools across multiple concerns: verification, testing, deployment, communication, observability, and resilience. Each tool has its own configuration language, its own failure modes, and its own drift vector.
 
-|  | **Mainstream** (Imperative/OOP) | **Vor** (Declarative, BEAM-native) |
+Vor + BEAM replaces most of this with language-level features and runtime primitives.
+
+## Side-by-side
+
+### Verification and correctness
+
+| Concern | Typical stack | Vor + BEAM |
 |---|---|---|
-| **Primary artifact** | Source code (functions, classes, modules) | Behavioral specification (.vor file). No separate implementation |
-| **State model** | Mutable variables, objects, shared memory | Relational knowledge (timeless) + process state (temporal), explicitly separated |
-| **Correctness** | Tests, mostly after the fact | Three levels: proven (compile-time), model-checked (multi-agent exploration), monitored (runtime recovery) |
-| **Spec vs. impl gap** | Large. Design docs drift immediately | Zero. The spec compiles directly to BEAM bytecode. Model checker runs on the same code |
-| **Multi-agent verification** | Ad-hoc testing, Jepsen if you're lucky | Product state exploration via `mix vor.check`. All message interleavings checked. Raft proven in 1,001 states |
-| **Failure handling** | Try/catch, error codes | Declared resilience policies. Recovery handlers verified against safety invariants |
-| **Escape hatches** | N/A | Gleam externs with type-validated boundary. Proven invariants cannot depend on extern results |
-| **Maturity** | Decades of tooling | 351+ tests, embedded model checker, all five examples fully native. Active development |
+| Design verification | TLA+ (separate spec, drifts) | `mix vor.check` (same source file) |
+| Chaos testing | Chaos Monkey, Litmus, Toxiproxy | `mix vor.simulate` (built-in) |
+| Contract testing | Pact, TestContainers | Protocol composition (compile-time) |
+| Input validation | Joi, Zod, Bean Validation | Protocol `where` constraints |
+| Static analysis | SpotBugs, PMD, linters | Formal verification + restricted language |
+| Unit tests | JUnit, pytest | ExUnit + property tests (still needed) |
+| Load testing | Gatling, k6 | Still needed |
 
-### What about Erlang and Elixir?
+### Deployment
 
-Erlang and Elixir already occupy a different position from the mainstream column above. They have immutable data, lightweight processes, message passing, "let it crash" supervision, and hot code reloading. If you're already on the BEAM, you've solved the concurrency and fault tolerance problems that plague mainstream languages.
-
-What Erlang and Elixir don't have is verification of the things that go wrong even on the BEAM: state machines with missing handlers or illegal transitions, stuck processes that never terminate, protocol mismatches between GenServers, and distributed coordination bugs where message ordering produces impossible states.
-
-Vor doesn't replace OTP — it compiles to OTP. A Vor agent is a gen_server or gen_statem at runtime. Vor adds the layer above: the state machine is declared and verified, the protocol is checked, the invariants are enforced, and multi-agent systems are model-checked.
-
-### How Vor differs from verification tools
-
-**The two-artifact problem.** The standard approach — verify in TLA+ [1], implement in a production language — introduces drift. Specifications and implementations diverge. Experience at Amazon [3] and Microsoft [4] reports that specifications frequently become stale.
-
-**Stateright showed another way.** Stateright [5] embeds a model checker in a Rust actor library. Vor takes this further: the model checker is in the compiler, sharing an IR with the code generator. The checker and the codegen read the same intermediate representation — there is no separate trait to implement, no alternate code path that can diverge.
-
-**Erla+** [6] translates PlusCal into TLA+ and executable Erlang, addressing drift by generating both from one source. Erla+ starts from a specification language; Vor's source is a programming language that is also a checkable specification.
-
-The tradeoff is real: TLA+'s model checker handles richer temporal properties and larger state spaces. But Vor checks properties against the actual executable code, not a separate model.
-
-### How Vor works with Gleam
-
-Vor is designed as a two-language stack with Gleam:
-
-- **Vor** handles the coordination layer — state machines, protocols, invariants, model checking. All five examples are fully native.
-- **Gleam** handles complex data processing when needed — type-safe transformations called through Vor's validated `extern gleam` boundary.
-
-They don't compete. Vor verifies coordination (state transitions, message interleavings, protocol compatibility). Gleam verifies data processing (types, patterns, error handling). The boundary between them is type-checked at compile time.
-
-| Concern | Vor catches | Gleam catches |
+| Concern | Typical stack | Vor + BEAM |
 |---|---|---|
-| Illegal state transitions | Yes — compile time | No |
-| Missing message handlers | Yes — compile time | No |
-| Protocol mismatches | Yes — compile time | No |
-| Distributed coordination bugs | Yes — model checking | No |
-| Stuck processes | Yes — runtime monitoring | No |
-| Type errors in data processing | Yes — internal type tracking | Yes — compile time |
-| Null crashes | No | Yes |
-| CRDT merge correctness | Yes — verified merge operations | No |
-| Cross-language boundary | Yes — Gleam interface validation | N/A |
+| Packaging | Docker images | `mix release` (self-contained binary) |
+| Orchestration | Kubernetes | OTP supervision + libcluster |
+| Config management | Helm charts | Mix config (no K8s = no Helm) |
+| Container registry | ECR, DockerHub | Not needed (no containers) |
+| Service mesh | Istio, Linkerd | Not needed (BEAM message passing) |
+| Service discovery | Consul, K8s DNS | libcluster (DNS, multicast, cloud API) |
+| Rolling updates | K8s rolling deploy | BEAM hot code reload |
+| Infrastructure provisioning | Terraform | Still needed |
+| Reverse proxy | nginx, ALB | Still needed for external HTTP |
+| Auto-scaling | K8s HPA | Gap — no open-source BEAM-native solution |
 
-### The AI question
+### Communication
 
-Vor's declarative structure means AI-generated code gets the same compiler checks as human-written code. Invariants must hold, protocols must match, handlers must cover all messages, and the model checker explores the same interleavings regardless of who wrote the code. All five examples were developed with AI assistance. The compiler caught real bugs in AI-generated code during development.
+| Concern | Typical stack | Vor + BEAM |
+|---|---|---|
+| API definition | OpenAPI, gRPC proto | Protocol declarations (compiler-checked) |
+| Serialization | JSON, Protobuf | Not needed (native BEAM terms) |
+| Message queue | Kafka, RabbitMQ | Not needed (BEAM mailboxes) |
+| Load balancing | nginx, ALB, service mesh | Not needed for inter-agent (direct messaging) |
+| HTTP framework | Spring, Express, gRPC | Still needed for external API |
 
-### The honest risks
+### Observability
 
-**Expressiveness limits.** Vor's expression language is simpler than Erlang, Elixir, or Gleam. All five examples are expressible natively, but more complex data operations require Gleam externs. The boundary between "what Vor handles" and "what Gleam handles" requires judgment.
+| Concern | Typical stack | Vor + BEAM |
+|---|---|---|
+| Instrumentation code | OpenTelemetry SDK, manual spans | Compiler-generated (zero code) |
+| Telemetry events | Manual `telemetry.execute` calls | Auto-generated for all transitions, messages, constraints |
+| Sensitive data handling | Manual redaction, log scrubbing | `sensitive` field annotation (compiler-enforced) |
+| Metrics backend | Prometheus, Grafana | Still needed (Vor generates events, you view them) |
+| Log aggregation | ELK, Loki | Still needed at scale |
 
-**State space explosion.** Multi-agent model checking uses cone-of-influence abstraction and symmetry reduction, but large systems may exceed tractable bounds. Vor reports this honestly.
+### Concurrency and fault tolerance
 
-**The extern trust boundary.** Proven invariants cannot depend on extern results. The more logic behind externs, the less the model checker can see. The goal is to keep protocol logic in Vor.
+| Concern | Typical stack | Vor + BEAM |
+|---|---|---|
+| Thread management | ExecutorService, goroutines | BEAM processes (preemptive, isolated) |
+| Synchronization | Locks, semaphores, mutexes | Not needed (no shared state) |
+| Circuit breakers | Resilience4j, Hystrix | Vor agent (verified state machine) |
+| Retry logic | Spring Retry, custom | Handler logic or supervisor restart |
+| Health checks | Actuator, custom endpoints | Liveness invariants (future: generated endpoints) |
+| Process restart | Kubernetes pod restart | OTP supervisor (millisecond restart) |
 
-**Adoption.** Vor's audience is small. VorDB is the first real consumer.
+## The count
+
+**Eliminated by Vor + BEAM: 19 tools/concerns**
+
+1. Separate design specification
+2. External design verification tooling
+3. External chaos testing infrastructure
+4. External contract tests
+5. Docker containers
+6. Kubernetes orchestration
+7. Container registry
+8. Service mesh
+9. Inter-service load balancers
+10. External message queue
+11. Inter-service serialization
+12. Build tool complexity (Maven/Gradle)
+13. Manual concurrency primitives
+14. Telemetry instrumentation code
+15. External input validation framework
+16. External static analysis
+17. Rolling deploy infrastructure
+18. Secrets-in-logs prevention tooling
+19. Helm charts
+
+**Still needed: 8 concerns**
+
+1. Infrastructure provisioning (Terraform or equivalent)
+2. Reverse proxy for external HTTP (nginx/Caddy)
+3. Telemetry backend (Prometheus/Grafana)
+4. CI/CD pipeline (GitHub Actions or equivalent)
+5. Load testing tools
+6. Secrets management
+7. Log aggregation at scale
+8. Deployment orchestration for auto-scaling (the big gap)
+
+The 19 eliminated are application-level concerns. The 8 remaining are infrastructure-level. Vor eliminates the application complexity. The infrastructure layer is where the gap is.
+
+## Compared to other BEAM languages
+
+Erlang and Elixir already eliminate many items from the typical stack — process isolation, supervision, distribution, message passing are all BEAM features. What they don't have:
+
+| Concern | Erlang/Elixir | Vor |
+|---|---|---|
+| State machine verification | Manual testing | Proven at compile time |
+| Protocol compatibility | Runtime errors | Checked at compile time |
+| Multi-agent model checking | Not available | `mix vor.check` |
+| Chaos simulation | Not built in | `mix vor.simulate` |
+| Auto-generated telemetry | Manual instrumentation | Compiler-generated |
+| Input constraints | Manual guards | Protocol `where` clauses |
+| Sensitive data handling | Manual | `sensitive` annotation |
+| Invariant-based recovery | Manual | Declared resilience handlers |
+
+Vor doesn't replace OTP — it compiles to OTP. It adds the verification, observability, and testing layers that OTP doesn't provide.
+
+## Compared to verification tools
+
+| | TLA+ / TLC | Stateright | Vor |
+|---|---|---|---|
+| Artifact model | Separate spec | Library trait | Compiler IR (same artifact) |
+| Execution | Spec only | Rust binary | BEAM binary |
+| Drift risk | Spec drifts from impl | Trait can diverge from handler | Impossible (shared IR) |
+| Observability | None | None | Auto-generated telemetry |
+| Chaos testing | None | None | Built-in `mix vor.simulate` |
+| Input constraints | Not applicable | Manual | Protocol `where` clauses |
+| State space | Large (mature) | Large (Rust speed) | Bounded (small protocols) |
+
+TLA+ and Stateright are stronger model checkers. Vor's advantage is that verification, observability, and chaos testing come from the same source file that produces the production binary.
+
+## The honest risks
+
+**Expressiveness limits.** Vor's expression language is simpler than Erlang, Elixir, or Gleam. All five examples are expressible natively, but complex data operations require Gleam externs.
+
+**Bounded verification.** The model checker uses integer saturation and queue bounds. Large systems may exceed tractable bounds.
+
+**Single-node chaos.** `mix vor.simulate` runs on one BEAM node with proxied partitions. Not the same as real multi-node network failures.
+
+**Deployment gap.** No open-source BEAM-native auto-scaling exists. You use Fly.io (proprietary), tolerate Kubernetes (fights the BEAM), or manage VMs manually.
+
+**Small ecosystem.** VorDB is the first real consumer. The language is unproven at scale.
 
 ---
 
-*vorlang.org  ·  Targets: BEAM/OTP  ·  License: MIT  ·  Status: 351+ tests, all examples native, Raft proven in 1,001 states*
+*vorlang.org  ·  BEAM/OTP  ·  MIT License  ·  394+ tests*

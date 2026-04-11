@@ -648,12 +648,267 @@ At runtime, every Vor agent is a standard OTP process. The BEAM doesn't know or 
 
 ---
 
+## Step 9: Protocol input constraints
+
+Once your agent has a protocol, you can add constraints to validate input before handlers run:
+
+```vor
+agent BankTransfer do
+  state balance: integer
+
+  protocol do
+    accepts {:deposit, amount: integer} where amount > 0
+    accepts {:withdraw, amount: integer} where amount > 0 and amount <= 10000
+    emits {:ok, balance: integer}
+    emits {:error, reason: atom}
+  end
+
+  on {:deposit, amount: A} do
+    transition balance: balance + A
+    emit {:ok, balance: balance}
+  end
+
+  on {:withdraw, amount: A} do
+    if A <= balance do
+      transition balance: balance - A
+      emit {:ok, balance: balance}
+    else
+      emit {:error, reason: :insufficient_funds}
+    end
+  end
+end
+```
+
+The `where` clause uses the same operators as handler guards: `>`, `<`, `>=`, `<=`, `==`, `!=`, `and`, `or`. Constraints are checked before any handler runs. Invalid messages get an error reply:
+
+```elixir
+GenServer.call(pid, {:deposit, %{amount: -100}})
+# => {:error, {:constraint_violated, :deposit, "amount > 0"}}
+
+GenServer.call(pid, {:withdraw, %{amount: 50000}})
+# => {:error, {:constraint_violated, :withdraw, "amount > 0 and amount <= 10000"}}
+```
+
+You can also compare fields against each other:
+
+```vor
+accepts {:set_range, min: integer, max: integer} where min >= 0 and max > min
+```
+
+---
+
+## Step 10: Sensitive fields
+
+Mark fields that contain secrets. They're redacted in telemetry:
+
+```vor
+agent AuthService do
+  state session_token: binary sensitive
+  state user_id: atom
+  state login_count: integer
+
+  protocol do
+    accepts {:login, token: binary}
+    emits {:ok, user: atom}
+  end
+
+  on {:login, token: T} do
+    transition session_token: T
+    transition login_count: login_count + 1
+    emit {:ok, user: user_id}
+  end
+end
+```
+
+When a transition happens on `session_token`, the telemetry event shows:
+```elixir
+%{agent: :auth, field: :session_token, from: :redacted, to: :redacted}
+```
+
+But `login_count` shows actual values:
+```elixir
+%{agent: :auth, field: :login_count, from: 0, to: 1}
+```
+
+---
+
+## Step 11: Auto-generated telemetry
+
+Every compiled Vor agent emits telemetry automatically. You don't write any instrumentation — the compiler generates it.
+
+To see it in action, attach a handler in IEx:
+
+```elixir
+# Attach a simple console logger
+:telemetry.attach_many("console", [
+  [:vor, :agent, :start],
+  [:vor, :message, :received],
+  [:vor, :transition],
+  [:vor, :message, :emitted],
+  [:vor, :constraint, :violated]
+], fn event, measurements, metadata, _ ->
+  IO.puts("[#{inspect(event)}] #{inspect(metadata)}")
+end, nil)
+
+# Now start and use an agent
+{:ok, r} = Vor.compile_and_load(File.read!("examples/lock.vor"))
+{:ok, pid} = :gen_statem.start_link(r.module, [lock_timeout_ms: 5000], [])
+:gen_statem.call(pid, {:acquire, %{client: :alice}})
+```
+
+You'll see:
+```
+[[:vor, :agent, :start]] %{agent: Vor.Agent.LockManager, type: :gen_statem, initial_state: :free}
+[[:vor, :message, :received]] %{agent: Vor.Agent.LockManager, message_tag: :acquire, state: :free}
+[[:vor, :transition]] %{agent: Vor.Agent.LockManager, field: :phase, from: :free, to: :held}
+[[:vor, :message, :emitted]] %{agent: Vor.Agent.LockManager, message_tag: :grant}
+```
+
+For production, connect to Prometheus via `telemetry_metrics`:
+
+```elixir
+# In your application supervisor
+Telemetry.Metrics.counter("vor.message.received.count", tags: [:agent, :message_tag]),
+Telemetry.Metrics.counter("vor.transition.count", tags: [:agent, :field, :to]),
+Telemetry.Metrics.counter("vor.constraint.violated.count", tags: [:agent, :message_tag])
+```
+
+Disable telemetry for performance-critical deployments:
+
+```elixir
+config :vor, telemetry: false
+```
+
+---
+
+## Step 12: Chaos simulation
+
+Once you have a system block, chaos-test it:
+
+```bash
+# Basic — just kill agents and check invariants
+mix vor.simulate
+
+# Full chaos — kills, partitions, delays, and client workload
+mix vor.simulate --partition --delay --workload 10 --duration 30000
+
+# Replay a specific run
+mix vor.simulate --seed 42
+```
+
+Example output:
+
+```
+Simulating examples/raft_cluster.vor...
+  Seed: 847291 (replay with --seed 847291)
+  Duration: 30s
+  ✓ PASS
+    Faults:    8 (3 kills, 3 partitions, 2 delays)
+    Invariant: 30 checks, 0 violations
+    Workload:  287 sent, 251 ok, 12 timeouts, 24 errors
+```
+
+Key CLI flags:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--duration N` | 30000 | Simulation duration in milliseconds |
+| `--seed N` | random | Random seed for reproducibility |
+| `--partition` | off | Enable network partition injection |
+| `--delay` | off | Enable message delay injection |
+| `--workload N` | 0 | Client messages per second |
+| `--no-faults` | off | Run workload only, no fault injection |
+
+---
+
+## Step 13: Putting it all together
+
+A complete agent with all features:
+
+```vor
+agent OrderService(max_amount: integer) do
+  state phase: :idle | :processing | :completed
+  state order_id: atom
+  state payment_token: binary sensitive
+  state total: integer
+
+  protocol do
+    accepts {:place_order, id: atom, amount: integer, token: binary}
+      where amount > 0 and amount <= max_amount
+    accepts {:complete, id: atom}
+    emits {:accepted, id: atom}
+    emits {:done, id: atom}
+    emits {:error, reason: atom}
+  end
+
+  on {:place_order, id: I, amount: A, token: T} when phase == :idle do
+    transition phase: :processing
+    transition order_id: I
+    transition payment_token: T
+    transition total: A
+    emit {:accepted, id: I}
+  end
+
+  on {:complete, id: I} when phase == :processing do
+    transition phase: :completed
+    emit {:done, id: I}
+  end
+
+  safety "no processing without order" proven do
+    never(phase == :processing and order_id == :nil)
+  end
+
+  liveness "orders complete eventually" monitored(within: 30000) do
+    always(phase == :processing implies eventually(phase != :processing))
+  end
+
+  resilience do
+    on_invariant_violation("orders complete eventually") ->
+      transition phase: :idle
+      transition order_id: :nil
+  end
+end
+```
+
+This agent has:
+- Compile-time proven safety invariant
+- Runtime liveness monitoring with auto-recovery
+- Protocol constraint on order amount
+- Sensitive payment token (redacted in telemetry)
+- Auto-generated telemetry for every transition and message
+- Compiles to a standard gen_statem
+
+---
+
+## Quick reference
+
+| Construct | Purpose | Step |
+|---|---|---|
+| `agent Name do ... end` | Define a process | 1 |
+| `protocol` / `accepts` / `emits` | Message interface | 2 |
+| `state field: type` | Mutable state fields | 3 |
+| `transition field: expr` | State updates | 3 |
+| `on {:tag, fields} do` | Message handlers | 2 |
+| `if/else` | Conditional logic | 4 |
+| `state` (enum) | State machine with verified transitions | 5 |
+| `safety` / `proven` | Compile-time verified invariants | 5 |
+| `liveness` / `monitored` | Runtime invariant monitoring | 6 |
+| `resilience` | Failure recovery declarations | 6 |
+| `extern` | Calling Elixir/Erlang/Gleam functions | 7 |
+| `system` / `send` / `broadcast` | Multi-agent communication | 8 |
+| `where` (on accepts) | Protocol input constraints | 9 |
+| `sensitive` | Redact field values in telemetry | 10 |
+| `chaos do ... end` | Declarative chaos simulation config | 12 |
+
+---
+
 ## Next steps
 
-- Read `examples/rate_limiter.vor` — the full rate limiter with ETS backing
+- Read `examples/lock.vor` — distributed lock with proven safety and liveness monitoring
 - Read `examples/circuit_breaker.vor` — a verified state machine with safety invariants
-- Read `examples/raft.vor` — Raft consensus protocol with multi-agent communication
+- Read `examples/raft.vor` — Raft consensus (zero externs, fully native Vor)
 - Run `mix vor.graph examples/circuit_breaker.vor` to see the state machine visualization
-- Run `mix test` to see all 164+ tests pass
-- Read the [manifesto](https://vorlang.org) for the design philosophy
+- Run `mix vor.check` to model-check multi-agent systems
+- Run `mix vor.simulate` to chaos-test under real BEAM conditions
+- Visit [vorlang.org](https://vorlang.org) for the project overview
 - Read `docs/developer-guide.md` for the full language reference
