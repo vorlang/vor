@@ -71,11 +71,11 @@ defmodule Vor.Lowering do
     # First state decl with a | union of atoms becomes the state field
     # All others become data fields
     {state_fields, data_fields} =
-      Enum.reduce(decls, {[], []}, fn %AST.StateDecl{field: field, type_union: types}, {sf, df} ->
+      Enum.reduce(decls, {[], []}, fn %AST.StateDecl{field: field, type_union: types, sensitive: sensitive}, {sf, df} ->
         cond do
           # Already have a state field, or this is a type reference (not enum)
           sf != [] ->
-            {sf, [make_data_field(field, types) | df]}
+            {sf, [make_data_field(field, types, sensitive) | df]}
 
           is_enum_type?(types) ->
             state = %IR.StateField{
@@ -86,7 +86,7 @@ defmodule Vor.Lowering do
             {[state], df}
 
           true ->
-            {sf, [make_data_field(field, types) | df]}
+            {sf, [make_data_field(field, types, sensitive) | df]}
         end
       end)
 
@@ -101,7 +101,7 @@ defmodule Vor.Lowering do
     end)
   end
 
-  defp make_data_field(field, types) do
+  defp make_data_field(field, types, sensitive \\ false) do
     {type, default} = case types do
       [{:type, t}] ->
         d = case to_atom(t) do
@@ -117,7 +117,7 @@ defmodule Vor.Lowering do
       _ ->
         {:atom, nil}
     end
-    %IR.DataField{name: to_atom(field), type: type, default: default}
+    %IR.DataField{name: to_atom(field), type: type, default: default, sensitive: sensitive == true}
   end
 
   defp extract_protocol(body) do

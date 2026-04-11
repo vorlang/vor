@@ -8,6 +8,8 @@ defmodule Vor.Codegen.Erlang do
 
   def generate(%IR.Agent{behaviour: :gen_server} = agent) do
     l = 1
+    sensitive_fields = sensitive_field_set(agent)
+
     forms = List.flatten([
       {:attribute, l, :file, {~c"#{agent.name}.vor", l}},
       {:attribute, l, :module, agent.module},
@@ -20,7 +22,8 @@ defmodule Vor.Codegen.Erlang do
       gen_init_server(agent, l),
       gen_handle_call(agent, l),
       gen_handle_cast(agent, l),
-      gen_handle_info(agent, l)
+      gen_handle_info(agent, l),
+      gen_vor_transition(sensitive_fields, l)
     ])
 
     {:ok, forms}
@@ -28,6 +31,8 @@ defmodule Vor.Codegen.Erlang do
 
   def generate(%IR.Agent{behaviour: :gen_statem} = agent) do
     l = 1
+    sensitive_fields = sensitive_field_set(agent)
+
     forms = List.flatten([
       {:attribute, l, :file, {~c"#{agent.name}.vor", l}},
       {:attribute, l, :module, agent.module},
@@ -39,10 +44,76 @@ defmodule Vor.Codegen.Erlang do
       gen_start_link_statem(agent, l),
       gen_callback_mode(l),
       gen_init_statem(agent, l),
-      gen_handle_event(agent, l)
+      gen_handle_event(agent, l),
+      gen_vor_transition(sensitive_fields, l)
     ])
 
     {:ok, forms}
+  end
+
+  defp sensitive_field_set(%IR.Agent{data_fields: data_fields}) do
+    (data_fields || [])
+    |> Enum.filter(& &1.sensitive)
+    |> Enum.map(& &1.name)
+    |> MapSet.new()
+  end
+
+  # Generate __vor_transition__/4: wraps maps:put with telemetry + sensitivity
+  defp gen_vor_transition(sensitive_fields, l) do
+    if Tel.enabled?() do
+      sensitive_list = list_to_erl(Enum.map(sensitive_fields, &{:atom, l, &1}), l)
+
+      [
+        {:function, l, :__vor_transition__, 4, [
+          {:clause, l,
+           [{:var, l, :Field}, {:var, l, :NewValue}, {:var, l, :VorTrData}, {:var, l, :VorTrAgent}],
+           [],
+           [
+             # OldValue = maps:get(Field, Data, undefined)
+             {:match, l, {:var, l, :VorTrOld},
+              {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+               [{:var, l, :Field}, {:var, l, :VorTrData}, {:atom, l, :undefined}]}},
+             # NewData = maps:put(Field, NewValue, Data)
+             {:match, l, {:var, l, :VorTrNewData},
+              {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :put}},
+               [{:var, l, :Field}, {:var, l, :NewValue}, {:var, l, :VorTrData}]}},
+             # Telemetry with sensitivity check
+             {:case, l,
+              {:call, l, {:remote, l, {:atom, l, :lists}, {:atom, l, :member}},
+               [{:var, l, :Field}, sensitive_list]},
+              [
+                {:clause, l, [{:atom, l, true}], [],
+                 Tel.call([:vor, :transition], [
+                   {:agent, {:var, l, :VorTrAgent}},
+                   {:field, {:var, l, :Field}},
+                   {:from, {:atom, l, :redacted}},
+                   {:to, {:atom, l, :redacted}}
+                 ], l)},
+                {:clause, l, [{:atom, l, false}], [],
+                 Tel.call([:vor, :transition], [
+                   {:agent, {:var, l, :VorTrAgent}},
+                   {:field, {:var, l, :Field}},
+                   {:from, {:var, l, :VorTrOld}},
+                   {:to, {:var, l, :NewValue}}
+                 ], l)}
+              ]},
+             # Return NewData
+             {:var, l, :VorTrNewData}
+           ]}
+        ]}
+      ]
+    else
+      # No telemetry: simple maps:put wrapper
+      [
+        {:function, l, :__vor_transition__, 4, [
+          {:clause, l,
+           [{:var, l, :Field}, {:var, l, :NewValue}, {:var, l, :VorTrData}, {:var, l, :_VorTrAgent}],
+           [],
+           [{:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :put}},
+             [{:var, l, :Field}, {:var, l, :NewValue}, {:var, l, :VorTrData}]}]}
+        ]}
+      ]
+    end
   end
 
   # ---- gen_server codegen ----
@@ -158,9 +229,7 @@ defmodule Vor.Codegen.Erlang do
             %IR.Action{type: :transition, data: %IR.TransitionAction{field: field, value: value}} ->
               new_sv = :"VorCast#{length(exprs)}"
               update = {:match, l, {:var, l, new_sv},
-                {:map, l, {:var, l, sv}, [
-                  {:map_field_exact, l, {:atom, l, field}, transition_value_to_erl(value, l, sv)}
-                ]}}
+                gen_transition_call(field, transition_value_to_erl(value, l, sv), sv, l)}
               {exprs ++ [update], new_sv}
             _ ->
               {exprs ++ action_to_erl(action, l, sv), sv}
@@ -203,9 +272,7 @@ defmodule Vor.Codegen.Erlang do
           %IR.Action{type: :transition, data: %IR.TransitionAction{field: field, value: value}} ->
             new_sv = :"VorTimer#{length(exprs)}"
             update = {:match, l, {:var, l, new_sv},
-              {:map, l, {:var, l, sv}, [
-                {:map_field_exact, l, {:atom, l, field}, transition_value_to_erl(value, l, sv)}
-              ]}}
+              gen_transition_call(field, transition_value_to_erl(value, l, sv), sv, l)}
             {exprs ++ [update], new_sv}
           _ ->
             {exprs ++ action_to_erl(action, l, sv), sv}
@@ -246,9 +313,7 @@ defmodule Vor.Codegen.Erlang do
         %IR.Action{type: :transition, data: %IR.TransitionAction{field: field, value: value}} ->
           new_sv = :"VorGS#{length(exprs)}"
           update = {:match, l, {:var, l, new_sv},
-            {:map, l, {:var, l, sv}, [
-              {:map_field_exact, l, {:atom, l, field}, transition_value_to_erl(value, l, sv)}
-            ]}}
+            gen_transition_call(field, transition_value_to_erl(value, l, sv), sv, l)}
           {exprs ++ [update], new_sv}
         _ ->
           {exprs ++ action_to_erl(action, l, sv), sv}
@@ -258,22 +323,26 @@ defmodule Vor.Codegen.Erlang do
     state_var = current_var
     emit_map_var = current_var
 
-    terminal_expr = case terminal do
+    {emit_tel, terminal_expr} = case terminal do
       %IR.Action{type: :emit, data: emit} ->
         reply_form = emit_to_erl(emit, l, emit_map_var)
-        {:tuple, l, [{:atom, l, :reply}, reply_form, {:var, l, state_var}]}
+        tel = Tel.call([:vor, :message, :emitted], [
+          {:agent, Tel.agent_name_expr(state_var, l)},
+          {:message_tag, {:atom, l, tag_atom(emit.tag)}}
+        ], l)
+        {tel, {:tuple, l, [{:atom, l, :reply}, reply_form, {:var, l, state_var}]}}
 
       %IR.Action{type: :conditional, data: %IR.ConditionalAction{} = cond_action} ->
-        compile_conditional_genserver(cond_action, l, emit_map_var, state_var)
+        {[], compile_conditional_genserver(cond_action, l, emit_map_var, state_var)}
 
       %IR.Action{type: :solve, data: %IR.SolveAction{} = solve} ->
-        compile_solve_genserver(solve, l, emit_map_var, state_var)
+        {[], compile_solve_genserver(solve, l, emit_map_var, state_var)}
 
       nil ->
-        {:tuple, l, [{:atom, l, :reply}, {:atom, l, :ok}, {:var, l, state_var}]}
+        {[], {:tuple, l, [{:atom, l, :reply}, {:atom, l, :ok}, {:var, l, state_var}]}}
     end
 
-    pre_exprs ++ [terminal_expr]
+    pre_exprs ++ emit_tel ++ [terminal_expr]
   end
 
   # Generate state map updates for gen_server transitions
@@ -553,10 +622,21 @@ defmodule Vor.Codegen.Erlang do
       |> Enum.map(fn handler ->
         pattern_form = pattern_to_erl(handler.pattern, l)
         guard_erl = statem_guard_to_erl(handler.guard, l)
+        msg_tag = tag_atom(handler.pattern.tag)
+
+        # Received telemetry (prepended to body)
+        received_tel = Tel.call([:vor, :message, :received], [
+          {:agent, Tel.agent_name_expr(:Data, l)},
+          {:message_tag, {:atom, l, msg_tag}},
+          {:state, {:var, l, :State}}
+        ], l)
 
         # Build cast and call handler bodies using the new data-threading codegen
         cast_body = compile_statem_handler_body(
           handler.actions, l, :Data, 0, state_field_name, monitors, nil)
+
+        # Post-process: wrap return with enum transition + emit telemetry
+        cast_body = wrap_statem_body_telemetry(received_tel ++ cast_body, handler, state_field_name, l)
 
         cast_clause = {:clause, l,
           [{:atom, l, :cast}, pattern_form, {:var, l, :State}, {:var, l, :Data}],
@@ -565,6 +645,8 @@ defmodule Vor.Codegen.Erlang do
 
         call_body = compile_statem_handler_body(
           handler.actions, l, :Data, 0, state_field_name, monitors, {:call, :From})
+
+        call_body = wrap_statem_body_telemetry(received_tel ++ call_body, handler, state_field_name, l)
 
         call_clause = {:clause, l,
           [{:tuple, l, [{:atom, l, :call}, {:var, l, :From}]},
@@ -1613,4 +1695,91 @@ defmodule Vor.Codegen.Erlang do
 
   defp tag_atom(tag) when is_atom(tag), do: tag
   defp tag_atom(tag) when is_binary(tag), do: String.to_atom(tag)
+
+  # Post-process a gen_statem handler body to insert telemetry before the
+  # return expression. Looks for the last expression (the return tuple) and
+  # prepends enum transition + emit telemetry calls.
+  defp wrap_statem_body_telemetry(body, handler, state_field_name, l) do
+    if not Tel.enabled?() or body == [] do
+      body
+    else
+      {pre, [ret]} = Enum.split(body, -1)
+      telemetry = statem_return_telemetry(ret, handler, state_field_name, l)
+
+      case telemetry do
+        [] -> body
+        calls -> pre ++ calls ++ [ret]
+      end
+    end
+  end
+
+  # Extract telemetry calls from the return tuple shape.
+  # {next_state, NewState, Data, Actions} → enum transition + maybe emit
+  # {keep_state, Data, Actions} → maybe emit (no state change)
+  # case/if expressions → recurse into each branch
+  defp statem_return_telemetry(
+         {:tuple, _, [{:atom, _, :next_state}, {:atom, _, to_state} | _]} = _ret,
+         handler, state_field_name, l
+       ) do
+    guard_state = extract_guard_state(handler.guard)
+    enum_tel = Tel.call([:vor, :transition], [
+      {:agent, Tel.agent_name_expr(:Data, l)},
+      {:field, {:atom, l, state_field_name}},
+      {:from, {:atom, l, guard_state || :unknown}},
+      {:to, {:atom, l, to_state}}
+    ], l)
+
+    emit_tel = extract_emit_tag_from_return(_ret, l)
+    enum_tel ++ emit_tel
+  end
+
+  defp statem_return_telemetry(
+         {:tuple, _, [{:atom, _, keep} | _]} = ret,
+         _handler, _state_field_name, l
+       )
+       when keep in [:keep_state, :keep_state_and_data] do
+    extract_emit_tag_from_return(ret, l)
+  end
+
+  # For case expressions (conditional handlers), don't try to recurse —
+  # the conditional branch builder handles its own returns.
+  defp statem_return_telemetry(_other, _handler, _state_field_name, _l), do: []
+
+  # Extract emit tag from a gen_statem return that contains a reply action.
+  # Returns telemetry call list or [].
+  defp extract_emit_tag_from_return(ret, l) do
+    case find_reply_tag_in_ast(ret) do
+      nil -> []
+      tag ->
+        Tel.call([:vor, :message, :emitted], [
+          {:agent, Tel.agent_name_expr(:Data, l)},
+          {:message_tag, {:atom, l, tag}}
+        ], l)
+    end
+  end
+
+  # Walk the AST to find a reply action {reply, From, {Tag, Fields}} and
+  # extract the Tag atom. Returns nil if not found.
+  defp find_reply_tag_in_ast({:tuple, _, [{:atom, _, :reply}, _, {:tuple, _, [{:atom, _, tag} | _]}]}),
+    do: tag
+  defp find_reply_tag_in_ast({:tuple, _, [{:atom, _, :reply}, _, {:atom, _, tag}]}),
+    do: tag
+  defp find_reply_tag_in_ast({:cons, _, head, tail}) do
+    find_reply_tag_in_ast(head) || find_reply_tag_in_ast(tail)
+  end
+  defp find_reply_tag_in_ast({:tuple, _, elements}) do
+    Enum.find_value(elements, &find_reply_tag_in_ast/1)
+  end
+  defp find_reply_tag_in_ast(_), do: nil
+
+  defp extract_guard_state(%IR.GuardExpr{op: :==, value: {:atom, state}}), do: state
+  defp extract_guard_state(%IR.CompoundGuardExpr{left: l}), do: extract_guard_state(l)
+  defp extract_guard_state(_), do: nil
+
+  # Generate a call to __vor_transition__(Field, NewValue, Data, AgentName)
+  defp gen_transition_call(field, value_form, data_var, l) do
+    {:call, l, {:atom, l, :__vor_transition__},
+     [{:atom, l, field}, value_form, {:var, l, data_var},
+      Tel.agent_name_expr(data_var, l)]}
+  end
 end

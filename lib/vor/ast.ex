@@ -28,7 +28,7 @@ defmodule Vor.AST do
   end
 
   defmodule StateDecl do
-    defstruct [:field, :type_union, :meta]
+    defstruct [:field, :type_union, :meta, sensitive: false]
   end
 
   defmodule Transition do

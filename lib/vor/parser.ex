@@ -1679,6 +1679,8 @@ defmodule Vor.Parser do
     case rest do
       [{:identifier, _, field}, {:delimiter, _, :colon} | rest] ->
         case parse_type_union(rest, []) do
+          {:ok, types, [{:identifier, _, :sensitive} | rest]} ->
+            {:ok, %AST.StateDecl{field: field, type_union: types, sensitive: true, meta: meta}, rest}
           {:ok, types, rest} ->
             {:ok, %AST.StateDecl{field: field, type_union: types, meta: meta}, rest}
           {:error, _} = err -> err

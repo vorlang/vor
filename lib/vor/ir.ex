@@ -97,7 +97,7 @@ defmodule Vor.IR do
   end
 
   defmodule DataField do
-    defstruct [:name, :type, :default]
+    defstruct [:name, :type, :default, sensitive: false]
   end
 
   defmodule VarBindingAction do
