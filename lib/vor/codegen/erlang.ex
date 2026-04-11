@@ -186,6 +186,8 @@ defmodule Vor.Codegen.Erlang do
   end
 
   defp gen_handle_call(agent, l) do
+    constraints = build_constraint_map(agent)
+
     handler_clauses =
       agent.handlers
       |> Enum.map(fn handler ->
@@ -197,10 +199,13 @@ defmodule Vor.Codegen.Erlang do
           {:message_tag, {:atom, l, handler.pattern.tag |> tag_atom()}}
         ], l)
 
+        body = received_telemetry ++ body
+        body = wrap_constraint_check(body, handler.pattern.tag, constraints, :State, :gen_server, l, handler)
+
         {:clause, l,
           [pattern_form, {:var, l, :_From}, {:var, l, :State}],
           guard_to_erl(handler.guard, l),
-          received_telemetry ++ body}
+          body}
       end)
 
     catchall = {:clause, l,
@@ -607,6 +612,7 @@ defmodule Vor.Codegen.Erlang do
 
   defp gen_handle_event(agent, l) do
     monitors = agent.monitors || []
+    constraints = build_constraint_map(agent)
 
     state_field_name = case agent.state_fields do
       [%IR.StateField{name: name} | _] -> name
@@ -647,6 +653,7 @@ defmodule Vor.Codegen.Erlang do
           handler.actions, l, :Data, 0, state_field_name, monitors, {:call, :From})
 
         call_body = wrap_statem_body_telemetry(received_tel ++ call_body, handler, state_field_name, l)
+        call_body = wrap_constraint_check(call_body, handler.pattern.tag, constraints, :Data, :gen_statem, l, handler)
 
         call_clause = {:clause, l,
           [{:tuple, l, [{:atom, l, :call}, {:var, l, :From}]},
@@ -1775,6 +1782,130 @@ defmodule Vor.Codegen.Erlang do
   defp extract_guard_state(%IR.GuardExpr{op: :==, value: {:atom, state}}), do: state
   defp extract_guard_state(%IR.CompoundGuardExpr{left: l}), do: extract_guard_state(l)
   defp extract_guard_state(_), do: nil
+
+  # ------------------------------------------------------------------
+  # Protocol constraint codegen
+  # ------------------------------------------------------------------
+
+  # Build a map from tag atom → constraint AST for the agent's accepts.
+  defp build_constraint_map(%IR.Agent{protocol: nil}), do: %{}
+  defp build_constraint_map(%IR.Agent{protocol: %IR.Protocol{accepts: accepts}}) do
+    (accepts || [])
+    |> Enum.filter(fn mt -> mt.constraint != nil end)
+    |> Enum.into(%{}, fn mt -> {tag_atom(mt.tag), mt.constraint} end)
+  end
+
+  # Build field→variable mapping from handler pattern bindings.
+  defp build_field_var_map(%IR.Handler{pattern: %IR.MatchPattern{bindings: bindings}}) do
+    Enum.reduce(bindings, %{}, fn
+      %IR.Binding{name: {:literal, _}}, acc -> acc
+      %IR.Binding{name: name, field: field}, acc -> Map.put(acc, field, erl_var(name))
+    end)
+  end
+
+  # Wrap handler body with a constraint check if the tag has one.
+  # Returns the body unchanged if no constraint for the tag.
+  defp wrap_constraint_check(body, tag, constraints, data_var, agent_type, l, handler \\ nil) do
+    tag_atom = tag_atom(tag)
+
+    case Map.get(constraints, tag_atom) do
+      nil -> body
+      constraint ->
+        field_vars = if handler, do: build_field_var_map(handler), else: %{}
+        desc_string = constraint_to_string(constraint)
+        check_expr = constraint_to_erl(constraint, l, field_vars)
+
+        # Build the error reply
+        error_reply = case agent_type do
+          :gen_server ->
+            {:tuple, l, [
+              {:atom, l, :reply},
+              {:tuple, l, [{:atom, l, :error},
+                {:tuple, l, [{:atom, l, :constraint_violated}, {:atom, l, tag_atom},
+                  {:bin, l, [{:bin_element, l, {:string, l, String.to_charlist(desc_string)}, :default, :default}]}]}]},
+              {:var, l, data_var}
+            ]}
+          :gen_statem ->
+            {:tuple, l, [
+              {:atom, l, :keep_state_and_data},
+              list_to_erl([
+                {:tuple, l, [
+                  {:atom, l, :reply}, {:var, l, :From},
+                  {:tuple, l, [{:atom, l, :error},
+                    {:tuple, l, [{:atom, l, :constraint_violated}, {:atom, l, tag_atom},
+                      {:bin, l, [{:bin_element, l, {:string, l, String.to_charlist(desc_string)}, :default, :default}]}]}]}
+                ]}
+              ], l)
+            ]}
+        end
+
+        # Telemetry for violation
+        violation_tel = Tel.call([:vor, :constraint, :violated], [
+          {:agent, Tel.agent_name_expr(data_var, l)},
+          {:message_tag, {:atom, l, tag_atom}},
+          {:constraint, {:bin, l, [{:bin_element, l, {:string, l, String.to_charlist(desc_string)}, :default, :default}]}}
+        ], l)
+
+        # Wrap: case constraint_check of true -> body; false -> error end
+        [{:case, l, check_expr, [
+          {:clause, l, [{:atom, l, true}], [], body},
+          {:clause, l, [{:atom, l, false}], [], violation_tel ++ [error_reply]}
+        ]}]
+    end
+  end
+
+  # Compile a constraint AST to an Erlang expression that evaluates to true/false.
+  # `field_vars` maps field name → Erlang variable atom.
+  defp constraint_to_erl({:and, left, right}, l, fv) do
+    {:op, l, :andalso, constraint_to_erl(left, l, fv), constraint_to_erl(right, l, fv)}
+  end
+
+  defp constraint_to_erl({:or, left, right}, l, fv) do
+    {:op, l, :orelse, constraint_to_erl(left, l, fv), constraint_to_erl(right, l, fv)}
+  end
+
+  defp constraint_to_erl({op, left, right}, l, fv) when op in [:>, :<, :>=, :<=, :==, :!=] do
+    erl_op = constraint_erl_op(op)
+    {:op, l, erl_op, constraint_operand_to_erl(left, l, fv), constraint_operand_to_erl(right, l, fv)}
+  end
+
+  defp constraint_erl_op(:>), do: :>
+  defp constraint_erl_op(:<), do: :<
+  defp constraint_erl_op(:>=), do: :>=
+  defp constraint_erl_op(:<=), do: :"=<"
+  defp constraint_erl_op(:!=), do: :"/="
+  defp constraint_erl_op(op), do: op
+
+  defp constraint_operand_to_erl({:field, name}, l, field_vars) do
+    case Map.get(field_vars, name) do
+      nil ->
+        # Fallback: no binding for this field in the handler pattern
+        {:atom, l, :undefined}
+      var_name ->
+        {:var, l, var_name}
+    end
+  end
+
+  defp constraint_operand_to_erl({:literal, value}, l, _fv) when is_integer(value),
+    do: {:integer, l, value}
+
+  defp constraint_operand_to_erl({:literal, value}, l, _fv) when is_atom(value),
+    do: {:atom, l, value}
+
+  # Convert constraint AST to human-readable string for error messages.
+  defp constraint_to_string({:and, left, right}),
+    do: "#{constraint_to_string(left)} and #{constraint_to_string(right)}"
+
+  defp constraint_to_string({:or, left, right}),
+    do: "#{constraint_to_string(left)} or #{constraint_to_string(right)}"
+
+  defp constraint_to_string({op, {:field, f}, {:literal, v}}),
+    do: "#{f} #{op} #{inspect(v)}"
+
+  defp constraint_to_string({op, {:field, f1}, {:field, f2}}),
+    do: "#{f1} #{op} #{f2}"
+
+  defp constraint_to_string(other), do: inspect(other)
 
   # Generate a call to __vor_transition__(Field, NewValue, Data, AgentName)
   defp gen_transition_call(field, value_form, data_var, l) do

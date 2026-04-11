@@ -134,10 +134,11 @@ defmodule Vor.Lowering do
     end
   end
 
-  defp lower_message_spec(%AST.MessageSpec{tag: tag, fields: fields}) do
+  defp lower_message_spec(%AST.MessageSpec{tag: tag, fields: fields, constraint: constraint}) do
     %IR.MessageType{
       tag: to_atom(tag),
-      fields: Enum.map(fields, fn {name, type} -> {to_atom(name), to_atom(type)} end)
+      fields: Enum.map(fields, fn {name, type} -> {to_atom(name), to_atom(type)} end),
+      constraint: constraint
     }
   end
 

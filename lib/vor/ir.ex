@@ -29,7 +29,7 @@ defmodule Vor.IR do
   end
 
   defmodule MessageType do
-    defstruct [:tag, :fields]
+    defstruct [:tag, :fields, constraint: nil]
   end
 
   defmodule Handler do

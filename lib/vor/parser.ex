@@ -359,6 +359,60 @@ defmodule Vor.Parser do
   defp to_ident_atom(v) when is_binary(v), do: String.to_atom(v)
 
   # ------------------------------------------------------------------
+  # Protocol constraint expression parser (where clause on accepts)
+  # Grammar: expr = term ((and|or) term)*
+  #          term = IDENT OP (IDENT | INTEGER | ATOM)
+  # ------------------------------------------------------------------
+
+  defp parse_constraint_expr(tokens), do: parse_constraint_or(tokens)
+
+  defp parse_constraint_or(tokens) do
+    with {:ok, left, rest} <- parse_constraint_and(tokens) do
+      case rest do
+        [{:keyword, _, :or} | rest2] ->
+          with {:ok, right, rest3} <- parse_constraint_or(rest2),
+            do: {:ok, {:or, left, right}, rest3}
+        _ -> {:ok, left, rest}
+      end
+    end
+  end
+
+  defp parse_constraint_and(tokens) do
+    with {:ok, left, rest} <- parse_constraint_term(tokens) do
+      case rest do
+        [{:keyword, _, :and} | rest2] ->
+          with {:ok, right, rest3} <- parse_constraint_and(rest2),
+            do: {:ok, {:and, left, right}, rest3}
+        _ -> {:ok, left, rest}
+      end
+    end
+  end
+
+  # IDENT OP IDENT (cross-field or field vs field)
+  defp parse_constraint_term([{:identifier, _, left}, {:operator, _, op},
+                               {:identifier, _, right} | rest])
+       when op in [:>, :<, :>=, :<=, :==, :!=] do
+    {:ok, {op, {:field, to_ident_atom(left)}, {:field, to_ident_atom(right)}}, rest}
+  end
+
+  # IDENT OP INTEGER
+  defp parse_constraint_term([{:identifier, _, left}, {:operator, _, op},
+                               {:integer, _, right} | rest])
+       when op in [:>, :<, :>=, :<=, :==, :!=] do
+    {:ok, {op, {:field, to_ident_atom(left)}, {:literal, right}}, rest}
+  end
+
+  # IDENT OP :ATOM
+  defp parse_constraint_term([{:identifier, _, left}, {:operator, _, op},
+                               {:atom, _, right} | rest])
+       when op in [:>, :<, :>=, :<=, :==, :!=] do
+    {:ok, {op, {:field, to_ident_atom(left)}, {:literal, to_ident_atom(right)}}, rest}
+  end
+
+  defp parse_constraint_term([token | _]), do: {:error, {:expected_constraint_term, token}}
+  defp parse_constraint_term([]), do: {:error, :unexpected_eof}
+
+  # ------------------------------------------------------------------
   # Chaos block parser
   # ------------------------------------------------------------------
 
@@ -591,7 +645,14 @@ defmodule Vor.Parser do
 
   defp parse_protocol_entries([{:keyword, _, :accepts} | rest], accepts, emits, sends) do
     case parse_message_spec(rest) do
-      {:ok, spec, rest} -> parse_protocol_entries(rest, [spec | accepts], emits, sends)
+      {:ok, spec, [{:keyword, _, :where} | rest]} ->
+        case parse_constraint_expr(rest) do
+          {:ok, constraint, rest} ->
+            parse_protocol_entries(rest, [%{spec | constraint: constraint} | accepts], emits, sends)
+          {:error, _} = err -> err
+        end
+      {:ok, spec, rest} ->
+        parse_protocol_entries(rest, [spec | accepts], emits, sends)
       {:error, _} = err -> err
     end
   end
