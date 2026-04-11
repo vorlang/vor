@@ -4,6 +4,7 @@ defmodule Vor.Codegen.Erlang do
   """
 
   alias Vor.IR
+  alias Vor.Codegen.Telemetry, as: Tel
 
   def generate(%IR.Agent{behaviour: :gen_server} = agent) do
     l = 1
@@ -81,7 +82,8 @@ defmodule Vor.Codegen.Erlang do
   defp gen_init_server(agent, l) do
     param_pairs = gen_params_map_pairs(agent.params, l)
     data_field_pairs = gen_data_field_pairs(agent.data_fields || [], l)
-    init_map = {:map, l, param_pairs ++ data_field_pairs}
+    agent_name_pair = {:map_field_assoc, l, {:atom, l, :__vor_agent_name__}, {:atom, l, agent.module}}
+    init_map = {:map, l, param_pairs ++ data_field_pairs ++ [agent_name_pair]}
 
     # Compile init handler body if present
     {init_handler_exprs, init_data_var} = compile_init_handler_body(agent.init_handler, l, :Data)
@@ -93,8 +95,13 @@ defmodule Vor.Codegen.Erlang do
       {:tuple, l, [{:atom, l, :ok}, {:var, l, init_data_var}]}
     end)
 
-    # Insert init handler + timer setup before the final return
-    inserts = init_handler_exprs ++ timer_setup
+    # Insert init handler + timer setup + telemetry before the final return
+    start_telemetry = Tel.call([:vor, :agent, :start], [
+      {:agent, Tel.agent_name_expr(init_data_var, l)},
+      {:type, {:atom, l, :gen_server}}
+    ], l)
+
+    inserts = init_handler_exprs ++ timer_setup ++ start_telemetry
     body = case inserts do
       [] -> body
       _ ->
@@ -114,10 +121,15 @@ defmodule Vor.Codegen.Erlang do
         pattern_form = pattern_to_erl(handler.pattern, l)
         body = compile_handler_body(handler.actions, l, :State)
 
+        received_telemetry = Tel.call([:vor, :message, :received], [
+          {:agent, Tel.agent_name_expr(:State, l)},
+          {:message_tag, {:atom, l, handler.pattern.tag |> tag_atom()}}
+        ], l)
+
         {:clause, l,
           [pattern_form, {:var, l, :_From}, {:var, l, :State}],
           guard_to_erl(handler.guard, l),
-          body}
+          received_telemetry ++ body}
       end)
 
     catchall = {:clause, l,
@@ -374,7 +386,8 @@ defmodule Vor.Codegen.Erlang do
     data_with_meta = {:map, l, {:var, l, :Data0}, [
       {:map_field_assoc, l, {:atom, l, :__vor_registry__}, {:var, l, :VorRegistry}},
       {:map_field_assoc, l, {:atom, l, :__vor_name__}, {:var, l, :VorName}},
-      {:map_field_assoc, l, {:atom, l, :__vor_connections__}, {:var, l, :VorConnections}}
+      {:map_field_assoc, l, {:atom, l, :__vor_connections__}, {:var, l, :VorConnections}},
+      {:map_field_assoc, l, {:atom, l, :__vor_agent_name__}, {:var, l, :VorName}}
     ]}
 
     name_bind = {:match, l, {:var, l, :VorName}, name_lookup}
@@ -387,9 +400,25 @@ defmodule Vor.Codegen.Erlang do
         [name_bind, connections_bind, data_with_meta]}
     ]}
 
-    data_bind = {:match, l, {:var, l, :Data}, case_expr}
+    data_bind = {:match, l, {:var, l, :DataPre}, case_expr}
 
-    [data0_bind, data_bind, result_fn.(:Data)]
+    # If __vor_agent_name__ was explicitly passed in Args, override the default
+    agent_name_lookup = {:call, l,
+      {:remote, l, {:atom, l, :proplists}, {:atom, l, :get_value}},
+      [{:atom, l, :__vor_agent_name__}, {:var, l, :Args}, {:atom, l, :undefined}]}
+
+    agent_name_override = {:case, l, agent_name_lookup, [
+      {:clause, l, [{:atom, l, :undefined}], [],
+        [{:var, l, :DataPre}]},
+      {:clause, l, [{:var, l, :VorExplicitName}], [],
+        [{:map, l, {:var, l, :DataPre}, [
+          {:map_field_assoc, l, {:atom, l, :__vor_agent_name__}, {:var, l, :VorExplicitName}}
+        ]}]}
+    ]}
+
+    final_data_bind = {:match, l, {:var, l, :Data}, agent_name_override}
+
+    [data0_bind, data_bind, final_data_bind, result_fn.(:Data)]
   end
 
   # Generate catch-all handle_call clauses for guarded message tags in gen_server
@@ -454,10 +483,11 @@ defmodule Vor.Codegen.Erlang do
       _ -> :idle
     end
 
-    # Build init data map: params from Args + data field defaults
+    # Build init data map: params from Args + data field defaults + agent name
     param_pairs = gen_params_map_pairs(agent.params, l)
     data_field_pairs = gen_data_field_pairs(agent.data_fields || [], l)
-    init_map = {:map, l, param_pairs ++ data_field_pairs}
+    agent_name_pair = {:map_field_assoc, l, {:atom, l, :__vor_agent_name__}, {:atom, l, agent.module}}
+    init_map = {:map, l, param_pairs ++ data_field_pairs ++ [agent_name_pair]}
 
     # Check if initial state needs a state_timeout for liveness monitoring
     monitors = agent.monitors || []
@@ -487,7 +517,13 @@ defmodule Vor.Codegen.Erlang do
 
     timer_setup = gen_periodic_timer_setup(agent.periodic_timers || [], l, init_data_var)
 
-    inserts = init_handler_exprs ++ timer_setup
+    start_telemetry = Tel.call([:vor, :agent, :start], [
+      {:agent, Tel.agent_name_expr(init_data_var, l)},
+      {:type, {:atom, l, :gen_statem}},
+      {:initial_state, {:atom, l, initial_state}}
+    ], l)
+
+    inserts = init_handler_exprs ++ timer_setup ++ start_telemetry
     body = case inserts do
       [] -> body
       _ ->
@@ -1574,4 +1610,7 @@ defmodule Vor.Codegen.Erlang do
 
   defp list_to_erl([], l), do: {:nil, l}
   defp list_to_erl([h | t], l), do: {:cons, l, h, list_to_erl(t, l)}
+
+  defp tag_atom(tag) when is_atom(tag), do: tag
+  defp tag_atom(tag) when is_binary(tag), do: String.to_atom(tag)
 end

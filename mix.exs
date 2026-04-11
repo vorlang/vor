@@ -27,6 +27,7 @@ defmodule Vor.MixProject do
     [
       {:nimble_parsec, "~> 1.4"},
       {:jason, "~> 1.4"},
+      {:telemetry, "~> 1.0"},
       {:propcheck, "~> 1.4", only: :test}
     ]
   end
