@@ -1,22 +1,22 @@
 # Vor
 
-A programming language for the BEAM where the compiler verifies, instruments, and chaos-tests your distributed system.
+A programming language for the BEAM with verified state machines, protocol checking, chaos testing, and compiler-generated telemetry.
 
 [vorlang.org](https://vorlang.org)
 
 ## Why
 
-AI agents are building distributed systems faster than humans can review them. The BEAM is the right runtime — process isolation, supervision, message passing, distribution. What's missing is a language where the compiler is the reviewer: proving safety, checking protocols, generating telemetry, and stress-testing recovery — all from the same source file.
+The BEAM gives you process isolation, supervision, message passing, and distribution — eliminating data races, buffer overflows, and manual thread management. What it doesn't give you is verification that your state machines are complete, your protocols are compatible, or your system recovers correctly from failures. Most distributed systems discover these bugs in production.
 
-Vor is that language. One file declares agents, protocols, invariants, and chaos scenarios. Three commands verify it:
+Vor adds the verification layer. You declare state machines, message protocols, safety invariants, and input constraints in a single source file. The compiler proves what it can, the model checker explores message interleavings, and the chaos simulator stress-tests real processes under failure:
 
 ```
-mix compile        →  proves local safety properties       (milliseconds)
-mix vor.check      →  model-checks multi-agent invariants  (seconds)
-mix vor.simulate   →  chaos-tests real BEAM processes      (minutes)
+mix compile        →  proves local safety properties           (milliseconds)
+mix vor.check      →  model-checks multi-agent invariants      (seconds)
+mix vor.simulate   →  chaos-tests real BEAM processes          (minutes)
 ```
 
-The compiled binary is pre-instrumented with telemetry. No separate spec. No separate test infrastructure. No instrumentation code.
+The compiled binary is a standard OTP gen_server or gen_statem — pre-instrumented with telemetry, no separate spec, no instrumentation code.
 
 ## Example
 
@@ -80,14 +80,16 @@ end
 
 What the compiler does with this:
 
-- `safety` invariant proven at compile time — rejects the program if any state × handler combination violates it
-- `where` constraint on `:acquire` — rejects requests with invalid priority before the handler runs
-- `sensitive` on `auth_token` — redacted in all telemetry events
-- `liveness` invariant monitored at runtime — auto-recovers via the resilience handler
-- Every state transition, message received, and message emitted generates telemetry automatically
+- The `safety` invariant is proven at compile time — the program is rejected if any reachable state violates it
+- The `where` constraint rejects messages with invalid priority before the handler runs
+- The `sensitive` annotation redacts `auth_token` in all telemetry events
+- The `liveness` invariant is monitored at runtime with automatic recovery via the resilience handler
+- Every state transition and message generates telemetry automatically
 - The compiled binary is a standard OTP gen_statem
 
 ## Multi-agent model checking
+
+Wire agents together in a system block and `mix vor.check` explores all message interleavings within configured bounds:
 
 ```vor
 system RaftCluster do
@@ -115,10 +117,14 @@ Abstracted fields: commit_index, log, voted_for
 Integer bound:     3
 Max queue:         10
 Symmetry:          enabled (3 identical agents, 6× reduction)
-✓ Proven (1001 states, depth 10)
+✓ Bounded-verified (1001 states, depth 10)
 ```
 
-## Chaos simulation
+The model checker uses cone-of-influence abstraction, integer saturation, and symmetry reduction. Same code that runs in production. The result is bounded-verified — exhaustive within configured bounds, not an unconditional proof.
+
+## Chaos testing
+
+Chaos testing complements verification by exercising real compiled code under failure — it catches implementation bugs, timing issues, and recovery failures that the model checker can't reach.
 
 ```bash
 mix vor.simulate --partition --delay --workload 10 --duration 30000
@@ -133,11 +139,11 @@ Starts real BEAM processes, injects real failures, checks invariants against liv
 - **Invariant checking** — periodically queries live agent state and evaluates system invariants
 - **Seed reproducibility** — replay any run with `--seed N`
 
-No Chaos Monkey. No Toxiproxy. No Docker. The BEAM provides all the failure injection primitives as function calls.
+For BEAM-native systems, no external chaos infrastructure is needed — the BEAM provides process kill, message interception, and state querying as function calls.
 
 ## Auto-generated telemetry
 
-Every compiled Vor agent emits telemetry for every observable event. Zero instrumentation code.
+The compiler knows every state field, message type, transition, and handler. It generates telemetry calls in the compiled bytecode — no instrumentation code in the source file.
 
 | Event | Metadata |
 |---|---|
@@ -147,14 +153,14 @@ Every compiled Vor agent emits telemetry for every observable event. Zero instru
 | `[:vor, :message, :emitted]` | agent, message tag |
 | `[:vor, :constraint, :violated]` | agent, message tag, constraint description |
 
-Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every agent is observable. The compiler knows the program's complete behavioral structure — the telemetry reflects it.
+Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every agent is observable. You still need a metrics backend (Prometheus/Grafana) to view the data — Vor generates the events, you bring the dashboard.
 
 ## What's working
 
-**Three-level verification pyramid:**
+**Verification and testing:**
 - Compile-time safety invariants proven by exhaustive state graph traversal
-- Multi-agent model checking with cone-of-influence abstraction, integer saturation, symmetry reduction
-- Chaos simulation with kill, partition, delay, workload on real BEAM processes
+- Multi-agent bounded model checking with cone-of-influence abstraction, integer saturation, symmetry reduction
+- Chaos testing with kill, partition, delay, workload on real BEAM processes
 
 **Language features:**
 - Parameterized agents, init handlers, periodic timers (`every`)
@@ -214,7 +220,7 @@ mix vor.simulate --partition --delay --workload 10
 ## Background
 
 - [One-pager](docs/onepager.md) — technical overview
-- [Paradigm comparison](docs/comparison.md) — what Vor eliminates vs. the typical stack
+- [Paradigm comparison](docs/comparison.md) — how Vor compares to the typical stack
 - [Developer guide](docs/developer-guide.md) — internal compiler reference
 - [Tutorial](docs/vor-tutorial.md) — step-by-step from Echo agent to multi-agent pipeline
 
