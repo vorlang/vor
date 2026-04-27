@@ -1,10 +1,12 @@
 # Vor
 
-A programming language for the BEAM with verified state machines, protocol checking, chaos testing, and compiler-generated telemetry.
+A programming language for the BEAM designed as a compilation target for AI coding agents — with verified state machines, protocol checking, chaos testing, and compiler-generated telemetry.
 
 [vorlang.org](https://vorlang.org)
 
 ## Why
+
+AI agents are writing more and more code, and they'll inevitably build distributed systems. The code is being produced faster than humans can review it. We need compilers that catch what human review would miss.
 
 The BEAM gives you process isolation, supervision, message passing, and distribution — eliminating data races, buffer overflows, and manual thread management. What it doesn't give you is verification that your state machines are complete, your protocols are compatible, or your system recovers correctly from failures. Most distributed systems discover these bugs in production.
 
@@ -16,7 +18,7 @@ mix vor.check      →  model-checks multi-agent invariants      (seconds)
 mix vor.simulate   →  chaos-tests real BEAM processes          (minutes)
 ```
 
-The compiled binary is a standard OTP gen_server or gen_statem — pre-instrumented with telemetry, no separate spec, no instrumentation code.
+An AI agent writes one file. Three commands verify it. The compiled binary is a standard OTP gen_server or gen_statem — pre-instrumented with telemetry, no separate spec, no instrumentation code.
 
 ## Example
 
@@ -216,6 +218,10 @@ mix vor.simulate --partition --delay --workload 10
 ## Built with Vor
 
 - [VorDB](https://github.com/vorlang/vordb) — a CRDT-based distributed database, the first real consumer driving Vor's language features through practical use
+
+## Related projects
+
+- [Tyn](https://github.com/tyn-os/kernel) — a minimal Rust microkernel that runs the BEAM on bare metal (no Linux). Vor + Tyn is the long-term vision: verified distributed systems on a purpose-built kernel.
 
 ## Background
 
