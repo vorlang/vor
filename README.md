@@ -128,8 +128,45 @@ The model checker uses cone-of-influence abstraction, integer saturation, and sy
 
 Chaos testing complements verification by exercising real compiled code under failure — it catches implementation bugs, timing issues, and recovery failures that the model checker can't reach.
 
+Declare a chaos scenario inline:
+
+```vor
+system RaftCluster do
+  agent :n1, RaftNode(node_id: :n1, cluster_size: 3)
+  agent :n2, RaftNode(node_id: :n2, cluster_size: 3)
+  agent :n3, RaftNode(node_id: :n3, cluster_size: 3)
+
+  connect :n1 -> :n2
+  connect :n1 -> :n3
+  connect :n2 -> :n1
+  connect :n2 -> :n3
+  connect :n3 -> :n1
+  connect :n3 -> :n2
+
+  safety "at most one leader" proven do
+    never(count(agents where role == :leader) > 1)
+  end
+
+  chaos do
+    duration 60s
+    seed 42
+    kill every: 5..15s
+    partition duration: 1..5s
+    delay by: 50..200ms
+    workload rate: 10
+    check every: 500ms
+  end
+end
+```
+
 ```bash
-mix vor.simulate --partition --delay --workload 10 --duration 30000
+mix vor.simulate
+```
+
+Or configure entirely from the CLI:
+
+```bash
+mix vor.simulate --partition --delay --workload 10 --duration 30000 --seed 42
 ```
 
 Starts real BEAM processes, injects real failures, checks invariants against live state:
@@ -140,6 +177,7 @@ Starts real BEAM processes, injects real failures, checks invariants against liv
 - **Workload generation** — sends client messages matching `accepts` declarations at configurable rates
 - **Invariant checking** — periodically queries live agent state and evaluates system invariants
 - **Seed reproducibility** — replay any run with `--seed N`
+- **Declarative config** — `chaos do ... end` block in the system, CLI flags override file config
 
 For BEAM-native systems, no external chaos infrastructure is needed — the BEAM provides process kill, message interception, and state querying as function calls.
 

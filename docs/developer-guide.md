@@ -149,7 +149,9 @@ state token: binary sensitive
 
 The `sensitive` flag flows through AST → IR → codegen. The codegen builds a set of sensitive field names on each module. The `__vor_transition__/4` wrapper checks this set and redacts values in telemetry metadata.
 
-## Chaos simulation architecture
+## Chaos simulation
+
+### Architecture
 
 ```
 mix vor.simulate
@@ -166,7 +168,82 @@ mix vor.simulate
         └── queries :sys.get_state via proxy, evaluates invariants
 ```
 
-Proxy processes register under agent names in the Registry. Real agents start inside proxies without registration. Other agents send to proxies unknowingly. Fault policies (:forward, :partition, :delay, :drop) applied per-proxy.
+Proxy processes register under agent names in the Registry. Real agents start inside proxies without registration. Other agents send to proxies unknowingly. Fault policies (`:forward`, `:partition`, `:delay`, `:drop`) applied per-proxy.
+
+### Chaos block syntax
+
+System blocks accept an optional `chaos do ... end` block with declarative fault injection policies. When present, `mix vor.simulate` reads the config from the file. CLI flags override file values.
+
+```vor
+chaos do
+  duration 60s
+  seed 42
+
+  kill every: 5..15s
+  partition duration: 1..5s
+  delay by: 50..200ms
+  drop probability: 1
+  workload rate: 10
+  check every: 500ms
+end
+```
+
+All fields are optional. Omitted fields use defaults:
+
+| Field | Default | Description |
+|---|---|---|
+| `duration` | 30s | Simulation length. Accepts unit suffixes: `30s`, `5m`, `120000` (ms) |
+| `seed` | random | Integer seed for reproducibility |
+| `kill every: MIN..MAXs` | 3..10s | Interval range between agent kills |
+| `partition duration: MIN..MAXs` | disabled | Partition duration range (presence enables partitions) |
+| `delay by: MIN..MAXms` | disabled | Message delay range (presence enables delays) |
+| `drop probability: N` | disabled | Random message drop, N as integer percentage (1 = 1%) |
+| `workload rate: N` | 0 | Client messages per second |
+| `check every: Nms` | 1s | Interval between invariant checks |
+
+### Range and duration syntax
+
+Ranges use `MIN..MAX` with an optional unit suffix:
+
+```vor
+kill every: 5..15s          %% 5000..15000 ms
+partition duration: 1..5s   %% 1000..5000 ms
+delay by: 50..200ms         %% 50..200 ms
+delay by: 50..200           %% 50..200 ms (bare integers = ms)
+```
+
+Duration values accept `s` (seconds), `m` (minutes), or `ms` (milliseconds):
+
+```vor
+duration 60s    %% 60000 ms
+duration 5m     %% 300000 ms
+duration 30000  %% 30000 ms
+```
+
+### Config merging
+
+CLI flags override chaos-block values. If no `chaos` block and no CLI flags, defaults are used.
+
+```bash
+# Uses file config
+mix vor.simulate
+
+# File config with duration overridden
+mix vor.simulate --duration 120000
+
+# Ignores file config for faults, uses CLI
+mix vor.simulate --partition --delay --workload 20
+```
+
+### Modules
+
+- `lib/vor/simulator.ex` — orchestrator, config merging
+- `lib/vor/simulator/message_proxy.ex` — GenServer proxy with fault policies
+- `lib/vor/simulator/supervisor_builder.ex` — proxy-aware supervisor tree
+- `lib/vor/simulator/workload.ex` — protocol-driven message generation
+- `lib/vor/simulator/invariant_checker.ex` — live state querying via `:sys.get_state`
+- `lib/vor/simulator/timeline.ex` — Agent-backed event log
+- `lib/mix/tasks/vor.simulate.ex` — mix task
 
 ## Model checker architecture
 
