@@ -14,7 +14,7 @@ defmodule Vor.Explorer do
   the invariants and stores them on the system IR but does not run the BFS.
   """
 
-  alias Vor.Explorer.{Invariant, ProductState, Relevance, Successor, Symmetry}
+  alias Vor.Explorer.{Invariant, LivenessChecker, ProductState, Relevance, Successor, Symmetry, Tarjan}
   alias Vor.IR
 
   @default_max_depth 50
@@ -72,9 +72,14 @@ defmodule Vor.Explorer do
     integer_bound = Keyword.get(opts, :integer_bound, @default_integer_bound)
     max_queue = Keyword.get(opts, :max_queue, @default_max_queue)
     symmetry_opt = Keyword.get(opts, :symmetry, :auto)
-    symmetry = Symmetry.enabled?(system_ir, invariants, symmetry_opt)
 
-    relevance = Relevance.compute(system_ir, instance_irs, invariants)
+    # Split safety and liveness invariants
+    safety_invariants = Enum.filter(invariants, fn inv -> Map.get(inv, :kind, :safety) == :safety end)
+    liveness_invariants = Enum.filter(invariants, fn inv -> inv.kind == :liveness and inv.tier == :proven end)
+
+    symmetry = Symmetry.enabled?(system_ir, safety_invariants, symmetry_opt)
+
+    relevance = Relevance.compute(system_ir, instance_irs, safety_invariants ++ liveness_invariants)
 
     initial =
       system_ir
@@ -91,13 +96,120 @@ defmodule Vor.Explorer do
       symmetry: symmetry
     }
 
-    case check_all_invariants(initial, invariants) do
+    case check_all_invariants(initial, safety_invariants) do
       {:violation, name} ->
         {:error, :violation, name, [initial], base_stats}
 
       :ok ->
-        bfs(initial, instance_irs, system_ir, invariants, max_depth, max_states,
+        bfs_result = bfs(initial, instance_irs, system_ir, safety_invariants, max_depth, max_states,
           relevance, integer_bound, max_queue, symmetry)
+
+        # Post-processing: liveness checking via Tarjan's SCC
+        case bfs_result do
+          {:ok, status, stats} when liveness_invariants != [] ->
+            liveness_result = run_liveness_check(stats, liveness_invariants)
+            {:ok, status, Map.put(stats, :liveness, liveness_result)}
+
+          other ->
+            other
+        end
+    end
+  end
+
+  defp run_liveness_check(%{adjacency: adjacency, state_map: state_map}, liveness_invariants)
+       when is_map(adjacency) and map_size(adjacency) > 0 do
+    sccs = Tarjan.find_sccs(adjacency)
+
+    results =
+      Enum.map(liveness_invariants, fn inv ->
+        case LivenessChecker.parse_liveness_body(inv.body) do
+          {:ok, parsed} ->
+            # Check SCCs (cycles) first
+            cycle_result = check_liveness_inv(inv, parsed, sccs, state_map)
+
+            case cycle_result do
+              {:ok, _} ->
+                # Also check terminal states (dead ends with active obligations)
+                check_terminal_liveness(inv, parsed, adjacency, state_map)
+              violation ->
+                violation
+            end
+
+          :unsupported ->
+            {:unsupported, inv.name}
+        end
+      end)
+
+    %{sccs_checked: length(sccs), results: results}
+  end
+
+  defp run_liveness_check(_stats, _invariants), do: %{sccs_checked: 0, results: []}
+
+  # Check if any terminal state (no outgoing edges) has an active obligation
+  defp check_terminal_liveness(inv, parsed, adjacency, state_map) do
+    terminal_violation =
+      Enum.find_value(adjacency, fn {state_fp, successors} ->
+        if successors == [] or Enum.all?(successors, &(&1 == state_fp)) do
+          case Map.get(state_map, state_fp) do
+            nil -> nil
+            ps ->
+              obligated = eval_liveness_condition(parsed.precondition, ps)
+              fulfilled = eval_liveness_condition(parsed.postcondition, ps)
+
+              if obligated and not fulfilled do
+                {:violation, inv.name, %{cycle_length: 1, description: "Terminal state with unfulfilled obligation"}}
+              end
+          end
+        end
+      end)
+
+    terminal_violation || {:ok, inv.name}
+  end
+
+  defp check_liveness_inv(inv, parsed, sccs, state_map) do
+    violation =
+      Enum.find_value(sccs, fn scc ->
+        scc_states = Enum.map(scc, fn id -> {id, Map.get(state_map, id)} end)
+
+        has_obligation =
+          Enum.any?(scc_states, fn {_id, ps} ->
+            ps != nil and
+              eval_liveness_condition(parsed.precondition, ps) and
+              not eval_liveness_condition(parsed.postcondition, ps)
+          end)
+
+        ever_fulfilled =
+          Enum.any?(scc_states, fn {_id, ps} ->
+            ps != nil and eval_liveness_condition(parsed.postcondition, ps)
+          end)
+
+        if has_obligation and not ever_fulfilled do
+          {:violation, inv.name, %{cycle_length: length(scc)}}
+        end
+      end)
+
+    violation || {:ok, inv.name}
+  end
+
+  # Evaluate a simple liveness condition (field == :value or field != :value)
+  # against a product state. Checks if ANY agent matches.
+  defp eval_liveness_condition(tokens, %ProductState{agents: agents}) do
+    case tokens do
+      [{:identifier, _, field}, {:operator, _, op}, {:atom, _, value} | _] ->
+        field_atom = if is_atom(field), do: field, else: String.to_atom("#{field}")
+        value_atom = if is_atom(value), do: value, else: String.to_atom("#{value}")
+
+        Enum.any?(agents, fn {_name, state} ->
+          actual = Map.get(state, field_atom)
+          case op do
+            :== -> actual == value_atom
+            :!= -> actual != value_atom
+            _ -> false
+          end
+        end)
+
+      _ ->
+        false
     end
   end
 
@@ -157,15 +269,18 @@ defmodule Vor.Explorer do
   # ----------------------------------------------------------------------
 
   defp bfs(initial, instance_irs, system_ir, invariants, max_depth, max_states, relevance, integer_bound, max_queue, symmetry) do
-    queue = :queue.in({initial, [initial]}, :queue.new())
-    visited = MapSet.new([fingerprint(initial, symmetry)])
+    initial_fp = fingerprint(initial, symmetry)
+    queue = :queue.in({initial, [initial], initial_fp}, :queue.new())
+    visited = MapSet.new([initial_fp])
     stats = %{
       states_explored: 1,
       max_depth_reached: 0,
       relevance: relevance,
       integer_bound: integer_bound,
       max_queue: max_queue,
-      symmetry: symmetry
+      symmetry: symmetry,
+      adjacency: %{initial_fp => []},
+      state_map: %{initial_fp => initial}
     }
 
     do_bfs(queue, visited, instance_irs, system_ir, invariants, max_depth, max_states, stats, relevance, integer_bound, max_queue, symmetry)
@@ -176,7 +291,7 @@ defmodule Vor.Explorer do
       {:empty, _} ->
         {:ok, :proven, stats}
 
-      {{:value, {state, trace}}, rest} ->
+      {{:value, {state, trace, state_fp}}, rest} ->
         cond do
           stats.states_explored >= max_states ->
             {:ok, :bounded, stats}
@@ -193,6 +308,11 @@ defmodule Vor.Explorer do
               Enum.reduce_while(successors, {rest, visited, stats, nil}, fn succ, {q, v, s, _} ->
                 fp = fingerprint(succ, symmetry)
 
+                # Track adjacency edge regardless of visited status
+                s = update_in(s, [:adjacency], fn adj ->
+                  Map.update(adj || %{}, state_fp, [fp], fn existing -> [fp | existing] end)
+                end)
+
                 if MapSet.member?(v, fp) do
                   {:cont, {q, v, s, nil}}
                 else
@@ -203,12 +323,18 @@ defmodule Vor.Explorer do
                       max_depth_reached: max(s.max_depth_reached, succ.depth)
                   }
 
+                  # Track state map and init adjacency entry
+                  new_stats = put_in(new_stats, [:state_map, fp], succ)
+                  new_stats = update_in(new_stats, [:adjacency], fn adj ->
+                    Map.put_new(adj || %{}, fp, [])
+                  end)
+
                   case check_all_invariants(succ, invariants) do
                     {:violation, name} ->
                       {:halt, {q, new_visited, new_stats, {:violation, name, trace ++ [succ]}}}
 
                     :ok ->
-                      new_q = :queue.in({succ, trace ++ [succ]}, q)
+                      new_q = :queue.in({succ, trace ++ [succ], fp}, q)
                       {:cont, {new_q, new_visited, new_stats, nil}}
                   end
                 end

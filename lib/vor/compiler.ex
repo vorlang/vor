@@ -21,6 +21,7 @@ defmodule Vor.Compiler do
          {:ok, _completeness_warnings} <- Vor.Analysis.Completeness.check(ir),
          {:ok, _type_warnings} <- Vor.Analysis.TypeChecker.check(ir),
          :ok <- verify_safety(ir),
+         :ok <- verify_liveness(ir),
          _ <- (if trace, do: trace_verification(ir)),
          {:ok, forms} <- Vor.Codegen.Erlang.generate(ir),
          _ <- (if trace, do: trace_codegen(ir)),
@@ -121,6 +122,43 @@ defmodule Vor.Compiler do
 
       :no_graph ->
         # No state machine — no graph-based verification to do
+        :ok
+    end
+  end
+
+  defp verify_liveness(ir) do
+    case Vor.Graph.extract(ir) do
+      {:ok, graph} ->
+        liveness_proven =
+          ir.invariants
+          |> Enum.filter(fn
+            {:liveness, _name, :proven, body} when is_list(body) and body != [] -> true
+            _ -> false
+          end)
+
+        Enum.reduce_while(liveness_proven, :ok, fn {:liveness, name, :proven, body}, :ok ->
+          case Vor.Explorer.LivenessChecker.check_single_agent(graph, body) do
+            {:proven} ->
+              {:cont, :ok}
+
+            {:violated, reason} ->
+              {:halt,
+               {:error,
+                %{
+                  type: :liveness_violation,
+                  name: name,
+                  reason: reason,
+                  message:
+                    "Liveness invariant \"#{name}\" cannot be proven: " <>
+                      "the system can remain in an obligated state without ever making progress"
+                }}}
+
+            {:error, err} ->
+              {:halt, {:error, %{type: :unsupported_liveness, name: name, details: err}}}
+          end
+        end)
+
+      :no_graph ->
         :ok
     end
   end
@@ -256,7 +294,12 @@ defmodule Vor.Compiler do
         %{from: from_atom, to: to_atom}
       end),
       invariants: Enum.map(invariants || [], fn %Vor.AST.SystemSafety{name: n, tier: tier, body: body} ->
-        %Vor.IR.SystemInvariant{name: n, tier: tier, body: body}
+        case body do
+          {:liveness_body, tokens} ->
+            %Vor.IR.SystemInvariant{name: n, tier: tier, body: tokens, kind: :liveness}
+          _ ->
+            %Vor.IR.SystemInvariant{name: n, tier: tier, body: body, kind: :safety}
+        end
       end),
       chaos: lower_chaos(chaos)
     }
@@ -419,7 +462,7 @@ defmodule Vor.Compiler do
       _ -> false
     end)
     liveness_count = ir.invariants |> Enum.count(fn
-      {:liveness, _, _} -> true
+      {:liveness, _, _, _} -> true
       _ -> false
     end)
 

@@ -85,6 +85,17 @@ defmodule Vor.Parser do
     end
   end
 
+  # liveness "name" proven do ... end — in system blocks
+  defp parse_system_entries([{:keyword, _, :liveness} | _] = tokens, agents, connections, invariants) do
+    case parse_liveness(tokens) do
+      {:ok, liveness, rest} ->
+        # Store as a SystemSafety-like struct with the liveness body tokens
+        inv = %AST.SystemSafety{name: liveness.name, tier: liveness.tier, body: {:liveness_body, liveness.body}}
+        parse_system_entries(rest, agents, connections, [inv | invariants])
+      {:error, _} = err -> err
+    end
+  end
+
   # chaos do ... end
   defp parse_system_entries([{:identifier, _, :chaos}, {:keyword, _, :do} | rest], agents, connections, invariants) do
     case parse_chaos_items(rest, %AST.ChaosConfig{}) do

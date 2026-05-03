@@ -135,10 +135,10 @@ defmodule Vor.IR do
               check: nil
   end
 
-  # System-level safety invariant (Phase 1: count(agents where ...) only).
-  # body is a structured tuple — see parser/lowering.
+  # System-level invariant. body is a structured tuple for safety, or
+  # {:liveness_body, tokens} for liveness (parsed later by LivenessChecker).
   defmodule SystemInvariant do
-    defstruct [:name, :tier, :body]
+    defstruct [:name, :tier, :body, kind: :safety]
   end
 
   defmodule AgentInstanceIR do

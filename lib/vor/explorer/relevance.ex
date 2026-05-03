@@ -61,6 +61,17 @@ defmodule Vor.Explorer.Relevance do
   body. Phase 2 supports the `count(agents where FIELD == :VALUE)` shapes —
   the field of interest is the first element of `agents_where`.
   """
+  # Liveness invariants carry raw body tokens — extract identifiers as field refs
+  def invariant_fields(%IR.SystemInvariant{body: body, kind: :liveness}) when is_list(body) do
+    body
+    |> Enum.filter(fn
+      {:identifier, _, name} when name not in [:always, :implies, :eventually, :count, :agents, :never, :for_all, :exists] -> true
+      _ -> false
+    end)
+    |> Enum.map(fn {:identifier, _, name} -> if is_atom(name), do: name, else: String.to_atom("#{name}") end)
+    |> Enum.uniq()
+  end
+
   def invariant_fields(%IR.SystemInvariant{body: body}), do: invariant_fields(body)
   def invariant_fields({:never, condition}), do: invariant_fields(condition)
 

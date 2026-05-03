@@ -719,7 +719,9 @@ defmodule Vor.Lowering do
     liveness =
       body
       |> Enum.filter(&match?(%AST.Liveness{}, &1))
-      |> Enum.map(fn %AST.Liveness{name: name, tier: tier} -> {:liveness, name, tier} end)
+      |> Enum.map(fn %AST.Liveness{name: name, tier: tier, body: body} ->
+        {:liveness, name, tier, body || []}
+      end)
 
     safety ++ liveness
   end
