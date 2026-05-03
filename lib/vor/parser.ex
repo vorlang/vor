@@ -593,6 +593,11 @@ defmodule Vor.Parser do
     {:ok, Enum.reverse(acc), rest}
   end
 
+  # max_queue N — agent-level backpressure
+  defp parse_declarations([{:keyword, _, :max_queue}, {:integer, _, n} | rest], acc) when n > 0 do
+    parse_declarations(rest, [{:max_queue, n} | acc])
+  end
+
   defp parse_declarations([{:keyword, _, :protocol} | _] = tokens, acc) do
     case parse_protocol(tokens) do
       {:ok, proto, rest} -> parse_declarations(rest, [proto | acc])
@@ -682,16 +687,25 @@ defmodule Vor.Parser do
 
   defp parse_protocol_entries([{:keyword, _, :accepts} | rest], accepts, emits, sends) do
     case parse_message_spec(rest) do
-      {:ok, spec, [{:keyword, _, :where} | rest]} ->
-        case parse_constraint_expr(rest) do
-          {:ok, constraint, rest} ->
-            parse_protocol_entries(rest, [%{spec | constraint: constraint} | accepts], emits, sends)
-          {:error, _} = err -> err
-        end
       {:ok, spec, rest} ->
+        # Parse optional where clause
+        {spec, rest} = case rest do
+          [{:keyword, _, :where} | rest2] ->
+            case parse_constraint_expr(rest2) do
+              {:ok, constraint, rest3} -> {%{spec | constraint: constraint}, rest3}
+              {:error, _} = err -> throw(err)
+            end
+          _ -> {spec, rest}
+        end
+
+        # Parse optional max_queue: N and priority: true
+        {spec, rest} = parse_accepts_options(spec, rest)
         parse_protocol_entries(rest, [spec | accepts], emits, sends)
+
       {:error, _} = err -> err
     end
+  catch
+    {:error, _} = err -> err
   end
 
   defp parse_protocol_entries([{:keyword, _, :emits} | rest], accepts, emits, sends) do
@@ -707,6 +721,21 @@ defmodule Vor.Parser do
       {:error, _} = err -> err
     end
   end
+
+  defp parse_accepts_options(spec, [{:keyword, _, :max_queue}, {:delimiter, _, :colon}, {:integer, _, n} | rest]) do
+    parse_accepts_options(%{spec | max_queue: n}, rest)
+  end
+
+  defp parse_accepts_options(spec, [{:identifier, _, :priority}, {:delimiter, _, :colon}, {:atom, _, "true"} | rest]) do
+    parse_accepts_options(%{spec | priority: true}, rest)
+  end
+
+  defp parse_accepts_options(spec, [{:identifier, _, :priority}, {:delimiter, _, :colon}, {:identifier, _, :true} | rest]) do
+    parse_accepts_options(%{spec | priority: true}, rest)
+  end
+
+  defp parse_accepts_options(spec, [{:delimiter, _, :comma} | rest]), do: parse_accepts_options(spec, rest)
+  defp parse_accepts_options(spec, rest), do: {spec, rest}
 
   defp parse_protocol_entries([token | _], _a, _e, _s), do: {:error, {:unexpected_in_protocol, token}}
   defp parse_protocol_entries([], _a, _e, _s), do: {:error, :unexpected_eof}
@@ -1775,7 +1804,7 @@ defmodule Vor.Parser do
 
   defp parse_state_decl([{:keyword, meta, :state} | rest]) do
     case rest do
-      [{:identifier, _, field}, {:delimiter, _, :colon} | rest] ->
+      [{type, _, field}, {:delimiter, _, :colon} | rest] when type in [:identifier, :keyword] ->
         case parse_type_union(rest, []) do
           {:ok, types, [{:identifier, _, :sensitive} | rest]} ->
             {:ok, %AST.StateDecl{field: field, type_union: types, sensitive: true, meta: meta}, rest}

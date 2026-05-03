@@ -38,6 +38,7 @@ defmodule Vor.Lexer do
                    forall where and or not in start_timer cancel_timer restart_timer
                    retransmit_last_response extern if else
                    sends send broadcast system connect solve noop requires
+                   max_queue
                    map_get map_put map_has map_delete map_size map_sum map_merge
                    every gleam)
 

@@ -187,6 +187,7 @@ defmodule Vor.Codegen.Erlang do
 
   defp gen_handle_call(agent, l) do
     constraints = build_constraint_map(agent)
+    bp_map = build_backpressure_map(agent)
 
     handler_clauses =
       agent.handlers
@@ -201,6 +202,7 @@ defmodule Vor.Codegen.Erlang do
 
         body = received_telemetry ++ body
         body = wrap_constraint_check(body, handler.pattern.tag, constraints, :State, :gen_server, l, handler)
+        body = wrap_backpressure_check(body, handler.pattern.tag, bp_map, :State, :gen_server, l)
 
         {:clause, l,
           [pattern_form, {:var, l, :_From}, {:var, l, :State}],
@@ -1699,6 +1701,82 @@ defmodule Vor.Codegen.Erlang do
 
   defp list_to_erl([], l), do: {:nil, l}
   defp list_to_erl([h | t], l), do: {:cons, l, h, list_to_erl(t, l)}
+
+  # ------------------------------------------------------------------
+  # Backpressure codegen
+  # ------------------------------------------------------------------
+
+  defp build_backpressure_map(%IR.Agent{protocol: nil, max_queue: aq}), do: %{agent_level: aq}
+  defp build_backpressure_map(%IR.Agent{protocol: %IR.Protocol{accepts: accepts}, max_queue: aq}) do
+    per_msg =
+      (accepts || [])
+      |> Enum.reject(& &1.priority)
+      |> Enum.filter(fn mt -> mt.max_queue != nil or aq != nil end)
+      |> Enum.into(%{}, fn mt ->
+        {tag_atom(mt.tag), mt.max_queue || aq}
+      end)
+
+    priority_tags =
+      (accepts || [])
+      |> Enum.filter(& &1.priority)
+      |> Enum.map(fn mt -> tag_atom(mt.tag) end)
+      |> MapSet.new()
+
+    %{limits: per_msg, priority: priority_tags, agent_level: aq}
+  end
+
+  defp wrap_backpressure_check(body, tag, bp_map, data_var, agent_type, l) do
+    tag_a = tag_atom(tag)
+
+    # Priority messages bypass backpressure
+    if MapSet.member?(Map.get(bp_map, :priority, MapSet.new()), tag_a) do
+      body
+    else
+      limit = Map.get(Map.get(bp_map, :limits, %{}), tag_a) || bp_map[:agent_level]
+
+      case limit do
+        nil -> body
+        n when is_integer(n) ->
+          queue_len_check = {:call, l,
+            {:remote, l, {:atom, l, :erlang}, {:atom, l, :process_info}},
+            [{:call, l, {:atom, l, :self}, []}, {:atom, l, :message_queue_len}]}
+
+          rejection_reply = case agent_type do
+            :gen_server ->
+              {:tuple, l, [
+                {:atom, l, :reply},
+                {:tuple, l, [{:atom, l, :error}, {:tuple, l, [{:atom, l, :backpressure}, {:atom, l, :queue_full}]}]},
+                {:var, l, data_var}
+              ]}
+            :gen_statem ->
+              {:tuple, l, [
+                {:atom, l, :keep_state_and_data},
+                list_to_erl([
+                  {:tuple, l, [{:atom, l, :reply}, {:var, l, :From},
+                    {:tuple, l, [{:atom, l, :error}, {:tuple, l, [{:atom, l, :backpressure}, {:atom, l, :queue_full}]}]}]}
+                ], l)
+              ]}
+          end
+
+          bp_telemetry = Tel.call([:vor, :backpressure, :rejected], [
+            {:agent, Tel.agent_name_expr(data_var, l)},
+            {:message_tag, {:atom, l, tag_a}},
+            {:limit, {:integer, l, n}}
+          ], l)
+
+          [{:case, l, queue_len_check, [
+            {:clause, l,
+              [{:tuple, l, [{:atom, l, :message_queue_len}, {:var, l, :VorQLen}]}],
+              [[{:op, l, :>, {:var, l, :VorQLen}, {:integer, l, n}}]],
+              bp_telemetry ++ [rejection_reply]},
+            {:clause, l,
+              [{:var, l, :_}],
+              [],
+              body}
+          ]}]
+      end
+    end
+  end
 
   defp tag_atom(tag) when is_atom(tag), do: tag
   defp tag_atom(tag) when is_binary(tag), do: String.to_atom(tag)

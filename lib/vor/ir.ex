@@ -20,7 +20,8 @@ defmodule Vor.IR do
       :externs,
       :monitors,
       :periodic_timers,
-      :init_handler
+      :init_handler,
+      max_queue: nil
     ]
   end
 
@@ -29,7 +30,7 @@ defmodule Vor.IR do
   end
 
   defmodule MessageType do
-    defstruct [:tag, :fields, constraint: nil]
+    defstruct [:tag, :fields, constraint: nil, max_queue: nil, priority: false]
   end
 
   defmodule Handler do

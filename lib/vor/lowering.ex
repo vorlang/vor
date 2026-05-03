@@ -34,6 +34,8 @@ defmodule Vor.Lowering do
     timeout_handlers = generate_timeout_handlers(monitors, known_names, state_field_name)
     periodic_timers = extract_periodic_timers(ast.body, known_names)
 
+    agent_max_queue = extract_agent_max_queue(ast.body)
+
     ir = %IR.Agent{
       name: ast.name,
       module: Module.concat([Vor, Agent, ast.name]),
@@ -49,7 +51,8 @@ defmodule Vor.Lowering do
       externs: extract_externs(ast.body),
       monitors: monitors,
       periodic_timers: periodic_timers,
-      init_handler: init_handler
+      init_handler: init_handler,
+      max_queue: agent_max_queue
     }
 
     {:ok, ir}
@@ -134,11 +137,14 @@ defmodule Vor.Lowering do
     end
   end
 
-  defp lower_message_spec(%AST.MessageSpec{tag: tag, fields: fields, constraint: constraint}) do
+  defp lower_message_spec(%AST.MessageSpec{tag: tag, fields: fields, constraint: constraint,
+                                            max_queue: mq, priority: pri}) do
     %IR.MessageType{
       tag: to_atom(tag),
       fields: Enum.map(fields, fn {name, type} -> {to_atom(name), to_atom(type)} end),
-      constraint: constraint
+      constraint: constraint,
+      max_queue: mq,
+      priority: pri == true
     }
   end
 
@@ -531,6 +537,13 @@ defmodule Vor.Lowering do
       left: lower_condition(left, param_names),
       right: lower_condition(right, param_names)
     }
+  end
+
+  defp extract_agent_max_queue(body) do
+    Enum.find_value(body, fn
+      {:max_queue, n} when is_integer(n) -> n
+      _ -> nil
+    end)
   end
 
   defp extract_externs(body) do

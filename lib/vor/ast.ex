@@ -4,7 +4,7 @@ defmodule Vor.AST do
   """
 
   defmodule Agent do
-    defstruct [:name, :params, :body, :meta]
+    defstruct [:name, :params, :body, :meta, max_queue: nil]
   end
 
   defmodule Protocol do
@@ -12,7 +12,7 @@ defmodule Vor.AST do
   end
 
   defmodule MessageSpec do
-    defstruct [:tag, :fields, :meta, constraint: nil]
+    defstruct [:tag, :fields, :meta, constraint: nil, max_queue: nil, priority: false]
   end
 
   defmodule Handler do
