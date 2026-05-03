@@ -85,7 +85,7 @@ What the compiler does with this:
 - The `safety` invariant is proven at compile time — the program is rejected if any reachable state violates it
 - The `where` constraint rejects messages with invalid priority before the handler runs
 - The `sensitive` annotation redacts `auth_token` in all telemetry events
-- The `liveness` invariant is monitored at runtime with automatic recovery via the resilience handler
+- The `liveness` invariant is monitored at runtime with automatic recovery; `liveness ... proven` is verified at compile time via reachability analysis
 - Every state transition and message generates telemetry automatically
 - The compiled binary is a standard OTP gen_statem
 
@@ -192,6 +192,7 @@ The compiler knows every state field, message type, transition, and handler. It 
 | `[:vor, :transition]` | agent, field, from, to (sensitive fields redacted) |
 | `[:vor, :message, :emitted]` | agent, message tag |
 | `[:vor, :constraint, :violated]` | agent, message tag, constraint description |
+| `[:vor, :backpressure, :rejected]` | agent, message tag, queue length, limit |
 
 Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every agent is observable. You still need a metrics backend (Prometheus/Grafana) to view the data — Vor generates the events, you bring the dashboard.
 
@@ -199,21 +200,26 @@ Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every a
 
 **Verification and testing:**
 - Compile-time safety invariants proven by exhaustive state graph traversal
+- Compile-time liveness verification — `liveness "..." proven` checks that every obligated state has a reachable path to fulfillment
 - Multi-agent bounded model checking with cone-of-influence abstraction, integer saturation, symmetry reduction
+- Multi-agent liveness via Tarjan's SCC — detects cycles where progress is permanently blocked
 - Chaos testing with kill, partition, delay, workload on real BEAM processes
+- Protocol version compatibility checking — `mix vor.compat` detects breaking changes before rolling deploy
 
 **Language features:**
 - Parameterized agents, init handlers, periodic timers (`every`)
 - Protocol input constraints with `where` clauses — invalid messages rejected before handlers run
+- Backpressure declarations — `max_queue` limits with `priority` bypass for health checks
 - Sensitive field annotations — redacted in telemetry
+- `requires` declarations in system blocks — infrastructure dependencies started before agents during simulation
 - Native map operations (get, put, merge, has, delete, size, sum) with merge strategies
 - Native list operations (head, tail, append, prepend, length, empty)
-- Auto-generated telemetry for transitions, messages, and lifecycle
+- Auto-generated telemetry for transitions, messages, lifecycle, and backpressure events
 - Gleam extern support with compile-time type boundary validation
 - Bidirectional relations with compile-time equation inversion
 
 **Testing:**
-- 394+ tests, 9 property-based test suites, zero compiler warnings
+- 434+ tests, 9 property-based test suites, zero compiler warnings
 - All five examples fully native — zero externs:
   - Distributed lock: proven safety, liveness recovery, protocol constraints
   - Circuit breaker: proven safety, liveness recovery

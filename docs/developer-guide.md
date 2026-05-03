@@ -257,6 +257,87 @@ State space reduction:
 
 Handler simulation interprets IR action trees directly (same IR as codegen). Extern results are `:unknown` — conditionals on `:unknown` fork both branches (conservative over-approximation).
 
+## Liveness verification
+
+### Single-agent (compile time)
+
+`liveness "name" proven do always(P implies eventually(Q)) end` is verified during `mix compile`. The verifier checks: from every state where P holds but Q doesn't, is there a reachable path to a state where Q holds? If not (dead end or cycle back to non-Q states), the invariant is violated and compilation fails.
+
+Uses the existing state graph built for safety verification. Implemented in `Vor.Explorer.LivenessChecker.check_single_agent/2`.
+
+### Multi-agent (`mix vor.check`)
+
+System blocks accept `liveness "name" proven do ... end` alongside `safety` declarations. After BFS exploration, the explorer:
+
+1. Builds an adjacency map from the explored product state graph
+2. Runs Tarjan's SCC algorithm (O(V+E)) to find non-trivial cycles
+3. For each SCC, checks if any liveness obligation is active (P holds) but never fulfilled (Q never holds)
+4. Terminal states (no outgoing transitions) with unfulfilled obligations are also flagged
+
+Liveness field references are extracted from raw body tokens so the relevance analysis correctly tracks them.
+
+Modules:
+- `lib/vor/explorer/tarjan.ex` — Tarjan's SCC algorithm
+- `lib/vor/explorer/liveness_checker.ex` — body parser + single/multi-agent checking
+
+## Backpressure
+
+```vor
+agent Worker do
+  max_queue 500                                    # agent-level limit
+
+  protocol do
+    accepts {:task} max_queue: 100                 # per-message override
+    accepts {:health} priority: true               # bypasses backpressure
+    emits {:ok}
+  end
+end
+```
+
+Codegen inserts a queue check before the handler body using `erlang:process_info(self(), message_queue_len)`. When the limit is exceeded:
+- Calls return `{:error, {:backpressure, :queue_full}}`
+- Casts are silently dropped
+- Priority messages bypass the check entirely
+
+Fires `[:vor, :backpressure, :rejected]` telemetry on rejection.
+
+Per-message `max_queue:` overrides agent-level `max_queue`. Priority messages always have `backpressure_limit: nil`.
+
+## `requires` declarations
+
+```vor
+system KvCluster do
+  requires :vordb                    # OTP application
+  requires VorDB.RingManager         # module with start_link
+
+  agent :v1, KvStore(node_id: :node1)
+  ...
+end
+```
+
+`requires` declares infrastructure dependencies that `mix vor.simulate` starts before agents and stops (reverse order) after simulation. Handles `{:already_started, pid}` gracefully. The model checker (`mix vor.check`) ignores `requires` entirely.
+
+## Protocol version compatibility
+
+```bash
+mix vor.compat new.vor --against old.vor
+```
+
+`Vor.Compat.check/2` compares two protocol versions and classifies each change:
+
+| Change | Direction | Compatible? |
+|---|---|---|
+| Add accepts tag | — | ✓ (old agents won't send it) |
+| Remove accepts tag | — | ✗ (old agents may still send) |
+| Add field to accepts (with default) | — | ✓ |
+| Add field to accepts (no default) | — | ✗ |
+| Remove field from accepts | — | ✓ (receiver ignores extra) |
+| Add emits tag | — | ✓ (old receivers ignore) |
+| Remove emits tag | — | ✗ (old receivers may depend) |
+| Remove field from emits | — | ✗ |
+| Widen field type (integer → term) | — | ✓ |
+| Narrow field type (term → integer) | — | ✗ |
+
 ## Test organization
 
 - `test/features/` — feature-level tests (telemetry, simulation, constraints, model checking)
