@@ -36,30 +36,38 @@ defmodule Vor.Simulator do
     :rand.seed(:exsss, {config.seed, config.seed + 1, config.seed + 2})
     Process.flag(:trap_exit, true)
 
-    case SupervisorBuilder.start_link(system_info) do
-      {:ok, sup_pid} ->
-        Process.sleep(500)
+    case start_requirements(system_info) do
+      {:ok, req_pids} ->
+        case SupervisorBuilder.start_link(system_info) do
+          {:ok, sup_pid} ->
+            Process.sleep(500)
 
-        agent_pids = discover_agents(system_info)
-        {:ok, timeline} = Timeline.start_link()
+            agent_pids = discover_agents(system_info)
+            {:ok, timeline} = Timeline.start_link()
 
-        Timeline.record(timeline, :start, %{
-          agents: Map.keys(agent_pids),
-          seed: config.seed
-        })
+            Timeline.record(timeline, :start, %{
+              agents: Map.keys(agent_pids),
+              seed: config.seed
+            })
 
-        result = run_loop(agent_pids, system_info, config, timeline, sup_pid)
+            result = run_loop(agent_pids, system_info, config, timeline, sup_pid)
 
-        try do
-          Supervisor.stop(sup_pid, :normal, 5000)
-        catch
-          :exit, _ -> :ok
+            try do
+              Supervisor.stop(sup_pid, :normal, 5000)
+            catch
+              :exit, _ -> :ok
+            end
+
+            stop_requirements(req_pids)
+            result
+
+          {:error, reason} ->
+            stop_requirements(req_pids)
+            {:error, :system_crash, reason}
         end
 
-        result
-
-      {:error, reason} ->
-        {:error, :system_crash, reason}
+      {:error, dep, reason} ->
+        {:error, :dependency_failed, dep, reason}
     end
   end
 
@@ -269,6 +277,86 @@ defmodule Vor.Simulator do
   end
 
   # -------------------------------------------------------------------
+  # Requirement startup and shutdown
+  # -------------------------------------------------------------------
+
+  defp start_requirements(%{requires: requires}) when is_list(requires) and requires != [] do
+    Enum.reduce_while(requires, {:ok, []}, fn req, {:ok, pids} ->
+      case start_requirement(req) do
+        {:ok, pid} ->
+          {:cont, {:ok, [{req, pid} | pids]}}
+
+        {:error, reason} ->
+          Enum.each(pids, fn {_, pid} -> stop_one_req(pid) end)
+          {:halt, {:error, req.target, reason}}
+      end
+    end)
+    |> case do
+      {:ok, pids} -> {:ok, Enum.reverse(pids)}
+      error -> error
+    end
+  end
+
+  defp start_requirements(_), do: {:ok, []}
+
+  defp start_requirement(%{type: :application, target: app}) do
+    case Application.ensure_all_started(app) do
+      {:ok, _} -> {:ok, app}
+      {:error, {_, {:already_started, _}}} -> {:ok, app}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp start_requirement(%{type: :module, target: module, args: args}) do
+    args = args || []
+
+    cond do
+      Code.ensure_loaded?(module) and function_exported?(module, :start_link, 1) ->
+        case module.start_link(args) do
+          {:ok, pid} -> {:ok, pid}
+          {:error, {:already_started, pid}} -> {:ok, pid}
+          {:error, reason} -> {:error, reason}
+        end
+
+      Code.ensure_loaded?(module) and function_exported?(module, :start_link, 0) ->
+        case module.start_link() do
+          {:ok, pid} -> {:ok, pid}
+          {:error, {:already_started, pid}} -> {:ok, pid}
+          {:error, reason} -> {:error, reason}
+        end
+
+      true ->
+        {:error, {:no_start_function, module}}
+    end
+  end
+
+  defp stop_requirements(req_pids) do
+    req_pids
+    |> Enum.reverse()
+    |> Enum.each(fn {_req, pid} -> stop_one_req(pid) end)
+  end
+
+  defp stop_one_req(app) when is_atom(app) do
+    try do
+      Application.stop(app)
+    catch
+      _, _ -> :ok
+    end
+  end
+
+  defp stop_one_req(pid) when is_pid(pid) do
+    if Process.alive?(pid) do
+      try do
+        GenServer.stop(pid, :normal, 5000)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+  end
+
+  defp stop_one_req(_), do: :ok
+
+  # -------------------------------------------------------------------
   # System startup and discovery
   # -------------------------------------------------------------------
 
@@ -387,7 +475,8 @@ defmodule Vor.Simulator do
            accepts_by_name: accepts_by_name,
            connections: result.system_ir.connections,
            invariants: result.system_ir.invariants,
-           chaos: result.system_ir.chaos
+           chaos: result.system_ir.chaos,
+           requires: result.system_ir.requires || []
          }}
 
       {:error, _} = err ->

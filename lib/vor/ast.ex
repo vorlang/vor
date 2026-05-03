@@ -144,7 +144,11 @@ defmodule Vor.AST do
   end
 
   defmodule System do
-    defstruct [:name, :agents, :connections, :meta, invariants: [], chaos: nil]
+    defstruct [:name, :agents, :connections, :meta, invariants: [], chaos: nil, requires: []]
+  end
+
+  defmodule Requires do
+    defstruct [:target, :args, type: :module]
   end
 
   defmodule AgentInstance do

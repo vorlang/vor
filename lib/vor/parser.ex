@@ -46,14 +46,20 @@ defmodule Vor.Parser do
 
   defp parse_system([{:keyword, meta, :system}, {:identifier, _, name}, {:keyword, _, :do} | rest]) do
     case parse_system_entries(rest, [], [], []) do
-      {:ok, agents, connections, invariants, rest} ->
+      {:ok, agents, connections, mixed, rest} ->
+        {reqs, invariants} = split_requires(mixed)
         {:ok, %AST.System{name: name, agents: agents, connections: connections,
-                           invariants: invariants, meta: meta}, rest}
-      {:ok, agents, connections, invariants, rest, chaos} ->
+                           invariants: invariants, requires: reqs, meta: meta}, rest}
+      {:ok, agents, connections, mixed, rest, chaos} ->
+        {reqs, invariants} = split_requires(mixed)
         {:ok, %AST.System{name: name, agents: agents, connections: connections,
-                           invariants: invariants, chaos: chaos, meta: meta}, rest}
+                           invariants: invariants, requires: reqs, chaos: chaos, meta: meta}, rest}
       {:error, _} = err -> err
     end
+  end
+
+  defp split_requires(mixed) do
+    Enum.split_with(mixed, &match?(%AST.Requires{}, &1))
   end
 
   defp parse_system_entries([{:keyword, _, :end} | rest], agents, connections, invariants) do
@@ -95,6 +101,26 @@ defmodule Vor.Parser do
       {:error, _} = err -> err
     end
   end
+
+  # requires :app_name — OTP application
+  defp parse_system_entries([{:keyword, _, :requires}, {:atom, _, app} | rest], agents, connections, invariants) do
+    req = %AST.Requires{type: :application, target: String.to_atom(app), args: []}
+    parse_system_entries(rest, agents, connections, [req | invariants])
+  end
+
+  # requires Module.Name — module with start_link
+  defp parse_system_entries([{:keyword, _, :requires}, {:identifier, _, first} | rest], agents, connections, invariants) do
+    {segments, rest} = collect_module_segments([first], rest)
+    mod = Module.concat(Enum.map(segments, fn s -> if is_atom(s), do: s, else: String.to_atom("#{s}") end))
+    req = %AST.Requires{type: :module, target: mod, args: []}
+    parse_system_entries(rest, agents, connections, [req | invariants])
+  end
+
+  defp collect_module_segments(acc, [{:operator, _, :dot}, {:identifier, _, seg} | rest]) do
+    collect_module_segments(acc ++ [seg], rest)
+  end
+
+  defp collect_module_segments(acc, rest), do: {acc, rest}
 
   # chaos do ... end
   defp parse_system_entries([{:identifier, _, :chaos}, {:keyword, _, :do} | rest], agents, connections, invariants) do

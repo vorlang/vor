@@ -121,7 +121,7 @@ defmodule Vor.IR do
   end
 
   defmodule SystemIR do
-    defstruct [:name, :registry, :agents, :connections, invariants: [], chaos: nil]
+    defstruct [:name, :registry, :agents, :connections, invariants: [], chaos: nil, requires: []]
   end
 
   defmodule ChaosConfig do
