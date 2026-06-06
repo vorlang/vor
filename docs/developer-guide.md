@@ -99,6 +99,8 @@ Key codegen features:
 - `lib/mix/tasks/vor.check.ex` — multi-agent model checking
 - `lib/mix/tasks/vor.simulate.ex` — chaos simulation
 - `lib/mix/tasks/vor.graph.ex` — state graph extraction
+- `lib/mix/tasks/vor.compat.ex` — protocol version compatibility checking
+- `lib/mix/tasks/vor.surface.ex` — queryable spec inventory (JSON/text)
 
 ## State field types
 
@@ -361,6 +363,18 @@ handle_event({call, From}, {order, VorFields0 = #{customer := C, item := I}}, St
 ```
 
 Only handlers whose tag actually declares a default are rewritten this way (the whole map is aliased in the head, non-defaulted fields stay exact-matched, defaulted fields are bound from the merged map). Agents with no defaults generate identical code to before. Applies to `gen_server` (`handle_call`/`handle_cast`) and `gen_statem` (`handle_event`) alike.
+
+## Spec inventory (`mix vor.surface`)
+
+```bash
+mix vor.surface                          # all .vor in lib/ + examples/, JSON
+mix vor.surface --file examples/lock.vor # single file
+mix vor.surface --format text            # human-readable
+```
+
+`Vor.Surface.extract_source/2` (and `extract/2` on an already-parsed program) walks the AST and returns a JSON-serializable map per file: agents (with derived `gen_server`/`gen_statem` `type`, params, states), protocol (accepts with `where`/`max_queue`/`priority`/`defaults`, plus emits), safety/liveness invariants, backpressure, externs, and systems (instances, connections, `requires`, invariants, chaos). It is strictly read-only — it never runs verification or mutates the parser/AST.
+
+Two reconstruction notes: invariant **bodies** are kept by the parser as raw token lists, so `Vor.Surface` re-renders them to source-like strings (e.g. `never(phase == :held and emitted({:grant, _}))`); `where` constraints are rebuilt from their structured AST. **System** safety bodies are stored structured (no verbatim tokens) and are rendered via `inspect/1`. The agent `type` is derived with the same rule as `Vor.Lowering`: an enum (atom-union) state field ⇒ `gen_statem`, otherwise `gen_server`.
 
 ## Test organization
 
