@@ -116,12 +116,6 @@ defmodule Vor.Parser do
     parse_system_entries(rest, agents, connections, [req | invariants])
   end
 
-  defp collect_module_segments(acc, [{:operator, _, :dot}, {:identifier, _, seg} | rest]) do
-    collect_module_segments(acc ++ [seg], rest)
-  end
-
-  defp collect_module_segments(acc, rest), do: {acc, rest}
-
   # chaos do ... end
   defp parse_system_entries([{:identifier, _, :chaos}, {:keyword, _, :do} | rest], agents, connections, invariants) do
     case parse_chaos_items(rest, %AST.ChaosConfig{}) do
@@ -131,6 +125,12 @@ defmodule Vor.Parser do
   end
 
   defp parse_system_entries([token | _], _a, _c, _i), do: {:error, {:unexpected_in_system, token}}
+
+  defp collect_module_segments(acc, [{:operator, _, :dot}, {:identifier, _, seg} | rest]) do
+    collect_module_segments(acc ++ [seg], rest)
+  end
+
+  defp collect_module_segments(acc, rest), do: {acc, rest}
 
   # When a chaos block was parsed, thread it through subsequent entries
   defp parse_system_entries([{:keyword, _, :end} | rest], agents, connections, invariants, chaos) do
@@ -174,6 +174,11 @@ defmodule Vor.Parser do
   # COND inside `exists` uses qualified references (`A.field`); inside
   # `for_all` references are unqualified; the never-named form uses
   # `agent_name.field` references.
+
+  @doc false
+  # Public entry point for reusing the system invariant body parser from other
+  # modules (e.g. the multi-agent liveness checker). Returns `{:ok, body, rest}`.
+  def parse_system_invariant_body_public(tokens), do: parse_system_invariant_body(tokens)
 
   # never(count(agents where FIELD == :VALUE) OP N)
   defp parse_system_invariant_body([

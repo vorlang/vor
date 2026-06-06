@@ -221,7 +221,7 @@ Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every a
 - Bidirectional relations with compile-time equation inversion
 
 **Testing:**
-- 443+ tests, 9 property-based test suites
+- 443+ tests, 9 property-based test suites, zero compiler warnings
 - All five examples fully native — zero externs:
   - Distributed lock: proven safety, liveness recovery, protocol constraints
   - Circuit breaker: proven safety, liveness recovery

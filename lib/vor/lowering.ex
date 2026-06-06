@@ -104,7 +104,7 @@ defmodule Vor.Lowering do
     end)
   end
 
-  defp make_data_field(field, types, sensitive \\ false) do
+  defp make_data_field(field, types, sensitive) do
     {type, default} = case types do
       [{:type, t}] ->
         d = case to_atom(t) do

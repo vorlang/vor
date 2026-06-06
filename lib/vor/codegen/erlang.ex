@@ -1882,7 +1882,7 @@ defmodule Vor.Codegen.Erlang do
   # {keep_state, Data, Actions} → maybe emit (no state change)
   # case/if expressions → recurse into each branch
   defp statem_return_telemetry(
-         {:tuple, _, [{:atom, _, :next_state}, {:atom, _, to_state} | _]} = _ret,
+         {:tuple, _, [{:atom, _, :next_state}, {:atom, _, to_state} | _]} = ret,
          handler, state_field_name, l
        ) do
     guard_state = extract_guard_state(handler.guard)
@@ -1893,7 +1893,7 @@ defmodule Vor.Codegen.Erlang do
       {:to, {:atom, l, to_state}}
     ], l)
 
-    emit_tel = extract_emit_tag_from_return(_ret, l)
+    emit_tel = extract_emit_tag_from_return(ret, l)
     enum_tel ++ emit_tel
   end
 
@@ -1962,7 +1962,7 @@ defmodule Vor.Codegen.Erlang do
 
   # Wrap handler body with a constraint check if the tag has one.
   # Returns the body unchanged if no constraint for the tag.
-  defp wrap_constraint_check(body, tag, constraints, data_var, agent_type, l, handler \\ nil) do
+  defp wrap_constraint_check(body, tag, constraints, data_var, agent_type, l, handler) do
     tag_atom = tag_atom(tag)
 
     case Map.get(constraints, tag_atom) do
