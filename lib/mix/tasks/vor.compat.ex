@@ -106,25 +106,19 @@ defmodule Mix.Tasks.Vor.Compat do
 
   defp protocol_to_map(protocol) do
     %{
-      accepts:
-        Enum.map(protocol.accepts || [], fn mt ->
-          %{
-            tag: mt.tag,
-            fields:
-              Enum.map(mt.fields || [], fn {name, type} ->
-                %{name: name, type: type, default: nil}
-              end)
-          }
-        end),
-      emits:
-        Enum.map(protocol.emits || [], fn mt ->
-          %{
-            tag: mt.tag,
-            fields:
-              Enum.map(mt.fields || [], fn {name, type} ->
-                %{name: name, type: type, default: nil}
-              end)
-          }
+      accepts: Enum.map(protocol.accepts || [], &message_type_to_map/1),
+      emits: Enum.map(protocol.emits || [], &message_type_to_map/1)
+    }
+  end
+
+  defp message_type_to_map(mt) do
+    defaults = mt.defaults || %{}
+
+    %{
+      tag: mt.tag,
+      fields:
+        Enum.map(mt.fields || [], fn {name, type} ->
+          %{name: name, type: type, default: Map.get(defaults, name)}
         end)
     }
   end

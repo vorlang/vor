@@ -30,7 +30,7 @@ defmodule Vor.IR do
   end
 
   defmodule MessageType do
-    defstruct [:tag, :fields, constraint: nil, max_queue: nil, priority: false]
+    defstruct [:tag, :fields, constraint: nil, max_queue: nil, priority: false, defaults: %{}]
   end
 
   defmodule Handler do

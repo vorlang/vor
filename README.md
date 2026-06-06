@@ -209,6 +209,8 @@ Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every a
 **Language features:**
 - Parameterized agents, init handlers, periodic timers (`every`)
 - Protocol input constraints with `where` clauses — invalid messages rejected before handlers run
+- Default values on `accepts` fields — `quantity: integer default: 1`, filled in for omitting senders
+- Protocol version compatibility checking — `mix vor.compat new.vor --against old.vor` flags rolling-deploy breakage
 - Backpressure declarations — `max_queue` limits with `priority` bypass for health checks
 - Sensitive field annotations — redacted in telemetry
 - `requires` declarations in system blocks — infrastructure dependencies started before agents during simulation
@@ -219,7 +221,7 @@ Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every a
 - Bidirectional relations with compile-time equation inversion
 
 **Testing:**
-- 434+ tests, 9 property-based test suites, zero compiler warnings
+- 443+ tests, 9 property-based test suites
 - All five examples fully native — zero externs:
   - Distributed lock: proven safety, liveness recovery, protocol constraints
   - Circuit breaker: proven safety, liveness recovery

@@ -338,6 +338,30 @@ mix vor.compat new.vor --against old.vor
 | Widen field type (integer → term) | — | ✓ |
 | Narrow field type (term → integer) | — | ✗ |
 
+The mix task reads defaults straight from the compiled IR (`Vor.Compat.check/2` keys on `field.default`), so adding a field with a `default:` is reported COMPATIBLE end to end from two real `.vor` files.
+
+## Default values on accepts fields
+
+```vor
+protocol do
+  accepts {:order, customer: atom, item: atom, quantity: integer default: 1}
+end
+```
+
+`default:` follows the field's type and takes an integer, atom, boolean, or string literal. It is valid only on `accepts` — a default on `emits`/`sends` is a parse error (the sender always supplies every field). `default` is a *contextual* keyword: it is recognized only in this position, so it remains usable as an ordinary identifier (e.g. `default = ...` in a handler body).
+
+The default is stored in a `defaults` map on `AST.MessageSpec` / `IR.MessageType` (keyed by field name); the `fields` list keeps its `{name, type}` shape, so existing consumers are untouched. At runtime the compiled handler merges defaults before binding:
+
+```erlang
+%% on {:order, ...} where quantity has default: 1
+handle_event({call, From}, {order, VorFields0 = #{customer := C, item := I}}, State, Data) ->
+    VorFields = maps:merge(#{quantity => 1}, VorFields0),  %% sender's value wins
+    Quantity = maps:get(quantity, VorFields),
+    ...
+```
+
+Only handlers whose tag actually declares a default are rewritten this way (the whole map is aliased in the head, non-defaulted fields stay exact-matched, defaulted fields are bound from the merged map). Agents with no defaults generate identical code to before. Applies to `gen_server` (`handle_call`/`handle_cast`) and `gen_statem` (`handle_event`) alike.
+
 ## Test organization
 
 - `test/features/` — feature-level tests (telemetry, simulation, constraints, model checking)

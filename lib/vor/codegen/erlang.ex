@@ -188,11 +188,12 @@ defmodule Vor.Codegen.Erlang do
   defp gen_handle_call(agent, l) do
     constraints = build_constraint_map(agent)
     bp_map = build_backpressure_map(agent)
+    defaults_by_tag = build_defaults_by_tag(agent)
 
     handler_clauses =
       agent.handlers
       |> Enum.map(fn handler ->
-        pattern_form = pattern_to_erl(handler.pattern, l)
+        {pattern_form, defaults_prelude} = pattern_with_defaults(handler.pattern, defaults_by_tag, l)
         body = compile_handler_body(handler.actions, l, :State)
 
         received_telemetry = Tel.call([:vor, :message, :received], [
@@ -207,7 +208,7 @@ defmodule Vor.Codegen.Erlang do
         {:clause, l,
           [pattern_form, {:var, l, :_From}, {:var, l, :State}],
           guard_to_erl(handler.guard, l),
-          body}
+          defaults_prelude ++ body}
       end)
 
     catchall = {:clause, l,
@@ -224,10 +225,12 @@ defmodule Vor.Codegen.Erlang do
   end
 
   defp gen_handle_cast(agent, l) do
+    defaults_by_tag = build_defaults_by_tag(agent)
+
     handler_clauses =
       agent.handlers
       |> Enum.map(fn handler ->
-        pattern_form = pattern_to_erl(handler.pattern, l)
+        {pattern_form, defaults_prelude} = pattern_with_defaults(handler.pattern, defaults_by_tag, l)
         {pre_actions, terminal} = split_terminal(handler.actions)
 
         # Process actions sequentially, threading state variable through transitions
@@ -258,7 +261,7 @@ defmodule Vor.Codegen.Erlang do
         {:clause, l,
           [pattern_form, {:var, l, :State}],
           guard_to_erl(handler.guard, l),
-          pre_exprs ++ terminal_exprs ++ [result]}
+          defaults_prelude ++ pre_exprs ++ terminal_exprs ++ [result]}
       end)
 
     catchall = {:clause, l,
@@ -615,6 +618,7 @@ defmodule Vor.Codegen.Erlang do
   defp gen_handle_event(agent, l) do
     monitors = agent.monitors || []
     constraints = build_constraint_map(agent)
+    defaults_by_tag = build_defaults_by_tag(agent)
 
     state_field_name = case agent.state_fields do
       [%IR.StateField{name: name} | _] -> name
@@ -628,7 +632,7 @@ defmodule Vor.Codegen.Erlang do
       agent.handlers
       |> Enum.reject(fn h -> is_timeout_handler?(h, monitors) end)
       |> Enum.map(fn handler ->
-        pattern_form = pattern_to_erl(handler.pattern, l)
+        {pattern_form, defaults_prelude} = pattern_with_defaults(handler.pattern, defaults_by_tag, l)
         guard_erl = statem_guard_to_erl(handler.guard, l)
         msg_tag = tag_atom(handler.pattern.tag)
 
@@ -649,7 +653,7 @@ defmodule Vor.Codegen.Erlang do
         cast_clause = {:clause, l,
           [{:atom, l, :cast}, pattern_form, {:var, l, :State}, {:var, l, :Data}],
           guard_erl,
-          cast_body}
+          defaults_prelude ++ cast_body}
 
         call_body = compile_statem_handler_body(
           handler.actions, l, :Data, 0, state_field_name, monitors, {:call, :From})
@@ -661,7 +665,7 @@ defmodule Vor.Codegen.Erlang do
           [{:tuple, l, [{:atom, l, :call}, {:var, l, :From}]},
            pattern_form, {:var, l, :State}, {:var, l, :Data}],
           guard_erl,
-          call_body}
+          defaults_prelude ++ call_body}
 
         {cast_clause, call_clause}
       end)
@@ -1148,6 +1152,81 @@ defmodule Vor.Codegen.Erlang do
     end)
 
     {:tuple, l, [{:atom, l, tag}, {:map, l, map_pairs}]}
+  end
+
+  # Map from message tag → defaults map (%{field => literal}) for accepts that
+  # declare `default:` on one or more fields. Tags without defaults are absent.
+  defp build_defaults_by_tag(agent) do
+    accepts = (agent.protocol && agent.protocol.accepts) || []
+
+    accepts
+    |> Enum.filter(fn mt -> map_size(mt.defaults || %{}) > 0 end)
+    |> Map.new(fn mt -> {tag_atom(mt.tag), mt.defaults} end)
+  end
+
+  # Returns `{head_pattern_form, prelude_exprs}` for a handler pattern. When the
+  # message tag declares field defaults, the head aliases the whole incoming map
+  # and the prelude `maps:merge`s the declared defaults before binding defaulted
+  # fields. Tags without defaults behave exactly as before (empty prelude).
+  defp pattern_with_defaults(%IR.MatchPattern{tag: tag} = pattern, defaults_by_tag, l) do
+    case Map.get(defaults_by_tag, tag_atom(tag)) do
+      defaults when is_map(defaults) and map_size(defaults) > 0 ->
+        build_default_pattern(pattern, defaults, l)
+
+      _ ->
+        {pattern_to_erl(pattern, l), []}
+    end
+  end
+
+  defp build_default_pattern(%IR.MatchPattern{tag: tag, bindings: bindings}, defaults, l) do
+    # Non-defaulted fields stay exact-matched in the head; defaulted fields are
+    # excluded (they may be absent from old senders) and bound from the merged map.
+    head_pairs =
+      bindings
+      |> Enum.reject(fn b -> Map.has_key?(defaults, b.field) end)
+      |> Enum.map(fn
+        %IR.Binding{name: {:literal, value}, field: field} ->
+          {:map_field_exact, l, {:atom, l, field}, {:atom, l, value}}
+        %IR.Binding{name: name, field: field} ->
+          {:map_field_exact, l, {:atom, l, field}, {:var, l, erl_var(name)}}
+      end)
+
+    # {tag, VorFields0 = #{<non-default fields>}}
+    head =
+      {:tuple, l,
+       [{:atom, l, tag_atom(tag)},
+        {:match, l, {:var, l, :VorFields0}, {:map, l, head_pairs}}]}
+
+    defaults_map =
+      {:map, l,
+       Enum.map(defaults, fn {field, value} ->
+         {:map_field_assoc, l, {:atom, l, field}, default_literal_to_erl(value, l)}
+       end)}
+
+    # VorFields = maps:merge(#{defaults}, VorFields0)  — actual values override defaults
+    merge_expr =
+      {:match, l, {:var, l, :VorFields},
+       {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :merge}},
+        [defaults_map, {:var, l, :VorFields0}]}}
+
+    # Bind each defaulted, variable-bound field: Var = maps:get(field, VorFields)
+    bind_exprs =
+      bindings
+      |> Enum.filter(fn b -> Map.has_key?(defaults, b.field) and not match?({:literal, _}, b.name) end)
+      |> Enum.map(fn %IR.Binding{name: name, field: field} ->
+        {:match, l, {:var, l, erl_var(name)},
+         {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
+          [{:atom, l, field}, {:var, l, :VorFields}]}}
+      end)
+
+    {head, [merge_expr | bind_exprs]}
+  end
+
+  defp default_literal_to_erl(v, l) when is_integer(v), do: {:integer, l, v}
+  defp default_literal_to_erl(v, l) when is_boolean(v), do: {:atom, l, v}
+  defp default_literal_to_erl(v, l) when is_atom(v), do: {:atom, l, v}
+  defp default_literal_to_erl(v, l) when is_binary(v) do
+    {:bin, l, [{:bin_element, l, {:string, l, String.to_charlist(v)}, :default, :default}]}
   end
 
   defp emit_to_erl(%IR.EmitAction{tag: tag, fields: fields}, l, map_var) do

@@ -710,17 +710,32 @@ defmodule Vor.Parser do
 
   defp parse_protocol_entries([{:keyword, _, :emits} | rest], accepts, emits, sends) do
     case parse_message_spec(rest) do
-      {:ok, spec, rest} -> parse_protocol_entries(rest, accepts, [spec | emits], sends)
-      {:error, _} = err -> err
+      {:ok, %{defaults: d} = _spec, _rest} when map_size(d) > 0 ->
+        {:error, :default_not_allowed_on_emits}
+
+      {:ok, spec, rest} ->
+        parse_protocol_entries(rest, accepts, [spec | emits], sends)
+
+      {:error, _} = err ->
+        err
     end
   end
 
   defp parse_protocol_entries([{:keyword, _, :sends} | rest], accepts, emits, sends) do
     case parse_message_spec(rest) do
-      {:ok, spec, rest} -> parse_protocol_entries(rest, accepts, emits, [spec | sends])
-      {:error, _} = err -> err
+      {:ok, %{defaults: d} = _spec, _rest} when map_size(d) > 0 ->
+        {:error, :default_not_allowed_on_sends}
+
+      {:ok, spec, rest} ->
+        parse_protocol_entries(rest, accepts, emits, [spec | sends])
+
+      {:error, _} = err ->
+        err
     end
   end
+
+  defp parse_protocol_entries([token | _], _a, _e, _s), do: {:error, {:unexpected_in_protocol, token}}
+  defp parse_protocol_entries([], _a, _e, _s), do: {:error, :unexpected_eof}
 
   defp parse_accepts_options(spec, [{:keyword, _, :max_queue}, {:delimiter, _, :colon}, {:integer, _, n} | rest]) do
     parse_accepts_options(%{spec | max_queue: n}, rest)
@@ -737,38 +752,56 @@ defmodule Vor.Parser do
   defp parse_accepts_options(spec, [{:delimiter, _, :comma} | rest]), do: parse_accepts_options(spec, rest)
   defp parse_accepts_options(spec, rest), do: {spec, rest}
 
-  defp parse_protocol_entries([token | _], _a, _e, _s), do: {:error, {:unexpected_in_protocol, token}}
-  defp parse_protocol_entries([], _a, _e, _s), do: {:error, :unexpected_eof}
-
   # --- Message Spec: {:tag, field1: type1, field2: type2} ---
 
   defp parse_message_spec([{:delimiter, _, :open_brace}, {:atom, _, tag} | rest]) do
-    case parse_typed_fields(rest, []) do
-      {:ok, fields, rest} ->
-        {:ok, %AST.MessageSpec{tag: tag, fields: fields}, rest}
+    case parse_typed_fields(rest, [], %{}) do
+      {:ok, fields, defaults, rest} ->
+        {:ok, %AST.MessageSpec{tag: tag, fields: fields, defaults: defaults}, rest}
       {:error, _} = err -> err
     end
   end
 
   defp parse_message_spec([token | _]), do: {:error, {:expected_message_spec, token}}
 
-  defp parse_typed_fields([{:delimiter, _, :close_brace} | rest], acc) do
-    {:ok, Enum.reverse(acc), rest}
+  defp parse_typed_fields([{:delimiter, _, :close_brace} | rest], acc, defaults) do
+    {:ok, Enum.reverse(acc), defaults, rest}
   end
 
-  defp parse_typed_fields([{:delimiter, _, :comma} | rest], acc) do
-    parse_typed_field(rest, acc)
+  defp parse_typed_fields([{:delimiter, _, :comma} | rest], acc, defaults) do
+    parse_typed_field(rest, acc, defaults)
   end
 
-  defp parse_typed_fields(tokens, []) do
-    parse_typed_field(tokens, [])
+  defp parse_typed_fields(tokens, [], defaults) do
+    parse_typed_field(tokens, [], defaults)
   end
 
-  defp parse_typed_field([{:identifier, _, name}, {:delimiter, _, :colon}, {:identifier, _, type} | rest], acc) do
-    parse_typed_fields(rest, [{name, type} | acc])
+  # field with a default value: `name: type default: literal`
+  # `default` is a contextual keyword — only special here, an identifier elsewhere.
+  defp parse_typed_field([{:identifier, _, name}, {:delimiter, _, :colon}, {:identifier, _, type},
+                          {:identifier, _, :default}, {:delimiter, _, :colon} | rest], acc, defaults) do
+    case parse_default_literal(rest) do
+      {:ok, value, rest} ->
+        parse_typed_fields(rest, [{name, type} | acc], Map.put(defaults, to_ident_atom(name), value))
+
+      {:error, _} = err ->
+        err
+    end
   end
 
-  defp parse_typed_field([token | _], _acc), do: {:error, {:expected_field, token}}
+  defp parse_typed_field([{:identifier, _, name}, {:delimiter, _, :colon}, {:identifier, _, type} | rest], acc, defaults) do
+    parse_typed_fields(rest, [{name, type} | acc], defaults)
+  end
+
+  defp parse_typed_field([token | _], _acc, _defaults), do: {:error, {:expected_field, token}}
+
+  # Default value literals on accepts fields: integers, atoms, booleans, strings.
+  defp parse_default_literal([{:integer, _, n} | rest]), do: {:ok, n, rest}
+  defp parse_default_literal([{:atom, _, v} | rest]), do: {:ok, to_ident_atom(v), rest}
+  defp parse_default_literal([{:identifier, _, :true} | rest]), do: {:ok, true, rest}
+  defp parse_default_literal([{:identifier, _, :false} | rest]), do: {:ok, false, rest}
+  defp parse_default_literal([{:string, _, s} | rest]), do: {:ok, s, rest}
+  defp parse_default_literal([token | _]), do: {:error, {:expected_default_literal, token}}
 
   # --- Handler: on PATTERN [when GUARD] do BODY end ---
 

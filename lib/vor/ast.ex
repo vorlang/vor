@@ -12,7 +12,7 @@ defmodule Vor.AST do
   end
 
   defmodule MessageSpec do
-    defstruct [:tag, :fields, :meta, constraint: nil, max_queue: nil, priority: false]
+    defstruct [:tag, :fields, :meta, constraint: nil, max_queue: nil, priority: false, defaults: %{}]
   end
 
   defmodule Handler do

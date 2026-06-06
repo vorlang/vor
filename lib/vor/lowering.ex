@@ -138,13 +138,14 @@ defmodule Vor.Lowering do
   end
 
   defp lower_message_spec(%AST.MessageSpec{tag: tag, fields: fields, constraint: constraint,
-                                            max_queue: mq, priority: pri}) do
+                                            max_queue: mq, priority: pri, defaults: defaults}) do
     %IR.MessageType{
       tag: to_atom(tag),
       fields: Enum.map(fields, fn {name, type} -> {to_atom(name), to_atom(type)} end),
       constraint: constraint,
       max_queue: mq,
-      priority: pri == true
+      priority: pri == true,
+      defaults: Map.new(defaults || %{}, fn {k, v} -> {to_atom(k), v} end)
     }
   end
 
