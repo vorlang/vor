@@ -101,6 +101,7 @@ Key codegen features:
 - `lib/mix/tasks/vor.graph.ex` — state graph extraction
 - `lib/mix/tasks/vor.compat.ex` — protocol version compatibility checking
 - `lib/mix/tasks/vor.surface.ex` — queryable spec inventory (JSON/text)
+- `lib/mix/tasks/vor.coverage.ex` — verification posture report (JSON/text)
 
 ## State field types
 
@@ -375,6 +376,18 @@ mix vor.surface --format text            # human-readable
 `Vor.Surface.extract_source/2` (and `extract/2` on an already-parsed program) walks the AST and returns a JSON-serializable map per file: agents (with derived `gen_server`/`gen_statem` `type`, params, states), protocol (accepts with `where`/`max_queue`/`priority`/`defaults`, plus emits), safety/liveness invariants, backpressure, externs, and systems (instances, connections, `requires`, invariants, chaos). It is strictly read-only — it never runs verification or mutates the parser/AST.
 
 Two reconstruction notes: invariant **bodies** are kept by the parser as raw token lists, so `Vor.Surface` re-renders them to source-like strings (e.g. `never(phase == :held and emitted({:grant, _}))`); `where` constraints are rebuilt from their structured AST. **System** safety bodies are stored structured (no verbatim tokens) and are rendered via `inspect/1`. The agent `type` is derived with the same rule as `Vor.Lowering`: an enum (atom-union) state field ⇒ `gen_statem`, otherwise `gen_server`.
+
+## Verification posture (`mix vor.coverage`)
+
+```bash
+mix vor.coverage                 # all .vor in lib/ + examples/, text
+mix vor.coverage --format json   # JSON with score percentages, for CI gates
+mix vor.coverage --file examples # a path or directory
+```
+
+`Vor.Coverage.analyze/1` consumes a list of `Vor.Surface` file maps and returns a `%Vor.Coverage{}` struct: agent/system counts and how many carry each defense (safety, liveness, `where`, backpressure, sensitive fields, fully-native), invariant counts by tier, protocol coverage, and a `gaps` list. `format_text/2` and `format_json/1` render it. It reuses `Vor.Surface` rather than re-extracting, and runs no verification — gaps are informational, not build errors (CI enforces its own thresholds against the JSON `score`).
+
+Gap rules: an agent is flagged for a missing safety invariant, missing liveness invariant, or no `where` constraint on any of its accepts; a system for missing safety, missing liveness, missing chaos block, or — only when its agent types declare externs — a missing `requires`. `bounded_verified` is always empty here because coverage never runs `mix vor.check`; populate it from a check run if you wire the two together. Metric helpers normalize atom-or-string `kind`/`tier` so the analyzer is robust to either shape.
 
 ## Test organization
 

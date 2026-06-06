@@ -206,6 +206,7 @@ Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every a
 - Chaos testing with kill, partition, delay, workload on real BEAM processes
 - Protocol version compatibility checking — `mix vor.compat` detects breaking changes before rolling deploy
 - Queryable spec inventory — `mix vor.surface` emits declared agents, protocols, and invariants as JSON or text
+- Verification posture report — `mix vor.coverage` aggregates the inventory into coverage metrics and gaps (JSON/text)
 
 **Language features:**
 - Parameterized agents, init handlers, periodic timers (`every`)
@@ -222,7 +223,7 @@ Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every a
 - Bidirectional relations with compile-time equation inversion
 
 **Testing:**
-- 456+ tests, 9 property-based test suites, zero compiler warnings
+- 471+ tests, 9 property-based test suites, zero compiler warnings
 - All five examples fully native — zero externs:
   - Distributed lock: proven safety, liveness recovery, protocol constraints
   - Circuit breaker: proven safety, liveness recovery
