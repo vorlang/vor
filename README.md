@@ -4,6 +4,27 @@ A programming language for the BEAM designed as a compilation target for AI codi
 
 [vorlang.org](https://vorlang.org)
 
+> ## ⚠️ Verification scope (important)
+>
+> The multi-agent model checker (`mix vor.check`) **does not explore timer-,
+> timeout-, or resilience-triggered transitions.** Any protocol behavior gated
+> behind such a trigger is never reached during verification, so invariants about
+> it are only **vacuously true**. Symmetry reduction is also **unsound**. See
+> **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** for the full technical account.
+>
+> **What currently works (as described):**
+> - Single-agent verification (`mix compile` — completeness, local safety invariants)
+> - Protocol constraints / `where` clauses (compile-time protocol compatibility)
+> - Backpressure (`max_queue`)
+> - Compiler-generated telemetry
+> - Chaos simulation (`mix vor.simulate`)
+>
+> **What does not work:**
+> - Multi-agent bounded model checking (`mix vor.check`) of **any behavior behind
+>   a timer, timeout, or resilience handler** — results are vacuous (e.g. Raft
+>   leader election, circuit-breaker recovery, G-Counter gossip convergence).
+> - Symmetry reduction is **unsound** (not orbit-exact; can prune real states).
+
 ## Why
 
 AI agents are writing more and more code, and they'll inevitably build distributed systems. The code is being produced faster than humans can review it. We need compilers that catch what human review would miss.
@@ -122,6 +143,11 @@ Symmetry:          enabled (3 identical agents, 6× reduction)
 ✓ Bounded-verified (1001 states, depth 10)
 ```
 
+> ⚠️ **This particular result is vacuous.** Raft's election is timeout-driven, and
+> the model checker does not fire timers, so no node ever becomes a candidate or
+> leader — the "1001 states" contain only followers and the leadership invariant
+> holds trivially. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) §1.
+
 The model checker uses cone-of-influence abstraction, integer saturation, and symmetry reduction. Same code that runs in production. The result is bounded-verified — exhaustive within configured bounds, not an unconditional proof.
 
 ## Chaos testing
@@ -225,11 +251,11 @@ Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every a
 **Testing:**
 - 471+ tests, 9 property-based test suites, zero compiler warnings
 - All five examples fully native — zero externs:
-  - Distributed lock: proven safety, liveness recovery, protocol constraints
-  - Circuit breaker: proven safety, liveness recovery
-  - Raft consensus: model-checked leader uniqueness in 1,001 states
-  - G-Counter CRDT: native map ops, periodic gossip
-  - Rate limiter: native map ops, per-client tracking
+  - Distributed lock: proven safety, protocol constraints (message-driven; verified)
+  - Circuit breaker: proven safety — but recovery/`half_open` is unreachable in the checker ([KNOWN_ISSUES.md](KNOWN_ISSUES.md) §1)
+  - Raft consensus: leadership invariants are **vacuous** — election is timeout-driven and never fires ([KNOWN_ISSUES.md](KNOWN_ISSUES.md) §1)
+  - G-Counter CRDT: native map ops; **gossip convergence is not exercised** (periodic timer never fires)
+  - Rate limiter: native map ops, per-client tracking (message-driven)
 
 ## Try it
 

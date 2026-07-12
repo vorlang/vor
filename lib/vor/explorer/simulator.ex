@@ -293,10 +293,17 @@ defmodule Vor.Explorer.Simulator do
     end)
   end
 
-  defp resolve_target({:bound_var, name}, env), do: read_local(env, name)
-  defp resolve_target({:param, name}, env), do: read_local(env, name)
+  defp resolve_target({:bound_var, name}, env), do: normalize_target(read_local(env, name))
+  defp resolve_target({:param, name}, env), do: normalize_target(read_local(env, name))
+  defp resolve_target({:atom, a}, _env) when is_binary(a), do: String.to_atom(a)
   defp resolve_target(name, _env) when is_atom(name), do: name
   defp resolve_target(_, _env), do: :unknown
+
+  # A directed-send target that resolves to an unlowered atom literal
+  # (`{:atom, "node1"}`) must become the bare atom `:node1` so it matches the
+  # agent-instance keys used by `Successor.dispatch`.
+  defp normalize_target({:atom, a}) when is_binary(a), do: String.to_atom(a)
+  defp normalize_target(t), do: t
 
   defp dedupe_results(results), do: Enum.uniq(results)
 

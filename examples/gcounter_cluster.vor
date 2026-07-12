@@ -1,3 +1,14 @@
+%% ============================================================
+%% ⚠️  KNOWN LIMITATION (July 2026) — CONVERGENCE NOT EXERCISED
+%% ============================================================
+%% The model checker's successor relation does not fire periodic
+%% `every` timers. Gossip / anti-entropy here runs on
+%% `every sync_interval_ms do broadcast {:sync, ...}`, which is
+%% never fired during `mix vor.check`, so cross-node convergence
+%% is never exercised and any invariant about replicas converging
+%% is NOT actually verified. See KNOWN_ISSUES.md.
+%% ============================================================
+
 agent GCounter(node_id: atom, sync_interval_ms: integer) do
 
   state counts: map

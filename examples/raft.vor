@@ -1,3 +1,13 @@
+%% ============================================================
+%% ⚠️  KNOWN LIMITATION (July 2026) — VACUOUS VERIFICATION
+%% ============================================================
+%% The model checker's successor relation does not fire timer-,
+%% timeout-, or resilience-triggered transitions. Leader election
+%% here is timeout-driven, so under multi-agent model checking no
+%% node ever becomes a :candidate or :leader and any leadership
+%% invariant is VACUOUSLY true. See KNOWN_ISSUES.md.
+%% ============================================================
+
 agent RaftNode(
   node_id: atom,
   cluster_size: integer,
