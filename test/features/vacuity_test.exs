@@ -148,20 +148,13 @@ defmodule Vor.Features.VacuityTest do
   # ----------------------------------------------------------------------
 
   test "REGRESSION: Raft leader-uniqueness is reported VACUOUS, not a clean proof" do
-    raft = File.read!("examples/raft_cluster.vor")
-
-    augmented =
-      String.replace(raft, ~r/\nend\s*\z/, """
-
-        safety "at most one leader" proven do
-          never(count(agents where role == :leader) > 1)
-        end
-      end
-      """)
+    # The shipped example declares "at most one leader" — the property the
+    # original Raft result claimed to prove. No injection: this is the real file.
+    source = File.read!("examples/raft_cluster.vor")
 
     # Fail-closed: the vacuous `proven` claim is now an error, not `Proven ✓`.
     assert {:error, :vacuous_proven, ["at most one leader"], stats} =
-             Explorer.check_file(augmented, max_depth: 10, max_states: 50_000, symmetry: false)
+             Explorer.check_file(source, max_depth: 10, max_states: 50_000, symmetry: false)
 
     assert [verdict] = stats.vacuity
     assert verdict.relevance == :vacuous

@@ -216,4 +216,12 @@ system RaftCluster do
   connect :node2 -> :node3
   connect :node3 -> :node1
   connect :node3 -> :node2
+
+  %% The cluster's headline safety property. NOTE: this is VACUOUS under
+  %% `mix vor.check` — election is timeout-driven, so no node ever becomes a
+  %% leader and the checker fails closed (see the KNOWN LIMITATION header and
+  %% KNOWN_ISSUES.md §1). Pass --allow-vacuous to explore the partial model.
+  safety "at most one leader" proven do
+    never(count(agents where role == :leader) > 1)
+  end
 end

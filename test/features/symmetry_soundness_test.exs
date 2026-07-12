@@ -111,7 +111,9 @@ defmodule Vor.SymmetrySoundnessTest do
       end
       """)
 
-    opts = [max_depth: 30, max_states: 50_000]
+    # raft_cluster.vor now declares the (vacuous) "at most one leader" invariant,
+    # so allow_vacuous keeps this symmetry investigation from failing closed.
+    opts = [max_depth: 30, max_states: 50_000, allow_vacuous: true]
 
     off = Explorer.check_file(augmented, Keyword.put(opts, :symmetry, false))
     on = Explorer.check_file(augmented, Keyword.put(opts, :symmetry, :auto))

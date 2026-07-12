@@ -44,7 +44,10 @@ Affected examples (confirmed by enumerating `stats.state_map`):
 | **Lock** (`examples/lock.vor`) | **Not affected** — `:free`/`:held` are both reachable via `{:acquire}`/`{:release}` messages. The `monitored`/`resilience` auto-release never fires but is redundant with the message-driven release. |
 | **Rate limiter** (`examples/rate_limiter.vor`) | **Not affected** — no timers; fully message-driven. |
 
-The affected `.vor` files carry a prominent `⚠️ KNOWN LIMITATION` header.
+The affected `.vor` files carry a prominent `⚠️ KNOWN LIMITATION` header. The
+checker now detects and reports this vacuity itself — reproducible evidence,
+including `mix vor.check examples/raft_cluster.vor` failing closed, is in
+[`evidence/phase1-vacuity-report.md`](evidence/phase1-vacuity-report.md).
 
 **Status:** not fixed. Firing timers/resilience as nondeterministic successors
 will change every multi-agent state count, so it should be a deliberate change.
