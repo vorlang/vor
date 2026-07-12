@@ -46,10 +46,29 @@ defmodule Vor.Explorer.Successor do
     delivered = pending_message_deliveries(ps, instance_irs, system_ir, max_queue)
     external = external_message_events(ps, instance_irs, system_ir, max_queue)
 
-    (delivered ++ external)
-    |> Enum.map(&post_process(&1, relevance, integer_bound))
-    |> Enum.reject(&ProductState.same_as_parent?(&1, ps))
-    |> Enum.uniq_by(&ProductState.fingerprint/1)
+    raw = delivered ++ external
+
+    successors =
+      raw
+      |> Enum.map(&post_process(&1, relevance, integer_bound))
+      |> Enum.reject(&ProductState.same_as_parent?(&1, ps))
+      |> Enum.uniq_by(&ProductState.fingerprint/1)
+
+    if Keyword.get(opts, :coverage, false) do
+      # A handler counts as *fired* if it was entered from this state, even if
+      # its effect produced a state identical to the parent (emit-only / noop
+      # handlers) that the successor list drops. So collect from `raw`, before
+      # the same-as-parent / dedup filtering.
+      fired =
+        raw
+        |> Enum.map(& &1.last_handler)
+        |> Enum.reject(&is_nil/1)
+        |> MapSet.new()
+
+      {successors, fired}
+    else
+      successors
+    end
   end
 
   # Apply integer saturation + abstraction to a freshly computed successor.
@@ -160,7 +179,9 @@ defmodule Vor.Explorer.Successor do
             # No matching handler — catch-all semantics, no state change.
             []
 
-          handler ->
+          {index, handler} ->
+            handler_id = {ir.name, index}
+
             handler
             |> Simulator.simulate(agent_state, msg, to_name, connections)
             |> Enum.map(fn {new_state, outgoing} ->
@@ -170,7 +191,8 @@ defmodule Vor.Explorer.Successor do
                 agents: Map.put(ps.agents, to_name, new_state),
                 pending_messages: new_pending,
                 depth: ps.depth + 1,
-                last_action: action
+                last_action: action,
+                last_handler: handler_id
               }
             end)
         end
@@ -186,12 +208,17 @@ defmodule Vor.Explorer.Successor do
 
   defp cap_queue(queue, _), do: queue
 
+  # Returns `{index, handler}` for the first tag-matching handler whose guard is
+  # satisfied (the index is its position in the agent's declared handler list,
+  # used as a stable coverage id), or nil when none matches.
   defp pick_handler(%IR.Agent{handlers: handlers}, {tag, fields}, agent_state) do
-    matching = Enum.filter(handlers, fn h ->
-      handler_tag_matches?(h, tag)
+    handlers
+    |> Enum.with_index()
+    |> Enum.find_value(nil, fn {h, index} ->
+      if handler_tag_matches?(h, tag) and Simulator.guard_matches?(h, agent_state, fields) do
+        {index, h}
+      end
     end)
-
-    Enum.find(matching, fn h -> Simulator.guard_matches?(h, agent_state, fields) end)
   end
 
   defp handler_tag_matches?(%IR.Handler{pattern: %IR.MatchPattern{tag: ptag}}, msg_tag) do

@@ -26,6 +26,61 @@ defmodule Vor.Explorer.Invariant do
     end
   end
 
+  @doc """
+  True if the invariant's *subject* — the atomic condition whose truth the
+  property constrains — is active in `ps`. Used by vacuity detection
+  (`Vor.Explorer.Vacuity`) to decide whether an invariant ever engaged with
+  reachable behavior.
+
+  The subject is deliberately *weaker* than the violation condition: for
+  `never(count(agents where role == :leader) > 1)` the subject is "some agent
+  has role == :leader", not "more than one does". An invariant whose subject is
+  never true across the explored space did not constrain any reachable
+  behavior — it is vacuously satisfied.
+
+  NOTE: this is subject-reachability, the cheap high-value special case. The
+  general answer is mutation-based formula vacuity (Beer et al.; Kupferman &
+  Vardi — replace each subformula with true/false and re-check); that would slot
+  in here as an alternative strategy.
+  """
+  def subject_active?(%ProductState{} = ps, {:never, condition}),
+    do: subject_active?(ps, condition)
+
+  # `for_all agents, COND` is a universal quantifier: its subject is the
+  # quantification domain. Universal vacuity is an *empty* domain, which never
+  # happens (a system always has agents), so a for-all constrains every reached
+  # state and is substantive whenever any agent exists.
+  def subject_active?(%ProductState{agents: agents}, {:for_all, _condition}),
+    do: map_size(agents) > 0
+
+  def subject_active?(%ProductState{} = ps, {tag, agents_where, _threshold})
+      when tag in [:count_gt, :count_gte, :count_eq, :count_lt, :count_lte],
+      do: count_matching(ps, agents_where) >= 1
+
+  def subject_active?(%ProductState{} = ps, {:agents_where, _, _, _} = agents_where),
+    do: count_matching(ps, agents_where) >= 1
+
+  def subject_active?(%ProductState{agents: agents}, {:exists_single, var, condition}) do
+    Enum.any?(agents, fn {_name, state} ->
+      eval_with_bindings(condition, %{var => state})
+    end)
+  end
+
+  def subject_active?(%ProductState{agents: agents}, {:exists_pair, var_a, var_b, condition}) do
+    pairs =
+      for {name_a, state_a} <- agents,
+          {name_b, state_b} <- agents,
+          name_a != name_b,
+          do: %{var_a => state_a, var_b => state_b}
+
+    Enum.any?(pairs, fn bindings -> eval_with_bindings(condition, bindings) end)
+  end
+
+  def subject_active?(%ProductState{} = ps, {op, _, _} = expr) when op in [:==, :!=, :and, :or],
+    do: eval_with_bindings(expr, %{__product_state__: ps})
+
+  def subject_active?(_ps, _other), do: false
+
   # `never(condition)` — invariant holds when the condition is false.
   defp evaluate(ps, {:never, condition}), do: not evaluate_condition(ps, condition)
 

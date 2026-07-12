@@ -14,7 +14,7 @@ defmodule Vor.Explorer do
   the invariants and stores them on the system IR but does not run the BFS.
   """
 
-  alias Vor.Explorer.{Invariant, LivenessChecker, ProductState, Relevance, Successor, Symmetry, Tarjan}
+  alias Vor.Explorer.{Coverage, Invariant, LivenessChecker, ProductState, Relevance, Successor, Symmetry, Tarjan, Vacuity}
   alias Vor.IR
 
   @default_max_depth 50
@@ -72,6 +72,7 @@ defmodule Vor.Explorer do
     integer_bound = Keyword.get(opts, :integer_bound, @default_integer_bound)
     max_queue = Keyword.get(opts, :max_queue, @default_max_queue)
     symmetry_opt = Keyword.get(opts, :symmetry, :auto)
+    allow_vacuous = Keyword.get(opts, :allow_vacuous, false)
 
     # Split safety and liveness invariants
     safety_invariants = Enum.filter(invariants, fn inv -> Map.get(inv, :kind, :safety) == :safety end)
@@ -104,11 +105,38 @@ defmodule Vor.Explorer do
         bfs_result = bfs(initial, instance_irs, system_ir, safety_invariants, max_depth, max_states,
           relevance, integer_bound, max_queue, symmetry)
 
-        # Post-processing: liveness checking via Tarjan's SCC
         case bfs_result do
-          {:ok, status, stats} when liveness_invariants != [] ->
-            liveness_result = run_liveness_check(stats, liveness_invariants)
-            {:ok, status, Map.put(stats, :liveness, liveness_result)}
+          {:ok, status, stats} ->
+            # Relevance axis: declared-vs-reached coverage + per-invariant
+            # subject reachability (vacuity). Computed once, post-exploration.
+            stats =
+              stats
+              |> Map.put(:vacuity, Vacuity.analyze(safety_invariants, Map.values(stats.state_map)))
+              |> Map.put(:coverage, Coverage.analyze(system_ir, instance_irs, stats))
+
+            # Post-processing: liveness checking via Tarjan's SCC
+            stats =
+              if liveness_invariants != [] do
+                Map.put(stats, :liveness, run_liveness_check(stats, liveness_invariants))
+              else
+                stats
+              end
+
+            # Fail-closed: a `proven`-tier invariant must not be claimable over a
+            # state space where its subject cannot arise. Only fires on an
+            # *exhaustive* (`:proven`) run — over a truncated (`:bounded`) space
+            # the subject might appear with more exploration, so vacuity there is
+            # a loud warning, not a hard error. `--allow-vacuous` downgrades it.
+            vacuous_proven =
+              stats.vacuity
+              |> Enum.filter(fn v -> v.tier == :proven and v.relevance == :vacuous end)
+              |> Enum.map(& &1.name)
+
+            if status == :proven and vacuous_proven != [] and not allow_vacuous do
+              {:error, :vacuous_proven, vacuous_proven, stats}
+            else
+              {:ok, status, stats}
+            end
 
           other ->
             other
@@ -280,7 +308,8 @@ defmodule Vor.Explorer do
       max_queue: max_queue,
       symmetry: symmetry,
       adjacency: %{initial_fp => []},
-      state_map: %{initial_fp => initial}
+      state_map: %{initial_fp => initial},
+      fired_handlers: MapSet.new()
     }
 
     do_bfs(queue, visited, instance_irs, system_ir, invariants, max_depth, max_states, stats, relevance, integer_bound, max_queue, symmetry)
@@ -300,9 +329,12 @@ defmodule Vor.Explorer do
             do_bfs(rest, visited, instance_irs, system_ir, invariants, max_depth, max_states, stats, relevance, integer_bound, max_queue, symmetry)
 
           true ->
-            successors =
+            {successors, fired} =
               Successor.successors(state, instance_irs, system_ir,
-                relevance: relevance, integer_bound: integer_bound, max_queue: max_queue)
+                relevance: relevance, integer_bound: integer_bound, max_queue: max_queue,
+                coverage: true)
+
+            stats = %{stats | fired_handlers: MapSet.union(stats.fired_handlers, fired)}
 
             step =
               Enum.reduce_while(successors, {rest, visited, stats, nil}, fn succ, {q, v, s, _} ->

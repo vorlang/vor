@@ -13,7 +13,12 @@ defmodule Vor.Explorer.ProductState do
   defstruct agents: %{},
             pending_messages: [],
             depth: 0,
-            last_action: :initial
+            last_action: :initial,
+            # Transient coverage tag: the `{agent_type, handler_index}` id of the
+            # handler that produced this successor (nil for the initial state and
+            # externally-injected no-ops). Excluded from `fingerprint/1`, so it
+            # never affects visited-set dedup.
+            last_handler: nil
 
   @type agent_state :: %{atom() => term()}
   @type pending_message :: {atom(), atom(), tuple()}

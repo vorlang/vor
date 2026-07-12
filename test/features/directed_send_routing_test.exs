@@ -49,7 +49,7 @@ defmodule Vor.DirectedSendRoutingTest do
     connect :b -> :a
 
     safety "probe" proven do
-      never(count(agents where phase == :__never__) > 9)
+      never(count(agents where phase == :ponged) > 9)
     end
   end
   """

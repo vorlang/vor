@@ -52,7 +52,8 @@ defmodule Mix.Tasks.Vor.Check do
           max_states: :integer,
           integer_bound: :integer,
           max_queue: :integer,
-          symmetry: :boolean
+          symmetry: :boolean,
+          allow_vacuous: :boolean
         ],
         aliases: [d: :depth]
       )
@@ -64,6 +65,7 @@ defmodule Mix.Tasks.Vor.Check do
     # `--no-symmetry` arrives as `symmetry: false`; default `:auto` lets the
     # explorer detect when reduction is safe.
     symmetry_opt = Keyword.get(opts, :symmetry, :auto)
+    allow_vacuous = Keyword.get(opts, :allow_vacuous, false)
 
     files =
       case files do
@@ -84,10 +86,13 @@ defmodule Mix.Tasks.Vor.Check do
                  max_states: max_states,
                  integer_bound: integer_bound,
                  max_queue: max_queue,
-                 symmetry: symmetry_opt
+                 symmetry: symmetry_opt,
+                 allow_vacuous: allow_vacuous
                ) do
             {:ok, :proven, stats} ->
               print_abstraction(stats)
+              print_relevance(stats)
+              print_coverage(stats)
 
               Mix.shell().info(
                 "  ✓ Proven (#{stats.states_explored} states, depth #{stats.max_depth_reached})"
@@ -97,6 +102,8 @@ defmodule Mix.Tasks.Vor.Check do
 
             {:ok, :bounded, stats} ->
               print_abstraction(stats)
+              print_relevance(stats)
+              print_coverage(stats)
 
               Mix.shell().info(
                 "  ~ Bounded verification (#{stats.states_explored} states, depth #{stats.max_depth_reached})"
@@ -111,6 +118,26 @@ defmodule Mix.Tasks.Vor.Check do
             {:ok, :no_invariants, _stats} ->
               Mix.shell().info("  - No system-level invariants to check")
               :ok
+
+            {:error, :vacuous_proven, names, stats} ->
+              print_abstraction(stats)
+              print_relevance(stats)
+              print_coverage(stats)
+
+              Enum.each(names, fn name ->
+                Mix.shell().error("""
+                  ✗ VACUOUS PROOF: safety "#{name}" is declared `proven`, but its \
+                subject was never reachable in the explored state space.
+                    A proof over a state space where the property's subject cannot \
+                arise is vacuous. Either the model is incomplete (see \
+                KNOWN_ISSUES.md §1), or the invariant does not constrain reachable \
+                behavior.
+                    Declare it `checked` to accept a weaker guarantee, fix the model \
+                so the subject is reachable, or pass --allow-vacuous to override.\
+                """)
+              end)
+
+              {:vacuous, hd(names), file}
 
             {:error, :violation, name, trace, stats} ->
               print_abstraction(stats)
@@ -159,6 +186,78 @@ defmodule Mix.Tasks.Vor.Check do
     :ok
   end
   defp print_abstraction(_), do: :ok
+
+  # ----------------------------------------------------------------------
+  # Relevance axis (Phase 1): every invariant reports strength AND relevance.
+  # A vacuous pass must not look like a real pass.
+  # ----------------------------------------------------------------------
+
+  defp print_relevance(%{vacuity: verdicts}) when is_list(verdicts) and verdicts != [] do
+    Mix.shell().info("    Invariant relevance:")
+
+    Enum.each(verdicts, fn v ->
+      line =
+        case v.relevance do
+          :substantive ->
+            "      ✓ #{v.name}: substantive (subject `#{v.subject}` held in " <>
+              "#{v.subject_true_count}/#{v.total_states} states)"
+
+          :vacuous ->
+            "      ⚠ #{v.name}: VACUOUS — subject (#{v.subject}) never true in any " <>
+              "of the #{v.total_states} explored states"
+
+          :unexercised ->
+            "      ⚠ #{v.name}: UNEXERCISED — subject (#{v.subject}) never occurred " <>
+              "(monitored behavior not reached)"
+        end
+
+      case v.relevance do
+        :substantive -> Mix.shell().info(line)
+        _ -> Mix.shell().error(line)
+      end
+    end)
+
+    :ok
+  end
+
+  defp print_relevance(_), do: :ok
+
+  # ----------------------------------------------------------------------
+  # Declared-vs-reached coverage warnings.
+  # ----------------------------------------------------------------------
+
+  defp print_coverage(%{coverage: cov}) when is_map(cov) do
+    Enum.each(cov.unreached_states, fn u ->
+      Mix.shell().error(
+        "    ⚠ agent #{u.agent_type} declares `#{u.field}` values #{inspect(u.declared)} " <>
+          "but only #{inspect(u.reached)} was reached. Unreached: #{inspect(u.unreached)}"
+      )
+    end)
+
+    Enum.each(cov.unfired_handlers, fn h ->
+      Mix.shell().error(
+        "    ⚠ handler `#{h.label}` (#{h.agent_type}) was never entered during verification"
+      )
+    end)
+
+    Enum.each(cov.unfired_resilience, fn r ->
+      Mix.shell().error(
+        "    ⚠ #{r.kind} handler for \"#{r.name}\" (#{r.agent_type}) was never fired. " <>
+          "NOTE: the explorer does not fire timer/timeout-triggered transitions (KNOWN_ISSUES.md §1)"
+      )
+    end)
+
+    Enum.each(cov.unfired_timers, fn t ->
+      Mix.shell().error(
+        "    ⚠ periodic timer `#{t.tag}` (#{t.agent_type}) never fired. " <>
+          "NOTE: the explorer does not fire `every` timers (KNOWN_ISSUES.md §1)"
+      )
+    end)
+
+    :ok
+  end
+
+  defp print_coverage(_), do: :ok
 
   defp symmetry_label(%{symmetry: true} = stats) do
     n = stats |> Map.get(:relevance, %{}) |> map_size()
