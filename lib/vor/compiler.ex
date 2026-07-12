@@ -275,9 +275,15 @@ defmodule Vor.Compiler do
         behaviour = if ir, do: ir.behaviour, else: :gen_server
 
         inst_name_atom = if is_atom(inst_name), do: inst_name, else: String.to_atom(inst_name)
+        # Normalize both the key AND the value. Atom literals arrive from the
+        # parser wrapped as `{:atom, "node1"}`; lower them to the bare atom
+        # `:node1` here so agent state, message payloads, and directed-send
+        # targets all agree with the atom used to key agents in the explorer.
+        # (Without this, a directed reply `send C {...}` addressed to a
+        # `node_id` value is routed to `{:atom, "node1"}` and silently dropped.)
         params_normalized = Enum.map(params || [], fn
-          {k, v} when is_atom(k) -> {k, v}
-          {k, v} -> {String.to_atom(to_string(k)), v}
+          {k, v} when is_atom(k) -> {k, normalize_param_value(v)}
+          {k, v} -> {String.to_atom(to_string(k)), normalize_param_value(v)}
         end)
 
         %Vor.IR.AgentInstanceIR{
@@ -308,6 +314,11 @@ defmodule Vor.Compiler do
       end)
     }
   end
+
+  # Atom literals from the parser are `{:atom, "name"}`; every other param
+  # value (integers, strings) already arrives in its runtime form.
+  defp normalize_param_value({:atom, v}) when is_binary(v), do: String.to_atom(v)
+  defp normalize_param_value(v), do: v
 
   defp lower_chaos(nil), do: nil
   defp lower_chaos(%Vor.AST.ChaosConfig{} = c) do

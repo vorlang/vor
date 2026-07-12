@@ -126,6 +126,12 @@ defmodule Vor.Explorer.Successor do
     {tag_atom, field_map}
   end
 
+  # A message recipient must be a bare atom to match the `instance_irs` keys.
+  # Directed sends whose target came from an unlowered atom literal arrive as
+  # `{:atom, "node1"}`; normalize so the reply is not silently dropped.
+  defp normalize_recipient({:atom, a}) when is_binary(a), do: String.to_atom(a)
+  defp normalize_recipient(other), do: other
+
   defp default_for_type(:integer), do: 0
   defp default_for_type(:atom), do: :representative
   defp default_for_type(:binary), do: ""
@@ -139,6 +145,8 @@ defmodule Vor.Explorer.Successor do
   # ----------------------------------------------------------------------
 
   defp dispatch(%ProductState{} = ps, to_name, msg, remaining_pending, instance_irs, system_ir, action, max_queue) do
+    to_name = normalize_recipient(to_name)
+
     case Map.get(instance_irs, to_name) do
       nil ->
         []

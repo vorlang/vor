@@ -77,6 +77,12 @@ Key codegen features:
 - `lib/vor/type_tracker.ex` — internal type propagation
 
 ### Multi-agent model checking
+> ⚠️ **Correctness caveats (July 2026) — see `KNOWN_ISSUES.md`.** The successor
+> relation does not fire timer/timeout/resilience transitions, so behavior gated
+> behind those is never explored and invariants about it are vacuous. Symmetry
+> canonicalization is not orbit-exact (unsound). The identifier-routing bug in
+> directed sends is fixed. Treat multi-agent results accordingly.
+
 - `lib/vor/explorer.ex` — product state BFS exploration
 - `lib/vor/explorer/product_state.ex` — combined agent state representation
 - `lib/vor/explorer/simulator.ex` — IR interpretation for handler simulation

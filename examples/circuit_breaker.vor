@@ -1,3 +1,16 @@
+%% ============================================================
+%% ⚠️  KNOWN LIMITATION (July 2026) — UNREACHABLE STATES
+%% ============================================================
+%% The model checker's successor relation does not fire timer-
+%% triggered transitions. The recovery transition below is
+%% `on :timer_recovery_fired` — a timer event, NOT an `accepts`
+%% message — so it is never fired during `mix vor.check`.
+%% Consequently `:half_open` is provably UNREACHABLE and the
+%% entire probe/recovery subtree (probe_success / probe_failure /
+%% reset-from-half_open) is dead code during verification.
+%% Reachable phases = {:closed, :open}. See KNOWN_ISSUES.md.
+%% ============================================================
+
 agent CircuitBreaker do
 
   state phase: :closed | :open | :half_open

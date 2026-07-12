@@ -1,3 +1,20 @@
+%% ============================================================
+%% ⚠️  KNOWN LIMITATION (July 2026) — VACUOUS VERIFICATION
+%% ============================================================
+%% The model checker's successor relation (Vor.Explorer.Successor)
+%% does not fire timer-, timeout-, or resilience-triggered
+%% transitions. This example's leader election is timeout-driven
+%% (see the `monitored` liveness + `resilience` block below), so
+%% during `mix vor.check` NO node ever becomes a :candidate or a
+%% :leader. Reachable roles = {:follower} only; vote_count ≡ 0;
+%% the majority gate is never evaluated.
+%%
+%% Any safety invariant about leadership (e.g. "at most one leader")
+%% is therefore VACUOUSLY true — it holds over a state space in
+%% which no leader can exist, so a "1,001 states" leader-uniqueness
+%% result verifies nothing about leadership. See KNOWN_ISSUES.md.
+%% ============================================================
+
 agent RaftNode(
   node_id: atom,
   cluster_size: integer,
