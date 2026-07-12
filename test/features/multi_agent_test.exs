@@ -478,8 +478,11 @@ defmodule Vor.Features.MultiAgentTest do
     end
     """
 
+    # `:promoted` has no transition into it, so this invariant is vacuous
+    # (its subject is unreachable). We're exercising the count-invariant
+    # mechanics here, not asserting substantiveness, so allow it.
     assert {:ok, :proven, stats} =
-             Vor.Explorer.check_file(source, max_depth: 10, max_states: 1_000)
+             Vor.Explorer.check_file(source, max_depth: 10, max_states: 1_000, allow_vacuous: true)
 
     assert stats.states_explored >= 1
   end
@@ -725,8 +728,10 @@ defmodule Vor.Features.MultiAgentTest do
 
     augmented = inject_system_invariant(augmented)
 
+    # The Raft leadership invariant is vacuous (no leader is reachable — see
+    # KNOWN_ISSUES.md §1); allow it so this test can exercise the explorer.
     result =
-      Vor.Explorer.check_file(augmented, max_depth: 10, max_states: 5_000)
+      Vor.Explorer.check_file(augmented, max_depth: 10, max_states: 5_000, allow_vacuous: true)
 
     case result do
       {:ok, :proven, stats} ->
@@ -995,7 +1000,10 @@ defmodule Vor.Features.MultiAgentTest do
         max_depth: 30,
         max_states: 50_000,
         integer_bound: 3,
-        max_queue: 10
+        max_queue: 10,
+        # Vacuous leadership invariant (see KNOWN_ISSUES.md §1) — this test
+        # measures the abstraction/queue bound, not substantiveness.
+        allow_vacuous: true
       )
 
     case result do
@@ -1456,18 +1464,22 @@ defmodule Vor.Features.MultiAgentTest do
       end
       """)
 
+    # Vacuous leadership invariant (KNOWN_ISSUES.md §1) — this test measures the
+    # symmetry-reduced state count, not substantiveness.
     {:ok, :proven, with_sym} =
       Vor.Explorer.check_file(augmented,
         max_depth: 30,
         max_states: 50_000,
-        symmetry: :auto
+        symmetry: :auto,
+        allow_vacuous: true
       )
 
     {:ok, :proven, without_sym} =
       Vor.Explorer.check_file(augmented,
         max_depth: 30,
         max_states: 50_000,
-        symmetry: false
+        symmetry: false,
+        allow_vacuous: true
       )
 
     assert with_sym.symmetry == true

@@ -90,6 +90,18 @@ Key codegen features:
 - `lib/vor/explorer/invariant.ex` — system-level invariant evaluation
 - `lib/vor/explorer/relevance.ex` — cone-of-influence field analysis
 - `lib/vor/explorer/symmetry.ex` — symmetry detection and canonicalization
+- `lib/vor/explorer/vacuity.ex` — invariant **relevance** axis (subject reachability → substantive/vacuous/unexercised)
+- `lib/vor/explorer/coverage.ex` — declared-vs-reached coverage (unreached enum values, unfired handlers/resilience/timers)
+
+**Two-axis guarantees (Phase 1).** Every invariant reports strength (`proven` /
+`checked` / `monitored`) *and* relevance (`substantive` / `vacuous` /
+`unexercised`). Relevance comes from `Invariant.subject_active?/2`: extract the
+invariant's subject (the atomic condition it constrains) and check whether it was
+ever true in the explored space. A `proven`-tier invariant that is vacuous over
+an exhaustive run is a hard error (`{:error, :vacuous_proven, …}`; `mix vor.check`
+raises); `--allow-vacuous` downgrades it. Handler-firing coverage is instrumented
+via the transient `ProductState.last_handler` tag and the `coverage: true` option
+on `Successor.successors/4` (returns `{successors, fired_handler_ids}`).
 
 ### Chaos simulation
 - `lib/vor/simulator.ex` — orchestrator: starts system, runs fault/invariant/workload loops
