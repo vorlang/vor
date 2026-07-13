@@ -20,6 +20,7 @@ defmodule Mix.Tasks.Vor.Check do
       mix vor.check --integer-bound 5          # cap tracked integer fields
       mix vor.check --max-queue 20             # cap pending message buffer
       mix vor.check --no-symmetry              # disable symmetry reduction
+      mix vor.check --no-fire-timers           # old blind mode (ignore timers)
 
   ## Options
 
@@ -37,6 +38,12 @@ defmodule Mix.Tasks.Vor.Check do
     * `--no-symmetry` — disable symmetry reduction. By default symmetry is
       auto-detected for homogeneous fully-symmetric systems whose
       invariants do not reference specific named agents.
+    * `--no-fire-timers` — do not fire timer/timeout/resilience transitions.
+      By default they fire as nondeterministic successors (the honest model);
+      this flag restores the old blind mode in which timer-gated behavior is
+      never explored (and results about it are vacuous).
+    * `--allow-vacuous` — downgrade a vacuous `proven` result from a hard error
+      to a warning (for deliberately exploring a partial model).
   """
 
   alias Vor.Explorer
@@ -53,7 +60,8 @@ defmodule Mix.Tasks.Vor.Check do
           integer_bound: :integer,
           max_queue: :integer,
           symmetry: :boolean,
-          allow_vacuous: :boolean
+          allow_vacuous: :boolean,
+          fire_timers: :boolean
         ],
         aliases: [d: :depth]
       )
@@ -66,6 +74,7 @@ defmodule Mix.Tasks.Vor.Check do
     # explorer detect when reduction is safe.
     symmetry_opt = Keyword.get(opts, :symmetry, :auto)
     allow_vacuous = Keyword.get(opts, :allow_vacuous, false)
+    fire_timers = Keyword.get(opts, :fire_timers, true)
 
     files =
       case files do
@@ -87,7 +96,8 @@ defmodule Mix.Tasks.Vor.Check do
                  integer_bound: integer_bound,
                  max_queue: max_queue,
                  symmetry: symmetry_opt,
-                 allow_vacuous: allow_vacuous
+                 allow_vacuous: allow_vacuous,
+                 fire_timers: fire_timers
                ) do
             {:ok, :proven, stats} ->
               print_abstraction(stats)

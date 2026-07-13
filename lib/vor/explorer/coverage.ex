@@ -39,8 +39,8 @@ defmodule Vor.Explorer.Coverage do
     %{
       unreached_states: unreached_states(types, states),
       unfired_handlers: unfired_handlers(types, fired),
-      unfired_resilience: unfired_resilience(types),
-      unfired_timers: unfired_timers(types)
+      unfired_resilience: unfired_resilience(types, fired),
+      unfired_timers: unfired_timers(types, fired)
     }
   end
 
@@ -164,33 +164,33 @@ defmodule Vor.Explorer.Coverage do
   # itself). The explorer never fires these, so they are always reported.
   # ----------------------------------------------------------------------
 
-  defp unfired_resilience(types) do
-    monitors =
-      for {type, {ir, _names}} <- types,
-          monitor <- ir.monitors || [] do
-        %{agent_type: type, kind: :monitored_liveness, name: monitor_name(monitor)}
-      end
-
-    blocks =
-      for {type, {ir, _names}} <- types,
-          ir.resilience != nil,
-          handler <- List.wrap(ir.resilience) do
-        %{agent_type: type, kind: :resilience, name: resilience_name(handler)}
-      end
-
-    monitors ++ blocks
+  # A monitored-liveness timeout is fired through its synthesized handler (whose
+  # tag is the monitor's `event_tag`). With timers firing (Phase 3a) it is only
+  # reported when that handler was never actually entered.
+  defp unfired_resilience(types, fired) do
+    for {type, {ir, _names}} <- types,
+        monitor <- ir.monitors || [],
+        not monitor_fired?(ir, type, monitor, fired) do
+      %{agent_type: type, kind: :monitored_liveness, name: monitor_name(monitor)}
+    end
   end
 
-  defp unfired_timers(types) do
+  defp monitor_fired?(ir, type, monitor, fired) do
+    event_tag = Map.get(monitor, :event_tag)
+
+    (ir.handlers || [])
+    |> Enum.with_index()
+    |> Enum.any?(fn {h, idx} -> h.pattern.tag == event_tag and MapSet.member?(fired, {type, idx}) end)
+  end
+
+  defp unfired_timers(types, fired) do
     for {type, {ir, _names}} <- types,
-        timer <- ir.periodic_timers || [] do
+        timer <- ir.periodic_timers || [],
+        not MapSet.member?(fired, {type, {:every, Map.get(timer, :tag)}}) do
       %{agent_type: type, tag: Map.get(timer, :tag), interval: Map.get(timer, :interval)}
     end
   end
 
   defp monitor_name(%{name: name}), do: name
   defp monitor_name(monitor), do: Map.get(monitor, :name) || inspect(monitor)
-
-  defp resilience_name(%{invariant_name: name}), do: name
-  defp resilience_name(handler), do: Map.get(handler, :invariant_name) || inspect(handler)
 end

@@ -6,11 +6,13 @@ A programming language for the BEAM designed as a compilation target for AI codi
 
 > ## ⚠️ Verification scope (important)
 >
-> The multi-agent model checker (`mix vor.check`) **does not explore timer-,
-> timeout-, or resilience-triggered transitions.** Any protocol behavior gated
-> behind such a trigger is never reached during verification, so invariants about
-> it are only **vacuously true**. Symmetry reduction is also **unsound**. See
-> **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** for the full technical account.
+> The multi-agent model checker (`mix vor.check`) now fires timer/timeout/
+> resilience transitions, so timeout-driven behavior is actually explored. It is
+> an **opt-in deep check and bug-finder**, not free verification during
+> compilation: finding a violation is fast, but exhaustive proof is tractable
+> only at small bounds — the state space explodes with message-queue size. See
+> **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** and the measurements in
+> **[evidence/](evidence/)** for the full account.
 >
 > **What currently works (as described):**
 > - Single-agent verification (`mix compile` — completeness, local safety invariants)
@@ -18,12 +20,16 @@ A programming language for the BEAM designed as a compilation target for AI codi
 > - Backpressure (`max_queue`)
 > - Compiler-generated telemetry
 > - Chaos simulation (`mix vor.simulate`)
+> - Multi-agent bug-finding (`mix vor.check`) — e.g. it now finds that Raft's
+>   `"at most one leader"` invariant is **violated** (two leaders in different
+>   terms; the invariant is globally too strong)
 >
-> **What does not work:**
-> - Multi-agent bounded model checking (`mix vor.check`) of **any behavior behind
->   a timer, timeout, or resilience handler** — results are vacuous (e.g. Raft
->   leader election, circuit-breaker recovery, G-Counter gossip convergence).
+> **What does not (yet) hold:**
+> - Multi-agent **exhaustive** checking is intractable beyond small bounds
+>   (interleaving explosion); not a `mix compile`-time operation.
 > - Symmetry reduction is **unsound** (not orbit-exact; can prune real states).
+> - Map/collection contents abstract to `:unknown`, so value-level convergence
+>   (e.g. G-Counter) is reachable but not checkable.
 
 ## Why
 
@@ -140,13 +146,17 @@ Abstracted fields: commit_index, log, voted_for
 Integer bound:     3
 Max queue:         10
 Symmetry:          enabled (3 identical agents, 6× reduction)
-✓ Bounded-verified (1001 states, depth 10)
+✓ Bounded-verified (1001 states, depth 10)     # only with --no-fire-timers
 ```
 
-> ⚠️ **This particular result is vacuous.** Raft's election is timeout-driven, and
-> the model checker does not fire timers, so no node ever becomes a candidate or
-> leader — the "1001 states" contain only followers and the leadership invariant
-> holds trivially. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) §1.
+> ⚠️ **The result above is the old blind mode** (`--no-fire-timers`) and is
+> **vacuous**: without firing the election timeout no node ever becomes a leader,
+> so the "1001 states" contain only followers. **By default the checker now fires
+> timers**, election happens, and `mix vor.check examples/raft_cluster.vor`
+> reports that `"at most one leader"` is **violated** (two leaders in different
+> terms — the invariant is globally too strong for Raft). See
+> [KNOWN_ISSUES.md](KNOWN_ISSUES.md) §1 and
+> [evidence/phase3a-timer-measurement.md](evidence/phase3a-timer-measurement.md).
 
 The model checker uses cone-of-influence abstraction, integer saturation, and symmetry reduction. Same code that runs in production. The result is bounded-verified — exhaustive within configured bounds, not an unconditional proof.
 
@@ -252,9 +262,9 @@ Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every a
 - 471+ tests, 9 property-based test suites, zero compiler warnings
 - All five examples fully native — zero externs:
   - Distributed lock: proven safety, protocol constraints (message-driven; verified)
-  - Circuit breaker: proven safety — but recovery/`half_open` is unreachable in the checker ([KNOWN_ISSUES.md](KNOWN_ISSUES.md) §1)
-  - Raft consensus: leadership invariants are **vacuous** — election is timeout-driven and never fires ([KNOWN_ISSUES.md](KNOWN_ISSUES.md) §1)
-  - G-Counter CRDT: native map ops; **gossip convergence is not exercised** (periodic timer never fires)
+  - Circuit breaker: proven safety; recovery/`half_open` now reachable (timers fire)
+  - Raft consensus: `mix vor.check` now **finds a real violation** of `"at most one leader"` (two leaders in different terms — the invariant is too strong) ([evidence](evidence/phase3a-timer-measurement.md))
+  - G-Counter CRDT: native map ops; gossip now fires, but map contents abstract to `:unknown` so convergence is not value-checkable ([KNOWN_ISSUES.md](KNOWN_ISSUES.md) §5)
   - Rate limiter: native map ops, per-client tracking (message-driven)
 
 ## Try it

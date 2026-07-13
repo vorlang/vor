@@ -78,10 +78,12 @@ Key codegen features:
 
 ### Multi-agent model checking
 > ⚠️ **Correctness caveats (July 2026) — see `KNOWN_ISSUES.md`.** The successor
-> relation does not fire timer/timeout/resilience transitions, so behavior gated
-> behind those is never explored and invariants about it are vacuous. Symmetry
-> canonicalization is not orbit-exact (unsound). The identifier-routing bug in
-> directed sends is fixed. Treat multi-agent results accordingly.
+> relation now fires timer/timeout/resilience transitions (Phase 3a), so
+> timeout-driven behavior is explored (Raft `mix vor.check` now finds a real
+> leader-uniqueness violation). Remaining caveats: exhaustive checking is
+> tractable only at small bounds (interleaving explosion); symmetry
+> canonicalization is not orbit-exact (unsound); map contents abstract to
+> `:unknown` (value-level convergence not checkable). Identifier routing is fixed.
 
 - `lib/vor/explorer.ex` — product state BFS exploration
 - `lib/vor/explorer/product_state.ex` — combined agent state representation

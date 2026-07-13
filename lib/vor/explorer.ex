@@ -73,6 +73,10 @@ defmodule Vor.Explorer do
     max_queue = Keyword.get(opts, :max_queue, @default_max_queue)
     symmetry_opt = Keyword.get(opts, :symmetry, :auto)
     allow_vacuous = Keyword.get(opts, :allow_vacuous, false)
+    # Fire timer/timeout/resilience transitions as nondeterministic successors
+    # (Phase 3a). Default on — a checker that ignores declared timer behavior is
+    # exactly the vacuity bug. `--no-fire-timers` restores the old blind mode.
+    fire_timers = Keyword.get(opts, :fire_timers, true)
 
     # Split safety and liveness invariants
     safety_invariants = Enum.filter(invariants, fn inv -> Map.get(inv, :kind, :safety) == :safety end)
@@ -103,7 +107,7 @@ defmodule Vor.Explorer do
 
       :ok ->
         bfs_result = bfs(initial, instance_irs, system_ir, safety_invariants, max_depth, max_states,
-          relevance, integer_bound, max_queue, symmetry)
+          relevance, integer_bound, max_queue, symmetry, fire_timers)
 
         case bfs_result do
           {:ok, status, stats} ->
@@ -296,7 +300,7 @@ defmodule Vor.Explorer do
   # used to reconstruct the counterexample if a violation is found.
   # ----------------------------------------------------------------------
 
-  defp bfs(initial, instance_irs, system_ir, invariants, max_depth, max_states, relevance, integer_bound, max_queue, symmetry) do
+  defp bfs(initial, instance_irs, system_ir, invariants, max_depth, max_states, relevance, integer_bound, max_queue, symmetry, fire_timers) do
     initial_fp = fingerprint(initial, symmetry)
     queue = :queue.in({initial, [initial], initial_fp}, :queue.new())
     visited = MapSet.new([initial_fp])
@@ -307,6 +311,7 @@ defmodule Vor.Explorer do
       integer_bound: integer_bound,
       max_queue: max_queue,
       symmetry: symmetry,
+      fire_timers: fire_timers,
       adjacency: %{initial_fp => []},
       state_map: %{initial_fp => initial},
       fired_handlers: MapSet.new()
@@ -332,7 +337,7 @@ defmodule Vor.Explorer do
             {successors, fired} =
               Successor.successors(state, instance_irs, system_ir,
                 relevance: relevance, integer_bound: integer_bound, max_queue: max_queue,
-                coverage: true)
+                coverage: true, fire_timers: stats.fire_timers)
 
             stats = %{stats | fired_handlers: MapSet.union(stats.fired_handlers, fired)}
 

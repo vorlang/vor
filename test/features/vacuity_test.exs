@@ -143,27 +143,43 @@ defmodule Vor.Features.VacuityTest do
   end
 
   # ----------------------------------------------------------------------
-  # THE REGRESSION TEST — this is the one that would have caught the shipped
-  # bug: Raft "at most one leader" proven over a space where no leader exists.
+  # THE REGRESSION TEST — Phase 1 caught that Raft's leader-uniqueness proof
+  # was VACUOUS (no leader reachable). Phase 3a fires timers, so election now
+  # happens: the invariant flips from vacuous to a real, substantive VIOLATION
+  # (two leaders in different terms — a stale leader). The flip is the point:
+  # the honest model exercises leadership and finds the invariant does not hold.
   # ----------------------------------------------------------------------
 
-  test "REGRESSION: Raft leader-uniqueness is reported VACUOUS, not a clean proof" do
-    # The shipped example declares "at most one leader" — the property the
-    # original Raft result claimed to prove. No injection: this is the real file.
+  test "REGRESSION: with timers firing, Raft leader-uniqueness is VIOLATED (was vacuous)" do
     source = File.read!("examples/raft_cluster.vor")
 
-    # Fail-closed: the vacuous `proven` claim is now an error, not `Proven ✓`.
-    assert {:error, :vacuous_proven, ["at most one leader"], stats} =
-             Explorer.check_file(source, max_depth: 10, max_states: 50_000, symmetry: false)
+    # Timers on (default): the leader-uniqueness invariant is now a genuine
+    # violation, not a vacuous pass. Small bounds find it fast.
+    assert {:error, :violation, "at most one leader", trace, _stats} =
+             Explorer.check_file(source,
+               max_depth: 12,
+               max_states: 500_000,
+               integer_bound: 2,
+               max_queue: 2,
+               symmetry: false
+             )
 
-    assert [verdict] = stats.vacuity
-    assert verdict.relevance == :vacuous
-    assert verdict.subject == "role == :leader"
-    assert verdict.subject_true_count == 0
+    # The counterexample ends in a two-leader state...
+    final = List.last(trace)
+    leaders = for {n, s} <- final.agents, Map.get(s, :role) == :leader, do: {n, Map.get(s, :current_term)}
+    assert length(leaders) >= 2
 
-    # And the coverage report names exactly why: leader/candidate never reached.
-    assert [%{field: :role, unreached: unreached}] = stats.coverage.unreached_states
-    assert :leader in unreached
-    assert :candidate in unreached
+    # ...and the two leaders are in DIFFERENT terms — a legal transient stale
+    # leader, i.e. the invariant "at most one leader" is globally too strong for
+    # Raft (which guarantees at most one leader *per term*), not a protocol bug.
+    terms = leaders |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
+    assert length(terms) >= 2
+
+    # Contrast: with timers OFF (the old blind mode) it is vacuous again —
+    # no leader is reachable, so the property is untested.
+    assert {:error, :vacuous_proven, ["at most one leader"], vstats} =
+             Explorer.check_file(source, max_depth: 10, max_states: 50_000, symmetry: false, fire_timers: false)
+
+    assert [%{relevance: :vacuous, subject: "role == :leader"}] = vstats.vacuity
   end
 end

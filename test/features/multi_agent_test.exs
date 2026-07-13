@@ -1001,9 +1001,12 @@ defmodule Vor.Features.MultiAgentTest do
         max_states: 50_000,
         integer_bound: 3,
         max_queue: 10,
-        # Vacuous leadership invariant (see KNOWN_ISSUES.md §1) — this test
-        # measures the abstraction/queue bound, not substantiveness.
-        allow_vacuous: true
+        # This test measures the abstraction/queue-bound mechanics, so it pins
+        # fire_timers: false (the old blind model) as a stable fixture; with
+        # timers on the honest Raft space explodes and violates. allow_vacuous
+        # because the leadership invariant is vacuous in that fixture.
+        allow_vacuous: true,
+        fire_timers: false
       )
 
     case result do
@@ -1464,14 +1467,16 @@ defmodule Vor.Features.MultiAgentTest do
       end
       """)
 
-    # Vacuous leadership invariant (KNOWN_ISSUES.md §1) — this test measures the
-    # symmetry-reduced state count, not substantiveness.
+    # This test measures the symmetry-reduced state count on the small vacuous
+    # fixture, so it pins fire_timers: false; with timers on the honest space
+    # explodes past the bound. allow_vacuous because leadership is vacuous there.
     {:ok, :proven, with_sym} =
       Vor.Explorer.check_file(augmented,
         max_depth: 30,
         max_states: 50_000,
         symmetry: :auto,
-        allow_vacuous: true
+        allow_vacuous: true,
+        fire_timers: false
       )
 
     {:ok, :proven, without_sym} =
@@ -1479,7 +1484,8 @@ defmodule Vor.Features.MultiAgentTest do
         max_depth: 30,
         max_states: 50_000,
         symmetry: false,
-        allow_vacuous: true
+        allow_vacuous: true,
+        fire_timers: false
       )
 
     assert with_sym.symmetry == true

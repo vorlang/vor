@@ -247,6 +247,7 @@ defmodule Vor.Explorer.Simulator do
       {:atom, a} when is_binary(a) -> String.to_atom(a)
       {:atom, a} -> a
       {:integer, n} -> n
+      {:states, list} -> Enum.map(list, &normalise_atom/1)
       other -> eval_value_ref(other, state, env)
     end
     apply_cmp(op, actual, expected)
@@ -280,7 +281,12 @@ defmodule Vor.Explorer.Simulator do
   defp apply_cmp(:<, a, b) when is_integer(a) and is_integer(b), do: a < b
   defp apply_cmp(:>=, a, b) when is_integer(a) and is_integer(b), do: a >= b
   defp apply_cmp(:<=, a, b) when is_integer(a) and is_integer(b), do: a <= b
+  defp apply_cmp(:in, a, list) when is_list(list), do: a in list
+  defp apply_cmp(:not_in, a, list) when is_list(list), do: a not in list
   defp apply_cmp(_, _, _), do: :unknown
+
+  defp normalise_atom({:atom, s}) when is_binary(s), do: String.to_atom(s)
+  defp normalise_atom(v), do: v
 
   # ----------------------------------------------------------------------
   # Field evaluation for emit/send/broadcast

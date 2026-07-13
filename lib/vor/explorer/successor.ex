@@ -43,10 +43,13 @@ defmodule Vor.Explorer.Successor do
     integer_bound = Keyword.get(opts, :integer_bound, 3)
     max_queue = Keyword.get(opts, :max_queue, 10)
 
+    fire_timers = Keyword.get(opts, :fire_timers, true)
+
     delivered = pending_message_deliveries(ps, instance_irs, system_ir, max_queue)
     external = external_message_events(ps, instance_irs, system_ir, max_queue)
+    timers = if fire_timers, do: timer_events(ps, instance_irs, system_ir, max_queue), else: []
 
-    raw = delivered ++ external
+    raw = delivered ++ external ++ timers
 
     successors =
       raw
@@ -119,6 +122,73 @@ defmodule Vor.Explorer.Successor do
         msg = build_representative_message(message_spec)
         dispatch(ps, instance.name, msg, ps.pending_messages, instance_irs, system_ir,
           {:external, instance.name, msg}, max_queue)
+      end)
+    end)
+  end
+
+  # ----------------------------------------------------------------------
+  # Timer / timeout / resilience events (Phase 3a)
+  #
+  # The standard model-checking treatment of a timer is a nondeterministic,
+  # always-enabled action: the checker explores both "it fired" and "it hasn't
+  # yet". Two kinds:
+  #
+  #   1. Internal-trigger handlers — any `on {...}` whose tag is NOT an `accepts`
+  #      message is fired by a timer/timeout/resilience event, never by the
+  #      protocol (monitored-liveness timeouts and bare timer atoms like
+  #      `on :timer_recovery_fired` both lower to such handlers). We inject the
+  #      trigger message; the handler's own guard gates it.
+  #   2. Periodic `every` timers — carry their body actions directly (not as
+  #      handlers); we run the body via the simulator.
+  #
+  # A firing that produces no state change is dropped by the same-as-parent /
+  # fingerprint dedup in `successors/4`, so a self-looping timer cannot diverge.
+  # ----------------------------------------------------------------------
+
+  defp timer_events(%ProductState{} = ps, instance_irs, system_ir, max_queue) do
+    Enum.flat_map(system_ir.agents, fn instance ->
+      case Map.get(instance_irs, instance.name) do
+        %IR.Agent{} = ir ->
+          handler_timer_events(ps, instance.name, ir, instance_irs, system_ir, max_queue) ++
+            periodic_timer_events(ps, instance.name, ir, system_ir, max_queue)
+
+        _ ->
+          []
+      end
+    end)
+  end
+
+  defp handler_timer_events(%ProductState{} = ps, name, ir, instance_irs, system_ir, max_queue) do
+    accept_tags = ir |> accepts_messages() |> Enum.map(& &1.tag) |> MapSet.new()
+
+    (ir.handlers || [])
+    |> Enum.map(& &1.pattern.tag)
+    |> Enum.uniq()
+    |> Enum.reject(&MapSet.member?(accept_tags, &1))
+    |> Enum.flat_map(fn tag ->
+      msg = {tag, %{}}
+      dispatch(ps, name, msg, ps.pending_messages, instance_irs, system_ir,
+        {:timer, name, tag}, max_queue)
+    end)
+  end
+
+  defp periodic_timer_events(%ProductState{} = ps, name, %IR.Agent{periodic_timers: timers} = ir, system_ir, max_queue) do
+    agent_state = Map.get(ps.agents, name, %{})
+    connections = connections_from(system_ir, name)
+
+    Enum.flat_map(timers || [], fn %IR.PeriodicTimer{tag: tag, actions: actions} ->
+      synth = %IR.Handler{pattern: %IR.MatchPattern{tag: tag, bindings: []}, guard: nil, actions: actions}
+
+      synth
+      |> Simulator.simulate(agent_state, {tag, %{}}, name, connections)
+      |> Enum.map(fn {new_state, outgoing} ->
+        %ProductState{
+          agents: Map.put(ps.agents, name, new_state),
+          pending_messages: cap_queue(ps.pending_messages ++ outgoing, max_queue),
+          depth: ps.depth + 1,
+          last_action: {:timer, name, tag},
+          last_handler: {ir.name, {:every, tag}}
+        }
       end)
     end)
   end

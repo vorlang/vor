@@ -1,12 +1,12 @@
 %% ============================================================
-%% ⚠️  KNOWN LIMITATION (July 2026) — CONVERGENCE NOT EXERCISED
+%% ⚠️  KNOWN LIMITATION (July 2026) — CONVERGENCE NOT CHECKABLE
 %% ============================================================
-%% The model checker's successor relation does not fire periodic
-%% `every` timers. Gossip / anti-entropy here runs on
-%% `every sync_interval_ms do broadcast {:sync, ...}`, which is
-%% never fired during `mix vor.check`, so cross-node convergence
-%% is never exercised and any invariant about replicas converging
-%% is NOT actually verified. See KNOWN_ISSUES.md.
+%% The model checker now fires the gossip `every sync_interval_ms`
+%% timer (Phase 3a), so gossip IS exercised. However, map operations
+%% (map_merge / map_put / map_get) still evaluate to :unknown, so the
+%% `counts` map never takes a concrete value — cross-node convergence
+%% is reachable but NOT verifiable at the value level. See
+%% KNOWN_ISSUES.md §1 and §5.
 %% ============================================================
 
 agent GCounter(node_id: atom, sync_interval_ms: integer) do

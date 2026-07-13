@@ -12,47 +12,39 @@ unsound.** Any multi-agent model-checking result for such behavior is vacuous.
 
 ---
 
-## 1. Timer / resilience transitions are not explored (architectural gap)
+## 1. Timer / resilience transitions — FIXED (July 2026, Phase 3a)
 
-The explorer's successor relation, `Vor.Explorer.Successor.successors/3`
-(`lib/vor/explorer/successor.ex:41–53`), generates successors from exactly two
-sources:
+**History.** The explorer's successor relation originally generated successors
+from only two sources — delivering a pending message, and injecting one
+representative `accepts` message per type — and never fired `monitored`
+timeouts, `resilience` handlers, periodic `every` timers, or bare timer-atom
+handlers. Any transition reachable only through such a trigger was dead code, so
+invariants about it were **vacuously true**: the checker returned `Proven ✓` over
+a state space from which the interesting states were absent. This is what let
+Raft report "at most one leader, proven in 1,001 states" over a space in which
+every node was a follower (see
+[`evidence/phase1-vacuity-report.md`](evidence/phase1-vacuity-report.md)).
 
-1. delivering a message already pending in the queue, and
-2. injecting one representative external message per `accepts` declaration.
+**Fix.** `Vor.Explorer.Successor` now fires timers as nondeterministic,
+always-enabled successors (the standard model-checking treatment). Election,
+circuit-breaker recovery, and G-Counter gossip are now reachable. What that
+revealed, per [`evidence/phase3a-timer-measurement.md`](evidence/phase3a-timer-measurement.md):
 
-It **never** fires:
-
-- `monitored`-liveness timeouts,
-- `resilience` block transitions (`on_invariant_violation`, `on_crash`),
-- periodic `every` timers, or
-- bare timer-atom handlers (`on :some_timer_fired` where the atom is not an
-  `accepts` message).
-
-**Consequence: any transition reachable only through such a trigger is dead code
-during verification.** A safety invariant over states that can only be entered
-via a timer is then **vacuously true** — the checker returns `Proven ✓` over a
-state space from which the interesting states are absent.
-
-Affected examples (confirmed by enumerating `stats.state_map`):
-
-| Example | Effect of the gap |
+| Example | After the fix |
 |---|---|
-| **Raft** (`examples/raft_cluster.vor`, `examples/raft.vor`) | Election is timeout-driven. Reachable roles = `{:follower}` only; `vote_count ≡ 0`; the majority gate is never evaluated. A "leader uniqueness" invariant checks "at most one leader" over a space in which **no leader can exist**, so it is **vacuously true** — the reported "1,001 states" contain only followers. |
-| **Circuit breaker** (`examples/circuit_breaker.vor`) | Recovery is `on :timer_recovery_fired`, a timer event not in `accepts`. `:half_open` is provably **unreachable**; the probe/recovery subtree is dead code. Reachable phases = `{:closed, :open}`. |
-| **G-Counter** (`examples/gcounter.vor`, `examples/gcounter_cluster.vor`) | Gossip runs on `every sync_interval_ms do broadcast {:sync, ...}`. The `every` timer never fires, so **cross-node convergence is never exercised**. |
-| **Lock** (`examples/lock.vor`) | **Not affected** — `:free`/`:held` are both reachable via `{:acquire}`/`{:release}` messages. The `monitored`/`resilience` auto-release never fires but is redundant with the message-driven release. |
-| **Rate limiter** (`examples/rate_limiter.vor`) | **Not affected** — no timers; fully message-driven. |
+| **Raft** (`examples/raft_cluster.vor`, `examples/raft.vor`) | Election fires; `:candidate`/`:leader` reachable. The `"at most one leader"` invariant is now **VIOLATED** — two leaders in *different terms* (a legal transient stale leader). The invariant as written is globally too strong; Raft guarantees one leader *per term*. `mix vor.check examples/raft_cluster.vor` prints the counterexample. |
+| **Circuit breaker** (`examples/circuit_breaker.vor`) | `:half_open` now reachable; the recovery/probe subtree is exercised. |
+| **G-Counter** (`examples/gcounter.vor`, `examples/gcounter_cluster.vor`) | Gossip `every` timer fires. **But** map ops still abstract to `:unknown`, so convergence *content* is reachable-but-not-checkable — see issue #5. |
+| **Lock**, **Rate limiter** | Unchanged (controls). |
 
-The affected `.vor` files carry a prominent `⚠️ KNOWN LIMITATION` header. The
-checker now detects and reports this vacuity itself — reproducible evidence,
-including `mix vor.check examples/raft_cluster.vor` failing closed, is in
-[`evidence/phase1-vacuity-report.md`](evidence/phase1-vacuity-report.md).
+`--no-fire-timers` restores the old blind mode (useful for isolating other
+mechanics; it is the mode in which results are vacuous).
 
-**Status:** not fixed. Firing timers/resilience as nondeterministic successors
-will change every multi-agent state count, so it should be a deliberate change.
-Do **not** work around it by re-modeling an example so it dodges the gap — that
-re-hides the defect.
+**Remaining limitation — tractability (see #4).** Firing timers makes the state
+space explode: exhaustive exploration is tractable only at small bounds (queue
+≤ 3), and the old reference config (queue 10) no longer terminates. Bug-finding
+(shallow counterexamples) stays cheap. Multi-agent model checking is an opt-in
+deep check / bug-finder, not a compile-time operation.
 
 ---
 
@@ -123,10 +115,30 @@ correctly allows `vote_count` to reach a majority and a leader to be elected.
 
 ## 4. Multi-agent checking is not tractable at the documented bounds
 
-The docs describe multi-agent verification as fast and bounded. Once the model is
-made non-vacuous (e.g. by making Raft's election reachable as an injectable
-event), multi-agent exploration **blows past 200,000 states and truncates** at
-the documented bounds (`integer_bound: 3, max_queue: 10, depth: 10`), returning a
-truncated (not exhaustive) result. The **1,001-state figure was small because the
-model was empty** — see issue #1. Realistic multi-agent bounded model checking of
-these protocols is not currently tractable at the documented bounds.
+With timers firing (issue #1 fixed) the honest Raft state space explodes: at the
+old reference config (`integer_bound: 3, max_queue: 10, depth: 10`) exhaustive
+exploration no longer terminates. It is tractable only at small bounds — queue 2
+is fully exhaustive in ~0.7 s (11k states), queue 3 in ~3 s (67k), queue 4 in
+~26 s (538k), queue 10 does not finish. The message-queue bound drives an ~8–15×
+blow-up per slot. The old **1,001-state figure was small because the model was
+empty** (all followers). Full measurement, including wall-clock at each bound, is
+in [`evidence/phase3a-timer-measurement.md`](evidence/phase3a-timer-measurement.md).
+
+**Bug-finding remains cheap** — a shallow counterexample (e.g. Raft's two-leader
+violation) is found in well under a second even at the old reference config,
+because BFS reaches it before the space blows up. So the checker is useful as an
+opt-in deep check and a bug-finder, not as free whole-space verification folded
+into `mix compile`. The interleaving explosion is the wall; partial-order
+reduction is the highest-value next step.
+
+---
+
+## 5. Map operations abstract to `:unknown` (convergence not checkable)
+
+`Vor.Explorer.Simulator` evaluates map operations (`map_put`, `map_merge`,
+`map_get`, `map_sum`) to the symbolic value `:unknown`. For the G-Counter
+examples this means that, even now that gossip fires (issue #1), the CRDT's
+`counts` map never takes a concrete value — so a "replicas converge" invariant
+is *reachable* but not *checkable*. This is a distinct limitation from the timer
+gap. Protocols whose safety depends on map/collection contents cannot currently
+be verified at the value level; enum-state and integer properties are unaffected.
