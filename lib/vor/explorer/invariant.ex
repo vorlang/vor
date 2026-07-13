@@ -66,14 +66,22 @@ defmodule Vor.Explorer.Invariant do
     end)
   end
 
+  # Subject reachability for a pairwise invariant `never(exists A, B where COND)`.
+  # The property is substantive when the entity it constrains is reachable — not
+  # only when the forbidden *pair* actually arises. We test COND with a single
+  # agent bound to both variables: for the common "two agents in the same bad
+  # state" shape (e.g. `A.role == :leader and B.role == :leader and
+  # A.current_term == B.current_term`) this reduces to the per-agent core
+  # (`role == :leader`), so a HOLDING pairwise invariant over a space where
+  # leaders exist is correctly substantive rather than falsely vacuous.
+  #
+  # (Limitation: for a purely *relational* condition like `A.term != B.term`
+  # self-pairing yields false; such divergence invariants are not covered by
+  # this heuristic. See the general mutation-based approach noted above.)
   def subject_active?(%ProductState{agents: agents}, {:exists_pair, var_a, var_b, condition}) do
-    pairs =
-      for {name_a, state_a} <- agents,
-          {name_b, state_b} <- agents,
-          name_a != name_b,
-          do: %{var_a => state_a, var_b => state_b}
-
-    Enum.any?(pairs, fn bindings -> eval_with_bindings(condition, bindings) end)
+    Enum.any?(agents, fn {_name, state} ->
+      eval_with_bindings(condition, %{var_a => state, var_b => state})
+    end)
   end
 
   def subject_active?(%ProductState{} = ps, {op, _, _} = expr) when op in [:==, :!=, :and, :or],

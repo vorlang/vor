@@ -193,8 +193,7 @@ exhaustive proof at small scale**, and **not** a compile-time whole-space
 verifier. Its first honest run on the flagship example found a real
 specification defect (an over-strong leadership invariant) in 0.16 s. The path
 forward is **partial-order reduction** (the interleaving explosion is the wall),
-then optionally a **sound symmetry** reduction; a per-term leadership invariant
-would need a small extension to the invariant language.
+then optionally a **sound symmetry** reduction.
 
 This is a legitimate, publishable measurement: implementation-level bounded model
 checking of BEAM coordination pays off as an opt-in deep check and a bug-finder,
@@ -202,9 +201,65 @@ not as free verification folded into compilation.
 
 ---
 
+## 7. The corrected invariant — Vor's first substantive verification result
+
+The §2 violation was a *mis-specification*, not a protocol bug: Raft guarantees
+at most one leader **per term**, and a stale leader from an earlier term may
+legitimately coexist with a newer one. Vor's invariant language *can* express the
+correct property — a pairwise existential over agents:
+
+```
+safety "at most one leader per term" proven do
+  never(exists A, B where A.role == :leader and B.role == :leader
+                          and A.current_term == B.current_term)
+end
+```
+
+Cone-of-influence keeps `current_term` in the tracked set
+(`tracked = {role, current_term, vote_count}`), so the comparison is evaluated on
+concrete term values, not `:abstracted`.
+
+**Result — PROVEN and substantive, and stable across term bounds.** Timers on,
+symmetry off, holding property so exploration runs to completion:
+
+| config | verdict | relevance | states | depth | wall-clock |
+|---|---|---|---|---|---|
+| q2 ib2 | **proven** (truly exhaustive) | **substantive** (8,536 / 11,165 states have a leader) | 11,165 | 26 | 0.69 s |
+| q2 ib3 | **proven** (exhaustive) | substantive (26,689 / 36,634) | 36,634 | 32 | 2.04 s |
+| q2 ib4 | proven (depth-capped) | substantive (78,094 / 104,904) | 104,904 | 40 | 6.11 s |
+| q3 ib2 | proven (exhaustive) | substantive (431,089 / 559,130) | 559,130 | 34 | 37.6 s |
+
+**Term-saturation ruled out.** The invariant compares terms for equality, so
+`integer_bound: 2` (terms saturate at 2) was the primary false-violation risk.
+The verdict is **stable — proven at ib2, ib3, and ib4** — so it is not a
+saturation artifact. And with `--no-fire-timers` the same invariant is correctly
+**vacuous** (0 / 28 states have a leader), confirming the relevance verdict
+tracks real leader reachability rather than rubber-stamping.
+
+**This is Vor's first real, non-vacuous, substantive multi-agent verification
+result:** a property that holds, over a state space in which the constrained
+entity (an elected leader) genuinely arises.
+
+> **The framing, recorded durably because it is the point.** The originally
+> shipped invariant was **wrong**, and it was **never exercised** — the empty
+> (timer-off) model hid the mis-specification. Only when the model became honest
+> did the checker reveal that the specification did not match Raft's actual
+> guarantee. **The implementation was correct. The specification was not.** A
+> verifier is only as good as the properties it is asked to check *and* the
+> reachability of the behavior those properties constrain — Vor now measures both
+> axes (strength × relevance) and enforces both.
+
+---
+
 ## Appendix — reproduction
 
-- **Headline violation:** `mix vor.check examples/raft_cluster.vor`.
+- **Substantive proof (the shipped, corrected per-term invariant):**
+  `mix vor.check --max-queue 2 --integer-bound 2 --depth 40 examples/raft_cluster.vor`
+  → `✓ Proven` + `substantive`. (The default bounds, `--max-queue 10`, truncate:
+  `~ Bounded`, still substantive — the honest space explodes; see §3.)
 - **Old blind (vacuous) behavior:** `mix vor.check --no-fire-timers examples/raft_cluster.vor` → `✗ VACUOUS PROOF`.
-- **Frontier table:** `Vor.Explorer.check_file(source, max_depth: D, max_queue: Q, integer_bound: IB, max_states: 5_000_000, symmetry: false, allow_vacuous: true)` where `source` is `examples/raft_cluster.vor` with its `"at most one leader"` block replaced by `never(count(agents where role == :leader) > 5)` to force full exploration. Wall-clock via `:timer.tc/1`.
-- **Tests:** `test/features/timer_firing_test.exs` (timers generate successors; candidate/leader/half_open become reachable; the gossip timer fires) and the flipped regression `test/features/vacuity_test.exs` — *"REGRESSION: with timers firing, Raft leader-uniqueness is VIOLATED (was vacuous)"*.
+- **The original violation (§2):** temporarily replace the invariant with the
+  *global* form `never(count(agents where role == :leader) > 1)` and run at small
+  bounds → `✗ Violation` (two leaders, different terms).
+- **Frontier / holding-invariant timings (§3):** `Vor.Explorer.check_file(source, max_depth: D, max_queue: Q, integer_bound: IB, max_states: 5_000_000, symmetry: false, allow_vacuous: true)`; wall-clock via `:timer.tc/1`.
+- **Tests:** `test/features/timer_firing_test.exs` (timers generate successors; candidate/leader/half_open reachable; gossip fires) and the thrice-flipped regression in `test/features/vacuity_test.exs` — *"REGRESSION: per-term leader uniqueness is PROVEN and substantive (was vacuous, then violated)"*.

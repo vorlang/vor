@@ -32,7 +32,7 @@ revealed, per [`evidence/phase3a-timer-measurement.md`](evidence/phase3a-timer-m
 
 | Example | After the fix |
 |---|---|
-| **Raft** (`examples/raft_cluster.vor`, `examples/raft.vor`) | Election fires; `:candidate`/`:leader` reachable. The `"at most one leader"` invariant is now **VIOLATED** — two leaders in *different terms* (a legal transient stale leader). The invariant as written is globally too strong; Raft guarantees one leader *per term*. `mix vor.check examples/raft_cluster.vor` prints the counterexample. |
+| **Raft** (`examples/raft_cluster.vor`, `examples/raft.vor`) | Election fires; `:candidate`/`:leader` reachable. The originally-shipped *global* `never(count(role == :leader) > 1)` was thereby exposed as **mis-specified** (violated by a legal transient stale leader in a different term — Raft guarantees one leader *per term*). It has been **corrected** to per-term uniqueness (`never(exists A, B where both leader and same term)`), which is now **PROVEN and substantive** — Vor's first genuinely non-vacuous multi-agent result (see [`evidence/phase3a-timer-measurement.md`](evidence/phase3a-timer-measurement.md) §7). |
 | **Circuit breaker** (`examples/circuit_breaker.vor`) | `:half_open` now reachable; the recovery/probe subtree is exercised. |
 | **G-Counter** (`examples/gcounter.vor`, `examples/gcounter_cluster.vor`) | Gossip `every` timer fires. **But** map ops still abstract to `:unknown`, so convergence *content* is reachable-but-not-checkable — see issue #5. |
 | **Lock**, **Rate limiter** | Unchanged (controls). |

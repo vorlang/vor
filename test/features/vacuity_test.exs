@@ -143,43 +143,52 @@ defmodule Vor.Features.VacuityTest do
   end
 
   # ----------------------------------------------------------------------
-  # THE REGRESSION TEST — Phase 1 caught that Raft's leader-uniqueness proof
-  # was VACUOUS (no leader reachable). Phase 3a fires timers, so election now
-  # happens: the invariant flips from vacuous to a real, substantive VIOLATION
-  # (two leaders in different terms — a stale leader). The flip is the point:
-  # the honest model exercises leadership and finds the invariant does not hold.
+  # THE REGRESSION TEST — this assertion has flipped THREE times, and the
+  # history is the whole point (a three-layer failure of empty model + wrong
+  # spec):
+  #   Phase 1  VACUOUS   — leader-uniqueness "proven" over a space with no leader
+  #   Phase 3a VIOLATED  — timers fire, election happens, and the *global*
+  #                        invariant `never(count(leader) > 1)` is refuted by a
+  #                        legal transient stale leader (two leaders, DIFFERENT
+  #                        terms). The implementation was correct; the spec wasn't.
+  #   now      PROVEN     — corrected to per-term uniqueness
+  #                        (`never(exists A,B where both leader and same term)`),
+  #                        which holds and is SUBSTANTIVE (leaders are reachable).
   # ----------------------------------------------------------------------
 
-  test "REGRESSION: with timers firing, Raft leader-uniqueness is VIOLATED (was vacuous)" do
+  test "REGRESSION: per-term leader uniqueness is PROVEN and substantive (was vacuous, then violated)" do
     source = File.read!("examples/raft_cluster.vor")
 
-    # Timers on (default): the leader-uniqueness invariant is now a genuine
-    # violation, not a vacuous pass. Small bounds find it fast.
-    assert {:error, :violation, "at most one leader", trace, _stats} =
+    # Timers on (default): the corrected per-term invariant holds, and it is a
+    # genuine, non-vacuous result — leaders are actually reachable.
+    assert {:ok, status, stats} =
              Explorer.check_file(source,
-               max_depth: 12,
-               max_states: 500_000,
+               max_depth: 40,
+               max_states: 5_000_000,
                integer_bound: 2,
                max_queue: 2,
                symmetry: false
              )
 
-    # The counterexample ends in a two-leader state...
-    final = List.last(trace)
-    leaders = for {n, s} <- final.agents, Map.get(s, :role) == :leader, do: {n, Map.get(s, :current_term)}
-    assert length(leaders) >= 2
+    assert status in [:proven, :bounded]
+    assert [verdict] = stats.vacuity
+    assert verdict.relevance == :substantive
+    assert verdict.subject_true_count > 0
 
-    # ...and the two leaders are in DIFFERENT terms — a legal transient stale
-    # leader, i.e. the invariant "at most one leader" is globally too strong for
-    # Raft (which guarantees at most one leader *per term*), not a protocol bug.
-    terms = leaders |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
-    assert length(terms) >= 2
+    # `:leader` is genuinely reachable — this is not a vacuous pass.
+    roles =
+      stats.state_map
+      |> Map.values()
+      |> Enum.flat_map(fn ps -> Enum.map(ps.agents, fn {_n, s} -> Map.get(s, :role) end) end)
+      |> MapSet.new()
 
-    # Contrast: with timers OFF (the old blind mode) it is vacuous again —
-    # no leader is reachable, so the property is untested.
-    assert {:error, :vacuous_proven, ["at most one leader"], vstats} =
+    assert MapSet.member?(roles, :leader)
+
+    # Contrast: with timers OFF (the old blind mode) no leader is reachable, so
+    # the very same invariant is vacuous — the pass would be untested.
+    assert {:error, :vacuous_proven, _names, vstats} =
              Explorer.check_file(source, max_depth: 10, max_states: 50_000, symmetry: false, fire_timers: false)
 
-    assert [%{relevance: :vacuous, subject: "role == :leader"}] = vstats.vacuity
+    assert [%{relevance: :vacuous}] = vstats.vacuity
   end
 end

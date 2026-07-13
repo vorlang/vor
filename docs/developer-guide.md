@@ -79,8 +79,9 @@ Key codegen features:
 ### Multi-agent model checking
 > ⚠️ **Correctness caveats (July 2026) — see `KNOWN_ISSUES.md`.** The successor
 > relation now fires timer/timeout/resilience transitions (Phase 3a), so
-> timeout-driven behavior is explored (Raft `mix vor.check` now finds a real
-> leader-uniqueness violation). Remaining caveats: exhaustive checking is
+> timeout-driven behavior is explored (Raft's corrected per-term leader-uniqueness
+> invariant is now PROVEN and substantive — Vor's first real multi-agent result).
+> Remaining caveats: exhaustive checking is
 > tractable only at small bounds (interleaving explosion); symmetry
 > canonicalization is not orbit-exact (unsound); map contents abstract to
 > `:unknown` (value-level convergence not checkable). Identifier routing is fixed.

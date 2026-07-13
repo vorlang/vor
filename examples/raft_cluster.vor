@@ -1,17 +1,20 @@
 %% ============================================================
-%% ⚠️  NOTE (July 2026) — this invariant is VIOLATED
+%% NOTE (July 2026): a real, non-vacuous verification result
 %% ============================================================
-%% The model checker now fires timer/timeout/resilience transitions
-%% (Phase 3a), so election actually happens: :candidate and :leader
-%% are reachable. `mix vor.check examples/raft_cluster.vor` then finds
-%% that "at most one leader" is VIOLATED — two leaders in *different
-%% terms* (a legal transient stale leader). The invariant as written
-%% is globally too strong: Raft guarantees at most one leader PER
-%% TERM. This is a mis-specified property, not a protocol bug. See
+%% The model checker fires timer/timeout/resilience transitions
+%% (Phase 3a), so election happens and :leader is reachable. The
+%% property below — "at most one leader PER TERM" — is PROVEN and
+%% SUBSTANTIVE (leaders occur in ~76% of explored states), stable
+%% across term bounds. This is Vor's first genuinely substantive
+%% multi-agent verification result.
+%%
+%% Three-layer history worth remembering: the originally-shipped
+%% invariant `never(count(role == :leader) > 1)` was (1) never
+%% exercised — the empty (timer-off) model hid it — and (2) WRONG
+%% when finally exercised (globally too strong; it flagged a legal
+%% transient stale leader in a different term). The implementation
+%% was correct; the specification was not. See
 %% evidence/phase3a-timer-measurement.md and KNOWN_ISSUES.md §1.
-%% (Historically, before timers fired, this same invariant was
-%% VACUOUS — no leader was ever reachable; --no-fire-timers restores
-%% that old blind behavior.)
 %% ============================================================
 
 agent RaftNode(
@@ -216,10 +219,13 @@ system RaftCluster do
   connect :node3 -> :node1
   connect :node3 -> :node2
 
-  %% The cluster's headline safety property. With timers firing this is VIOLATED
-  %% (two leaders in different terms — the invariant is globally too strong; Raft
-  %% guarantees one leader per term). See the NOTE header and KNOWN_ISSUES.md §1.
-  safety "at most one leader" proven do
-    never(count(agents where role == :leader) > 1)
+  %% The cluster's headline safety property, correctly specified: Raft guarantees
+  %% at most one leader PER TERM. A stale leader from an earlier term may briefly
+  %% coexist with a newer one until it learns it has been superseded — so the
+  %% global form `never(count(role == :leader) > 1)` is wrong (too strong). This
+  %% forbids only *two leaders sharing the same term*. See KNOWN_ISSUES.md §1 and
+  %% evidence/phase3a-timer-measurement.md.
+  safety "at most one leader per term" proven do
+    never(exists A, B where A.role == :leader and B.role == :leader and A.current_term == B.current_term)
   end
 end
