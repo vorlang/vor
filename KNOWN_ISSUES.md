@@ -113,23 +113,25 @@ correctly allows `vote_count` to reach a majority and a leader to be elected.
 
 ---
 
-## 4. Multi-agent checking is not tractable at the documented bounds
+## 4. Multi-agent checking is a bug-finder, exhaustive only at small bounds
 
-With timers firing (issue #1 fixed) the honest Raft state space explodes: at the
-old reference config (`integer_bound: 3, max_queue: 10, depth: 10`) exhaustive
-exploration no longer terminates. It is tractable only at small bounds — queue 2
-is fully exhaustive in ~0.7 s (11k states), queue 3 in ~3 s (67k), queue 4 in
-~26 s (538k), queue 10 does not finish. The message-queue bound drives an ~8–15×
-blow-up per slot. The old **1,001-state figure was small because the model was
-empty** (all followers). Full measurement, including wall-clock at each bound, is
-in [`evidence/phase3a-timer-measurement.md`](evidence/phase3a-timer-measurement.md).
+With timers firing (issue #1 fixed) the honest Raft state space explodes with the
+message-queue bound (~8–15× per slot). Partial-order reduction (Phase 3c) buys a
+**20×+** constant-factor win and moves the exhaustive frontier out by one queue
+slot — queue 4 is now tractable (~6 s), queue 3 drops from ~38 s to ~1.6 s — but
+it does not change the asymptotic wall: queue 10 still does not terminate. So the
+checker is a **fast bug-finder** (counterexamples surface in well under a second,
+even at wide bounds, because BFS reaches a shallow violation before the space
+blows up) that can **also** do **bounded exhaustive verification at small
+configs**. It is **not** compile-time verification of distributed systems, and
+`mix compile` never runs it. The old **1,001-state figure was small because the
+model was empty** (all followers). Full measurements:
+[`evidence/phase3a-timer-measurement.md`](evidence/phase3a-timer-measurement.md)
+and [`evidence/phase3c-por-measurement.md`](evidence/phase3c-por-measurement.md).
 
-**Bug-finding remains cheap** — a shallow counterexample (e.g. Raft's two-leader
-violation) is found in well under a second even at the old reference config,
-because BFS reaches it before the space blows up. So the checker is useful as an
-opt-in deep check and a bug-finder, not as free whole-space verification folded
-into `mix compile`. The interleaving explosion is the wall; partial-order
-reduction is the highest-value next step.
+The interface reflects this: `mix vor.check` defaults to a fast smoke check at
+small bounds, `--deep` opts into wider bounds for bounded verification, and a `✓`
+is reported as "no counterexample within bounds", never as an unconditional proof.
 
 ---
 

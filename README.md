@@ -6,13 +6,14 @@ A programming language for the BEAM designed as a compilation target for AI codi
 
 > ## ⚠️ Verification scope (important)
 >
-> The multi-agent model checker (`mix vor.check`) now fires timer/timeout/
-> resilience transitions, so timeout-driven behavior is actually explored. It is
-> an **opt-in deep check and bug-finder**, not free verification during
-> compilation: finding a violation is fast, but exhaustive proof is tractable
-> only at small bounds — the state space explodes with message-queue size. See
-> **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** and the measurements in
-> **[evidence/](evidence/)** for the full account.
+> The multi-agent model checker (`mix vor.check`) is a **bug-finder** that can
+> *also* do **bounded exhaustive verification at small configurations** — it is
+> **not** compile-time verification of distributed systems, and `mix compile`
+> never runs it. Finding a counterexample is fast; exhaustive proof is tractable
+> only at small bounds (the state space explodes with message-queue size).
+> Partial-order reduction buys ~20× and pushes the frontier out a queue slot, but
+> not past it. See **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** and the measurements in
+> **[evidence/](evidence/)**.
 >
 > **What currently works (as described):**
 > - Single-agent verification (`mix compile` — completeness, local safety invariants)
@@ -20,14 +21,16 @@ A programming language for the BEAM designed as a compilation target for AI codi
 > - Backpressure (`max_queue`)
 > - Compiler-generated telemetry
 > - Chaos simulation (`mix vor.simulate`)
-> - Multi-agent bug-finding (`mix vor.check`) — e.g. it now finds that Raft's
->   `"at most one leader"` invariant is **violated** (two leaders in different
->   terms; the invariant is globally too strong)
+> - Multi-agent bug-finding + small-bounds bounded verification (`mix vor.check`,
+>   `--deep`). It caught that Raft's *global* `"at most one leader"` was
+>   **mis-specified** (two leaders in different terms is legal Raft); the
+>   corrected **per-term** invariant is now **proven and substantive** — Vor's
+>   first real multi-agent result.
 >
 > **What does not (yet) hold:**
 > - Multi-agent **exhaustive** checking is intractable beyond small bounds
 >   (interleaving explosion); not a `mix compile`-time operation.
-> - Symmetry reduction is **unsound** (not orbit-exact; can prune real states).
+> - Symmetry reduction is **unsound** (not orbit-exact; can prune real states) — deprioritized.
 > - Map/collection contents abstract to `:unknown`, so value-level convergence
 >   (e.g. G-Counter) is reachable but not checkable.
 

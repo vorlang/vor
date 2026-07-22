@@ -14,7 +14,7 @@ defmodule Vor.Explorer do
   the invariants and stores them on the system IR but does not run the BFS.
   """
 
-  alias Vor.Explorer.{Coverage, Invariant, LivenessChecker, ProductState, Relevance, Successor, Symmetry, Tarjan, Vacuity}
+  alias Vor.Explorer.{Coverage, Invariant, LivenessChecker, POR, ProductState, Relevance, Successor, Symmetry, Tarjan, Vacuity}
   alias Vor.IR
 
   @default_max_depth 50
@@ -82,6 +82,18 @@ defmodule Vor.Explorer do
     safety_invariants = Enum.filter(invariants, fn inv -> Map.get(inv, :kind, :safety) == :safety end)
     liveness_invariants = Enum.filter(invariants, fn inv -> inv.kind == :liveness and inv.tier == :proven end)
 
+    # Partial-order reduction (Phase 3c). Default on. Disabled when proven
+    # liveness invariants are present — the reduced graph would need a stronger
+    # (liveness) cycle proviso, so we stay conservative and explore fully there.
+    # `invariant_fields` are the atomic propositions POR must treat as visible.
+    por =
+      Keyword.get(opts, :por, true) and liveness_invariants == []
+
+    invariant_fields =
+      safety_invariants
+      |> Enum.flat_map(&Relevance.invariant_fields/1)
+      |> MapSet.new()
+
     symmetry = Symmetry.enabled?(system_ir, safety_invariants, symmetry_opt)
 
     relevance = Relevance.compute(system_ir, instance_irs, safety_invariants ++ liveness_invariants)
@@ -107,7 +119,7 @@ defmodule Vor.Explorer do
 
       :ok ->
         bfs_result = bfs(initial, instance_irs, system_ir, safety_invariants, max_depth, max_states,
-          relevance, integer_bound, max_queue, symmetry, fire_timers)
+          relevance, integer_bound, max_queue, symmetry, fire_timers, por, invariant_fields)
 
         case bfs_result do
           {:ok, status, stats} ->
@@ -300,7 +312,7 @@ defmodule Vor.Explorer do
   # used to reconstruct the counterexample if a violation is found.
   # ----------------------------------------------------------------------
 
-  defp bfs(initial, instance_irs, system_ir, invariants, max_depth, max_states, relevance, integer_bound, max_queue, symmetry, fire_timers) do
+  defp bfs(initial, instance_irs, system_ir, invariants, max_depth, max_states, relevance, integer_bound, max_queue, symmetry, fire_timers, por, invariant_fields) do
     initial_fp = fingerprint(initial, symmetry)
     queue = :queue.in({initial, [initial], initial_fp}, :queue.new())
     visited = MapSet.new([initial_fp])
@@ -312,6 +324,8 @@ defmodule Vor.Explorer do
       max_queue: max_queue,
       symmetry: symmetry,
       fire_timers: fire_timers,
+      por: por,
+      invariant_fields: invariant_fields,
       adjacency: %{initial_fp => []},
       state_map: %{initial_fp => initial},
       fired_handlers: MapSet.new()
@@ -339,7 +353,19 @@ defmodule Vor.Explorer do
                 relevance: relevance, integer_bound: integer_bound, max_queue: max_queue,
                 coverage: true, fire_timers: stats.fire_timers)
 
+            # `fired` is collected from ALL enabled events (before POR), so
+            # coverage/relevance never regress when POR defers an event that is
+            # still explored downstream.
             stats = %{stats | fired_handlers: MapSet.union(stats.fired_handlers, fired)}
+
+            # Partial-order reduction: explore an ample subset of successors.
+            successors =
+              if stats.por do
+                POR.ample(successors, state, stats.invariant_fields, visited,
+                  fn s -> fingerprint(s, symmetry) end)
+              else
+                successors
+              end
 
             step =
               Enum.reduce_while(successors, {rest, visited, stats, nil}, fn succ, {q, v, s, _} ->
