@@ -13,19 +13,31 @@ defmodule Mix.Tasks.Vor.Simulate do
       mix vor.simulate                           # defaults (30s, random seed)
       mix vor.simulate examples/raft_cluster.vor # specific file
       mix vor.simulate --duration 60000          # 60-second run
-      mix vor.simulate --seed 42                 # reproducible run
+      mix vor.simulate --seed 42                 # reproducible run (seeds the fault schedule + workload)
+      mix vor.simulate --partition --seed 12     # enable seeded network partitions
       mix vor.simulate --no-faults               # invariant checking only
       mix vor.simulate --verbose                 # print every event
 
   ## Options
 
     * `--duration N` — simulation length in milliseconds (default 30000)
-    * `--seed N` — random seed for reproducibility (default random)
-    * `--kill-min N` — minimum ms between kills (default 3000)
-    * `--kill-max N` — maximum ms between kills (default 10000)
-    * `--check-interval N` — ms between invariant checks (default 1000)
-    * `--no-faults` — run without fault injection (just start + check)
-    * `--verbose` — print each event as it happens
+    * `--seed N` — seed for the fault schedule and workload (default random).
+      The **inputs** (which fault, target, timing, duration; workload) are
+      deterministic in the seed; the BEAM scheduler and real OTP timers are not,
+      so replay of a timing-sensitive bug may be probabilistic — see
+      `evidence/phase2a-simulation.md`.
+    * `--check-interval N` — ms between invariant checks (default 1000). Lower it
+      to catch transient violations.
+    * `--partition` — enable seeded network partitions (a proxy drops all traffic
+      to/from an isolated agent for a bounded duration).
+    * `--partition-dur-min N` / `--partition-dur-max N` — partition duration range (ms).
+    * `--delay` — enable seeded message-delay faults.
+    * `--delay-min N` / `--delay-max N` — per-message delay range (ms).
+    * `--fault-interval-min N` / `--fault-interval-max N` — time between faults (ms).
+    * `--kill-min N` / `--kill-max N` — legacy kill interval (ms).
+    * `--workload N` — inject a client workload at rate N (0 = off).
+    * `--no-faults` — run without fault injection (just start + check).
+    * `--verbose` — print each event as it happens.
   """
 
   def run(args) do

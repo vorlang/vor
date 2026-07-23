@@ -82,6 +82,11 @@ defmodule Vor.Simulator do
     injector =
       if config.inject_faults do
         Task.async(fn ->
+          # `:rand.seed/2` sets the seed in the *current* process. The fault
+          # loop runs in this Task, not the main process, so it must seed itself
+          # or its random decisions (fault type, target, timing, duration) are
+          # unseeded. Distinct offset per Task so their streams don't correlate.
+          seed_process(config.seed, 1)
           fault_loop(pid_agent, system_info, config, timeline, sup_pid, deadline)
         end)
       end
@@ -96,6 +101,7 @@ defmodule Vor.Simulator do
     workload_task =
       if workload_rate > 0 do
         Task.async(fn ->
+          seed_process(config.seed, 2)
           Workload.run(pid_agent, system_info, config, timeline, deadline)
         end)
       end
@@ -111,12 +117,18 @@ defmodule Vor.Simulator do
     events = Timeline.get(timeline)
     Agent.stop(timeline)
 
-    stats = compute_stats(events)
+    stats = events |> compute_stats() |> Map.put(:events, events)
 
     case find_violation(events) do
       nil -> {:ok, :pass, stats}
       {name, details} -> {:error, :violation, name, details, stats}
     end
+  end
+
+  # Seed a Task's own `:rand` state deterministically from the run seed, with a
+  # per-Task offset so the fault and workload streams are independent.
+  defp seed_process(seed, offset) do
+    :rand.seed(:exsss, {seed * 3 + offset, seed * 5 + offset, seed * 7 + offset})
   end
 
   # -------------------------------------------------------------------
