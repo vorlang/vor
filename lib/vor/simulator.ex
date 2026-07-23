@@ -374,11 +374,22 @@ defmodule Vor.Simulator do
 
   defp discover_agents(%{agent_names: names, registry: registry}) do
     Enum.reduce(names, %{}, fn name, acc ->
-      case Registry.lookup(registry, name) do
+      case safe_lookup(registry, name) do
         [{pid, _}] -> Map.put(acc, name, pid)
         _ -> acc
       end
     end)
+  end
+
+  # `Registry.lookup/2` raises `ArgumentError` if the registry itself is not
+  # running (e.g. torn down by a supervisor restart storm). Discovery races with
+  # chaos, so treat an unavailable registry as "no entry" rather than crashing
+  # the caller — the supervisor-intensity fix keeps the registry alive, this is
+  # defense-in-depth for any transient window.
+  defp safe_lookup(registry, name) do
+    Registry.lookup(registry, name)
+  rescue
+    ArgumentError -> []
   end
 
   # -------------------------------------------------------------------

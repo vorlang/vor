@@ -61,6 +61,33 @@ fine-grained interleaving of the real processes, real OTP timer firing (wall-clo
 driven), and proxy delay/drop randomness (not exercised by the partition-based
 bug). These are the residual non-determinism.
 
+### 2b. Reliability fix — the kill/discovery race (post-Phase-2a)
+
+Phase 2a flagged a fault-Task crash on some seeds. Diagnosed and fixed:
+
+- **Root cause.** The simulation supervisor
+  (`Vor.Simulator.SupervisorBuilder`) used the default restart intensity — **3
+  restarts in 5 s**. Chaos deliberately kills agents frequently, so a cluster of
+  kills trips it; the supervisor then tears down the **whole tree, including the
+  Registry**. The next kill's `discover_agents` calls `Registry.lookup/2`, which
+  raises `ArgumentError: unknown registry`, and the fault Task dies — **silently
+  stopping all fault injection for the rest of that run** (coverage loss, not
+  just noise).
+- **Fix.** A generous supervisor intensity (`max_restarts: 1_000_000,
+  max_seconds: 1` — chaos restarts are expected, not a crash-loop) plus a
+  defensive `safe_lookup/2` that treats an unavailable registry as "no entry".
+  Regression: `test/features/seeded_simulation_test.exs` runs aggressive
+  kills-only and asserts no `unknown registry` in the log and that kills continue
+  across the whole run (red→green: pre-fix ~4 kills then crash, post-fix ~11).
+- **Impact on the 20-seed sweep.** **3 of 20 seeds (1, 6, 7) had the fault Task
+  crash** pre-fix — 15% of the sweep silently tested less than intended (notably
+  seed 7 *passed*, but its fault injection had died early). Post-fix: **0
+  crashes**. Reproduction of the two-leader violation across seeds 1–20 rose from
+  **9/20 → 12/20** (seed 6, a former crasher, now reproduces); part of the shift
+  overlaps run-to-run timing variance (non-crashers 3, 5 also flipped), so the
+  clean claim is: the fix **removed a source of silent coverage loss** and
+  reproduction did not regress.
+
 ---
 
 ## 3. The bug, on real processes (2a.3)

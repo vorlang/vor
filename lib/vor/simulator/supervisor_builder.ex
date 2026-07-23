@@ -17,7 +17,18 @@ defmodule Vor.Simulator.SupervisorBuilder do
   """
   def start_link(system_info) do
     children = build_children(system_info)
-    Supervisor.start_link(children, strategy: :one_for_one)
+
+    # Chaos testing deliberately kills agents frequently. The default restart
+    # intensity (3 restarts / 5s) treats that as a crash-loop and tears down the
+    # WHOLE tree — including the Registry — which then makes discovery raise
+    # `unknown registry` and crashes the fault injector. A generous intensity
+    # lets the supervisor keep restarting killed agents (which is the point of
+    # chaos), while a true init crash-loop would still eventually trip it.
+    Supervisor.start_link(children,
+      strategy: :one_for_one,
+      max_restarts: 1_000_000,
+      max_seconds: 1
+    )
   end
 
   defp build_children(system_info) do

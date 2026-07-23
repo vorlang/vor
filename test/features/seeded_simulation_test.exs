@@ -16,6 +16,7 @@ defmodule Vor.Features.SeededSimulationTest do
   see evidence/phase2a-simulation.md).
   """
   use ExUnit.Case, async: false
+  import ExUnit.CaptureLog
 
   @fixture "test/fixtures/raft_global_sim.vor"
   # Seeds empirically observed to reproduce the two-leader violation (each 15/15
@@ -72,5 +73,46 @@ defmodule Vor.Features.SeededSimulationTest do
     # (a legal transient stale leader), never a same-term double-election.
     assert length(Enum.uniq(leader_terms)) >= 2,
            "expected leaders in different terms (stale-leader bug), got #{inspect(leader_terms)}"
+  end
+
+  # Regression for the kill/discovery race (flagged in Phase 2a): frequent kills
+  # tripped the simulation supervisor's default restart intensity (3/5s), tearing
+  # down the whole tree including the Registry, after which `discover_agents`
+  # raised `unknown registry` and the fault Task crashed — silently stopping fault
+  # injection for the rest of the run (coverage loss). The fix is a generous
+  # supervisor intensity + a defensive lookup.
+  @tag timeout: 60_000
+  test "aggressive kills do not crash the fault Task (registry survives the restart storm)" do
+    {:ok, system_info} = Vor.Simulator.compile_for_simulation(File.read!(@fixture))
+
+    # Kills-only, aggressive (every fault is a kill, ~300–600 ms apart) — this
+    # trips the old 3-restarts-in-5s intensity within ~1.5 s.
+    kill_config = %{
+      duration_ms: 8_000,
+      seed: 1,
+      kill_interval: {300, 600},
+      fault_interval: {300, 600},
+      check_interval_ms: 500,
+      inject_faults: true,
+      enable_partitions: false,
+      enable_delays: false,
+      partition_duration: {2000, 3500},
+      delay_range: 50..200,
+      workload_rate: 0,
+      verbose: false
+    }
+
+    {result, log} = with_log(fn -> Vor.Simulator.run_system(system_info, kill_config) end)
+
+    refute log =~ "unknown registry",
+           "the fault Task crashed on the kill/discovery race (registry torn down)"
+
+    stats = result |> Tuple.to_list() |> List.last()
+    kills = Enum.count(stats.events, fn {_, type, _} -> type == :kill end)
+
+    # A crashed fault loop stops after ~3–4 kills; a healthy one injects many
+    # more across the full 8 s run.
+    assert kills >= 6,
+           "fault injection stopped early (#{kills} kills) — the fault loop likely crashed"
   end
 end
