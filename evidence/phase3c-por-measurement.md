@@ -1,14 +1,48 @@
 # Phase 3c — Partial-order reduction, measured
 
+> ## ⚠️ CORRECTION (2026-07-22): the original 20× headline was UNSOUND
+>
+> The reduction numbers first reported here (2.7–22×, "moves the frontier from
+> queue 3 to queue 4") were produced by a POR whose independence relation was
+> **unsound**: it assumed two events aimed at different agents always commute, but
+> the lossy `cap_queue` truncation is order-sensitive, so at a saturated queue
+> they can drop different messages and **not** commute (diagnosed in
+> `directions/por-and-voting-diagnostics.md`, empirically constructed). The
+> soundness gate passed only because the examples never hit it in a
+> verdict-changing way — precisely the "soundness rests on the examples being
+> lucky" failure this project exists to eliminate.
+>
+> **This has been fixed.** POR now treats a queue-growing or truncating event as
+> dependent (it reduces only when no enabled event grows/overflows the queue).
+> With the fix, **sound POR buys ~1× on the honest Raft model and no longer moves
+> the frontier** (q2 11,165→11,162; q3 559,130→555,992; q4 still intractable). The
+> reason: Raft's election-timeout timer **broadcasts** and is enabled at nearly
+> every state with a follower, so a queue-growing event is almost always present
+> and sound static POR cannot reduce across it. **The 20× was reduction the
+> checker was not entitled to.**
+>
+> POR is kept on by default (it is sound, cheap, and still reduces where the queue
+> is safe — non-growing events with headroom), but on this model its benefit is
+> negligible. The interleaving-explosion bottleneck therefore remains open;
+> **DPOR** (dynamic race detection, which does not need the invisibility/growth
+> restriction) or an **order-independent queue drop policy** are the real levers.
+> The sections below are the *original, pre-fix* measurement, retained for the
+> record and superseded by this correction; see §7.
+
+---
+
+# (original) Phase 3c — Partial-order reduction, measured
+
 Phase 3a found the honest multi-agent bottleneck is **message-interleaving
 explosion** (~8–15× state growth per queue slot) and that bug-finding is cheap
 while exhaustive verification is tractable only at small bounds. Partial-order
 reduction attacks that bottleneck directly. This phase implements a conservative,
 sound static POR and measures what it buys.
 
-**Headline: POR buys 2.7–22× on the honest Raft model and moves the exhaustive
-frontier from queue 3 to queue 4** — and it passes the soundness gate on every
-example (verdict, relevance, counterexample, and vacuity all preserved).
+**Headline (SUPERSEDED — see correction above): POR buys 2.7–22× on the honest
+Raft model and moves the exhaustive frontier from queue 3 to queue 4** — and it
+passes the soundness gate on every example (verdict, relevance, counterexample,
+and vacuity all preserved).
 
 ## Reproduction metadata
 
@@ -157,6 +191,46 @@ hides no counterexample. Static ample-set POR was sufficient; DPOR is noted as a
 future lever but not needed to make the checker useful. Combined with the
 repositioning, the checker is now honestly what the measurement says it is: a fast
 counterexample finder, with opt-in bounded verification at small scale.
+
+---
+
+## 7. Corrected measurement (2026-07-22) — sound POR
+
+After fixing the `cap_queue` independence unsoundness (queue-safety gate in
+`Vor.Explorer.POR.ample/5`; POR reduces only when no enabled event grows or
+overflows the queue), the soundness gate still passes on every example, and the
+reduction is:
+
+| example | verdict (off→on) | relevance | states (off → on) | reduction |
+|---|---|---|---|---|
+| raft per-term, q2 ib2 | proven → proven | substantive | 11,165 → 11,162 | **1.0×** |
+| raft per-term, q3 ib2 | proven → proven | substantive | 559,130 → 555,992 | **1.01×** |
+| raft per-term, q2 ib3 | proven → proven | substantive | 36,634 → 36,600 | 1.0× |
+| raft global (violated) | violated → violated | — | 2,014 → 2,014 | 1.0× |
+| raft `--no-fire-timers` | proven → proven | vacuous | 28 → 28 | 1.0× |
+| gcounter_cluster | proven → proven | vacuous | 3,260 → 3,226 | 1.01× |
+| circuit_breaker / lock / rate_limiter | unchanged | — | tiny | 1.0× |
+
+**Sound POR provides essentially no reduction on the honest Raft model, and no
+longer moves the frontier** (q4 remains intractable). Root cause: the
+election-timeout timer *broadcasts* `request_vote` and is enabled at nearly every
+state that has a follower; a queue-growing event blocks reduction, and one is
+almost always present. Correctness is preserved (verdict + relevance + violation
++ vacuity unchanged; the regression `test/features/por_test.exs` proves POR keeps
+the full set on the non-commuting saturated state, red→green).
+
+**Where POR still helps:** systems whose enabled events don't grow the bounded
+queue (no broadcasts / gossip at a near-full queue), where interleavings of
+non-growing invisible events are collapsed. Its value is model-dependent; the
+flagship Raft model does not benefit.
+
+**Revised conclusion.** The interleaving-explosion wall stands. Static ample-set
+POR is defeated by always-enabled broadcasting timers on this model. The next
+lever is **DPOR** (dynamic race detection — it adds a backtrack point only at a
+real race, including the truncation-induced one, without the static
+invisibility/growth restriction), or making the lossy queue's drop policy
+order-independent (a model change). The Phase 3a framing is unchanged: the
+checker is a fast bug-finder with opt-in small-bounds bounded verification.
 
 ---
 

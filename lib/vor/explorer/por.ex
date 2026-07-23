@@ -73,25 +73,65 @@ defmodule Vor.Explorer.POR do
         successors
 
       _ ->
-        groups = Enum.group_by(successors, &target/1)
-
-        candidate =
-          Enum.find_value(groups, fn
-            {nil, _group} ->
-              # No identifiable target (should not happen) — never reduce on it.
-              nil
-
-            {_agent, group} ->
-              all_invisible? = Enum.all?(group, &(not visible?(&1, parent, invariant_fields)))
-
-              all_new? =
-                Enum.all?(group, fn s -> not MapSet.member?(visited, fingerprint.(s)) end)
-
-              if all_invisible? and all_new?, do: group, else: nil
-          end)
-
-        candidate || successors
+        # Queue-safety gate. The independence relation ("different target agent
+        # ⇒ commute") holds only while the bounded queue does not truncate: the
+        # `cap_queue` drop keeps the *first* `max_queue` messages, so two orders
+        # that saturate the queue can drop different tails and NOT commute (a
+        # `deliver→a` that overflows can leave a `deliver→b` reachable-or-not
+        # depending on order). Two fixes were considered:
+        #
+        #   (a) [chosen] treat any queue-growing or truncating event as
+        #       dependent — reduce only when no enabled event grows or overflows
+        #       the queue. POR-only, keeps the model's lossy semantics intact.
+        #       Reduction cost: no reduction across broadcast/gossip events at a
+        #       near-full queue (they grow it); the common invisible non-growing
+        #       deliveries still reduce.
+        #   (b) [rejected] make `cap_queue`'s drop order-independent (drop by a
+        #       canonical key instead of the tail). That changes the MODEL — it
+        #       alters which messages the lossy network drops, shifting every
+        #       (non-POR) result and state count, and could itself mask or move
+        #       verdicts. Out of scope: we must not restore reduction by
+        #       changing what the checker verifies.
+        #
+        # Conservative bias: over-approximating dependency (option a) only costs
+        # exploration; under-approximating drops states. When any event is not
+        # capacity-inert we expand fully.
+        if Enum.all?(successors, &capacity_inert?(&1, parent)) do
+          reduce(successors, parent, invariant_fields, visited, fingerprint)
+        else
+          successors
+        end
     end
+  end
+
+  # An event is capacity-inert when it neither overflowed the queue (`cap_queue`
+  # dropped nothing) nor grew it. If every enabled event is capacity-inert the
+  # queue is non-increasing and untruncated along the reduction, so the lossy
+  # truncation cannot introduce an order dependence — commutation holds.
+  defp capacity_inert?(%ProductState{queue_truncated: true}, _parent), do: false
+
+  defp capacity_inert?(%ProductState{pending_messages: p}, %ProductState{pending_messages: pp}),
+    do: length(p) <= length(pp)
+
+  defp reduce(successors, parent, invariant_fields, visited, fingerprint) do
+    groups = Enum.group_by(successors, &target/1)
+
+    candidate =
+      Enum.find_value(groups, fn
+        {nil, _group} ->
+          # No identifiable target (should not happen) — never reduce on it.
+          nil
+
+        {_agent, group} ->
+          all_invisible? = Enum.all?(group, &(not visible?(&1, parent, invariant_fields)))
+
+          all_new? =
+            Enum.all?(group, fn s -> not MapSet.member?(visited, fingerprint.(s)) end)
+
+          if all_invisible? and all_new?, do: group, else: nil
+      end)
+
+    candidate || successors
   end
 
   # The single agent an event is aimed at.

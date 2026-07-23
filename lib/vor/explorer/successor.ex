@@ -182,9 +182,12 @@ defmodule Vor.Explorer.Successor do
       synth
       |> Simulator.simulate(agent_state, {tag, %{}}, name, connections)
       |> Enum.map(fn {new_state, outgoing} ->
+        queued = ps.pending_messages ++ outgoing
+
         %ProductState{
           agents: Map.put(ps.agents, name, new_state),
-          pending_messages: cap_queue(ps.pending_messages ++ outgoing, max_queue),
+          pending_messages: cap_queue(queued, max_queue),
+          queue_truncated: truncated?(queued, max_queue),
           depth: ps.depth + 1,
           last_action: {:timer, name, tag},
           last_handler: {ir.name, {:every, tag}}
@@ -255,11 +258,12 @@ defmodule Vor.Explorer.Successor do
             handler
             |> Simulator.simulate(agent_state, msg, to_name, connections)
             |> Enum.map(fn {new_state, outgoing} ->
-              new_pending = cap_queue(remaining_pending ++ outgoing, max_queue)
+              queued = remaining_pending ++ outgoing
 
               %ProductState{
                 agents: Map.put(ps.agents, to_name, new_state),
-                pending_messages: new_pending,
+                pending_messages: cap_queue(queued, max_queue),
+                queue_truncated: truncated?(queued, max_queue),
                 depth: ps.depth + 1,
                 last_action: action,
                 last_handler: handler_id
@@ -277,6 +281,13 @@ defmodule Vor.Explorer.Successor do
   end
 
   defp cap_queue(queue, _), do: queue
+
+  # True when the queue overflowed and `cap_queue` dropped tail messages — the
+  # order-sensitive truncation POR must treat as a dependency.
+  defp truncated?(queued, max_queue) when is_integer(max_queue),
+    do: length(queued) > max_queue
+
+  defp truncated?(_queued, _max_queue), do: false
 
   # Returns `{index, handler}` for the first tag-matching handler whose guard is
   # satisfied (the index is its position in the agent's declared handler list,

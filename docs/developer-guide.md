@@ -95,15 +95,16 @@ Key codegen features:
 - `lib/vor/explorer/symmetry.ex` — symmetry detection and canonicalization
 - `lib/vor/explorer/vacuity.ex` — invariant **relevance** axis (subject reachability → substantive/vacuous/unexercised)
 - `lib/vor/explorer/coverage.ex` — declared-vs-reached coverage (unreached enum values, unfired handlers/resilience/timers)
-- `lib/vor/explorer/por.ex` — partial-order reduction (static ample/persistent sets; different-target-agent events are independent, invisible-agent ample sets + cycle proviso)
+- `lib/vor/explorer/por.ex` — partial-order reduction (static ample/persistent sets; different-target-agent events are independent *only when the bounded queue does not truncate* — a queue-growing/truncating event is treated as dependent; invisible-agent ample sets + cycle proviso)
 
 **The checker is a bug-finder, not a compile-time verifier.** `mix compile` never
 runs multi-agent exploration. `mix vor.check` defaults to a fast smoke check at
 small bounds; `--deep` opts into wider bounds for bounded exhaustive verification.
-POR (on by default, `--no-por` off) buys ~20× on the honest Raft model and moves
-the exhaustive frontier out by a queue slot without changing any verdict or
-relevance (soundness gate in `test/features/por_test.exs`). See
-`evidence/phase3c-por-measurement.md`.
+POR (on by default, `--no-por` off) is sound and preserves every verdict/relevance
+(soundness gate in `test/features/por_test.exs`), but on the honest Raft model it
+buys only ~1× — always-enabled broadcasting timers grow the queue and block
+reduction. (An earlier version measured ~20× but was unsound across the lossy
+`cap_queue` truncation; now fixed.) See `evidence/phase3c-por-measurement.md` §7.
 
 **Two-axis guarantees (Phase 1).** Every invariant reports strength (`proven` /
 `checked` / `monitored`) *and* relevance (`substantive` / `vacuous` /

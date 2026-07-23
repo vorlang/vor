@@ -116,18 +116,21 @@ correctly allows `vote_count` to reach a majority and a leader to be elected.
 ## 4. Multi-agent checking is a bug-finder, exhaustive only at small bounds
 
 With timers firing (issue #1 fixed) the honest Raft state space explodes with the
-message-queue bound (~8–15× per slot). Partial-order reduction (Phase 3c) buys a
-**20×+** constant-factor win and moves the exhaustive frontier out by one queue
-slot — queue 4 is now tractable (~6 s), queue 3 drops from ~38 s to ~1.6 s — but
-it does not change the asymptotic wall: queue 10 still does not terminate. So the
-checker is a **fast bug-finder** (counterexamples surface in well under a second,
-even at wide bounds, because BFS reaches a shallow violation before the space
-blows up) that can **also** do **bounded exhaustive verification at small
-configs**. It is **not** compile-time verification of distributed systems, and
-`mix compile` never runs it. The old **1,001-state figure was small because the
-model was empty** (all followers). Full measurements:
+message-queue bound (~8–15× per slot). Partial-order reduction (Phase 3c) was
+expected to attack this, and an initial (unsound) version measured ~20×; once made
+sound (see #6) it buys **~1× on this model** and does not move the frontier —
+Raft's election-timeout timer *broadcasts* and is enabled almost everywhere, so a
+queue-growing event nearly always blocks reduction. So exhaustive checking is
+tractable only at small bounds (queue ≤ 3), and the interleaving-explosion wall
+stands. The checker is a **fast bug-finder** (counterexamples surface in well
+under a second, even at wide bounds, because BFS reaches a shallow violation
+before the space blows up) that can **also** do **bounded exhaustive verification
+at small configs**. It is **not** compile-time verification of distributed
+systems, and `mix compile` never runs it. The old **1,001-state figure was small
+because the model was empty** (all followers). Full measurements:
 [`evidence/phase3a-timer-measurement.md`](evidence/phase3a-timer-measurement.md)
-and [`evidence/phase3c-por-measurement.md`](evidence/phase3c-por-measurement.md).
+and [`evidence/phase3c-por-measurement.md`](evidence/phase3c-por-measurement.md)
+(the latter's §7 has the corrected, sound numbers).
 
 The interface reflects this: `mix vor.check` defaults to a fast smoke check at
 small bounds, `--deep` opts into wider bounds for bounded verification, and a `✓`
@@ -144,3 +147,25 @@ examples this means that, even now that gossip fires (issue #1), the CRDT's
 is *reachable* but not *checkable*. This is a distinct limitation from the timer
 gap. Protocols whose safety depends on map/collection contents cannot currently
 be verified at the value level; enum-state and integer properties are unaffected.
+
+---
+
+## 6. Partial-order reduction — cap_queue independence — FIXED (July 2026)
+
+POR's soundness rests on "two events aimed at different agents commute". That is
+true under the faithful message multiset, but **not** under the lossy bounded
+queue: `cap_queue` keeps the *first* `max_queue` messages and drops the tail, so
+two orders that saturate the queue can drop different messages and fail to
+commute. The original Phase 3c POR ignored this and reduced across such states —
+verdict-preserving on the examples, but unsound in principle, and the source of
+the inflated ~20× figure.
+
+**Fix.** `Vor.Explorer.POR.ample/5` now gates reduction on queue-safety: it
+reduces only when no enabled event grows or truncates the queue (a queue-growing
+or truncating event is treated as dependent). This is the obviously-sound choice
+over the minimal-reduction-loss one; the rejected alternative — making the drop
+order-independent — would change the model (which messages the lossy network
+drops), shifting non-POR results too. Regression: `test/features/por_test.exs`
+builds the non-commuting saturated state and asserts POR keeps the full set
+(red→green against the pre-fix code). Consequence: sound POR now buys ~1× on the
+honest Raft model (see #4 and `evidence/phase3c-por-measurement.md` §7).

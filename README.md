@@ -11,8 +11,9 @@ A programming language for the BEAM designed as a compilation target for AI codi
 > **not** compile-time verification of distributed systems, and `mix compile`
 > never runs it. Finding a counterexample is fast; exhaustive proof is tractable
 > only at small bounds (the state space explodes with message-queue size).
-> Partial-order reduction buys ~20× and pushes the frontier out a queue slot, but
-> not past it. See **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** and the measurements in
+> Partial-order reduction is sound but, on the honest Raft model, buys only ~1×
+> (always-enabled broadcasting timers block it), so the interleaving wall stands.
+> See **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** and the measurements in
 > **[evidence/](evidence/)**.
 >
 > **What currently works (as described):**

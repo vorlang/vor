@@ -18,7 +18,12 @@ defmodule Vor.Explorer.ProductState do
             # handler that produced this successor (nil for the initial state and
             # externally-injected no-ops). Excluded from `fingerprint/1`, so it
             # never affects visited-set dedup.
-            last_handler: nil
+            last_handler: nil,
+            # Transient: did producing this successor overflow `max_queue` and
+            # drop tail messages? The lossy truncation is order-sensitive, so
+            # POR treats a truncating (or queue-growing) event as dependent.
+            # Excluded from `fingerprint/1`.
+            queue_truncated: false
 
   @type agent_state :: %{atom() => term()}
   @type pending_message :: {atom(), atom(), tuple()}
