@@ -281,7 +281,7 @@ A simulation pass carries evidence of what it actually exercised — the simulat
 
 **Sweeps** (`Vor.Simulator.Sweep.run/3`) run N seeds and aggregate outcome counts, **union** coverage (reached by ≥1 seed — never-reached-by-any is the strong "the config can't exercise this" signal), and union relevance.
 
-Note: `send`/`broadcast` emit `[:vor, :message, :emitted]` telemetry (added in Phase 2b), but a gen_statem reply surfaces a generic `ok` rather than the declared reply tag, so the `emits` axis under-reports for reply-heavy protocols. See `evidence/phase2b-simulation-coverage.md`.
+Note: `emit`/`reply`, `send`, and `broadcast` all emit `[:vor, :message, :emitted]` telemetry with the declared IR tag (gen_statem replies included — a bare `:ok` reply with no declared emit emits nothing). See `evidence/phase2b-simulation-coverage.md` §3.
 
 ### Modules
 

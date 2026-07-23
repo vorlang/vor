@@ -346,6 +346,88 @@ defmodule Vor.Features.TelemetryTest do
     :ets.delete(events)
   end
 
+  test "gen_statem conditional handler emits the DECLARED reply tag (not ok)" do
+    # Regression for the Phase 2b reply-tag gap: a call handler that replies from
+    # inside a conditional branch. Pre-fix, emitted telemetry recovered its tag
+    # from the reduced reply AST, which could not see into the `case` expression,
+    # so the declared tag never surfaced (emits coverage under-reported). The fix
+    # emits the tag straight from the IR at the reply site.
+    source = """
+    agent Router do
+      state phase: :open | :closed
+
+      protocol do
+        accepts {:req, kind: atom}
+        emits {:accepted}
+        emits {:refused}
+      end
+
+      on {:req, kind: K} when phase == :open do
+        if K == :good do
+          emit {:accepted}
+        else
+          emit {:refused}
+        end
+      end
+    end
+    """
+
+    {:ok, result} = Vor.Compiler.compile_and_load(source)
+    events = :ets.new(:test_events, [:bag, :public])
+
+    :telemetry.attach("test-cond-emit", [:vor, :message, :emitted], fn _event, _m, metadata, _ ->
+      :ets.insert(events, {:emitted, metadata})
+    end, nil)
+
+    {:ok, pid} = :gen_statem.start_link(result.module, [], [])
+    reply = :gen_statem.call(pid, {:req, %{kind: :good}})
+
+    tags = :ets.lookup(events, :emitted) |> Enum.map(fn {:emitted, m} -> m.message_tag end)
+    # The declared tag surfaces; the generic reply value `ok` never does.
+    assert :accepted in tags
+    refute :ok in tags
+    # The reply itself carries the declared tag too (sanity: runtime unchanged).
+    assert match?({:accepted, _}, reply)
+
+    :telemetry.detach("test-cond-emit")
+    :gen_statem.stop(pid)
+    :ets.delete(events)
+  end
+
+  test "gen_statem call handler with no declared emit fires no emitted telemetry" do
+    # The other half of the gap: a bare `:ok` reply is not a declared emit, so it
+    # must NOT appear on the emitted stream (pre-fix it surfaced as tag `ok`).
+    source = """
+    agent Sink do
+      state phase: :on | :off
+
+      protocol do
+        accepts {:poke}
+      end
+
+      on {:poke} when phase == :on do
+        transition phase: :off
+      end
+    end
+    """
+
+    {:ok, result} = Vor.Compiler.compile_and_load(source)
+    events = :ets.new(:test_events, [:bag, :public])
+
+    :telemetry.attach("test-noemit", [:vor, :message, :emitted], fn _event, _m, metadata, _ ->
+      :ets.insert(events, {:emitted, metadata})
+    end, nil)
+
+    {:ok, pid} = :gen_statem.start_link(result.module, [], [])
+    :gen_statem.call(pid, {:poke, %{}})
+
+    assert :ets.lookup(events, :emitted) == []
+
+    :telemetry.detach("test-noemit")
+    :gen_statem.stop(pid)
+    :ets.delete(events)
+  end
+
   test "gen_statem full lifecycle: start + received + transition + emitted" do
     source = """
     agent Lock do

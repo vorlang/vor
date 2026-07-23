@@ -873,7 +873,7 @@ defmodule Vor.Codegen.Erlang do
     else
       # Linear path — need to generate return at the end
       # Extract the final data var and state from the generated expressions
-      {final_data_var, new_state, emit_form} =
+      {final_data_var, new_state, emit_form, emit_tag} =
         extract_final_state(actions, l, data_var, counter, state_field_name)
 
       state_result = case new_state do
@@ -892,7 +892,11 @@ defmodule Vor.Codegen.Erlang do
           reply_value = emit_form || {:atom, l, :ok}
           reply_action = {:tuple, l, [{:atom, l, :reply}, {:var, l, from_var}, reply_value]}
           actions_list = list_to_erl([reply_action | timeout_acts], l)
-          exprs ++ [{:tuple, l, [{:atom, l, :next_state}, state_result, {:var, l, final_data_var}, actions_list]}]
+          # Emitted-message telemetry uses the DECLARED emit tag from the IR (not
+          # recovered from the reduced reply AST — a bare `:ok` reply carries no
+          # declared emit). Only a real emit, and only on the call/reply path.
+          emit_tel = if emit_tag, do: statem_emit_telemetry(emit_tag, final_data_var, l), else: []
+          exprs ++ emit_tel ++ [{:tuple, l, [{:atom, l, :next_state}, state_result, {:var, l, final_data_var}, actions_list]}]
       end
     end
   end
@@ -914,14 +918,16 @@ defmodule Vor.Codegen.Erlang do
       end
     end)
     |> then(fn {dv, state, emit_marker, _c} ->
-      emit_form = if emit_marker == :has_emit do
-        # Find and compile the emit
+      {emit_form, emit_tag} = if emit_marker == :has_emit do
+        # Find and compile the emit; keep its declared tag for telemetry.
         emit_action = Enum.find(actions, fn a -> a.type == :emit end)
-        if emit_action, do: emit_to_erl(emit_action.data, 1, dv), else: nil
+        if emit_action,
+          do: {emit_to_erl(emit_action.data, 1, dv), emit_action.data.tag},
+          else: {nil, nil}
       else
-        nil
+        {nil, nil}
       end
-      {dv, state, emit_form}
+      {dv, state, emit_form, emit_tag}
     end)
   end
 
@@ -1891,64 +1897,37 @@ defmodule Vor.Codegen.Erlang do
     end
   end
 
-  # Extract telemetry calls from the return tuple shape.
-  # {next_state, NewState, Data, Actions} → enum transition + maybe emit
-  # {keep_state, Data, Actions} → maybe emit (no state change)
-  # case/if expressions → recurse into each branch
+  # Extract telemetry calls from the return tuple shape. Only the enum-transition
+  # telemetry is derived from the return here; emitted-message telemetry is
+  # generated at the reply site from the declared IR tag (`statem_emit_telemetry`)
+  # so it survives AST reduction and never mistakes a bare `:ok` reply for a
+  # declared emit.
+  #   {next_state, NewState, Data, Actions} → enum transition
+  #   {keep_state, Data, Actions}           → no transition
+  #   case/if expressions                   → branches carry their own telemetry
   defp statem_return_telemetry(
-         {:tuple, _, [{:atom, _, :next_state}, {:atom, _, to_state} | _]} = ret,
+         {:tuple, _, [{:atom, _, :next_state}, {:atom, _, to_state} | _]},
          handler, state_field_name, l
        ) do
     guard_state = extract_guard_state(handler.guard)
-    enum_tel = Tel.call([:vor, :transition], [
+    Tel.call([:vor, :transition], [
       {:agent, Tel.agent_name_expr(:Data, l)},
       {:field, {:atom, l, state_field_name}},
       {:from, {:atom, l, guard_state || :unknown}},
       {:to, {:atom, l, to_state}}
     ], l)
-
-    emit_tel = extract_emit_tag_from_return(ret, l)
-    enum_tel ++ emit_tel
   end
 
-  defp statem_return_telemetry(
-         {:tuple, _, [{:atom, _, keep} | _]} = ret,
-         _handler, _state_field_name, l
-       )
-       when keep in [:keep_state, :keep_state_and_data] do
-    extract_emit_tag_from_return(ret, l)
-  end
-
-  # For case expressions (conditional handlers), don't try to recurse —
-  # the conditional branch builder handles its own returns.
   defp statem_return_telemetry(_other, _handler, _state_field_name, _l), do: []
 
-  # Extract emit tag from a gen_statem return that contains a reply action.
-  # Returns telemetry call list or [].
-  defp extract_emit_tag_from_return(ret, l) do
-    case find_reply_tag_in_ast(ret) do
-      nil -> []
-      tag ->
-        Tel.call([:vor, :message, :emitted], [
-          {:agent, Tel.agent_name_expr(:Data, l)},
-          {:message_tag, {:atom, l, tag}}
-        ], l)
-    end
+  # Emitted-message telemetry for a gen_statem reply, tag taken straight from the
+  # IR emit action. Mirrors the gen_server emit path.
+  defp statem_emit_telemetry(tag, data_var, l) do
+    Tel.call([:vor, :message, :emitted], [
+      {:agent, Tel.agent_name_expr(data_var, l)},
+      {:message_tag, {:atom, l, tag_atom(tag)}}
+    ], l)
   end
-
-  # Walk the AST to find a reply action {reply, From, {Tag, Fields}} and
-  # extract the Tag atom. Returns nil if not found.
-  defp find_reply_tag_in_ast({:tuple, _, [{:atom, _, :reply}, _, {:tuple, _, [{:atom, _, tag} | _]}]}),
-    do: tag
-  defp find_reply_tag_in_ast({:tuple, _, [{:atom, _, :reply}, _, {:atom, _, tag}]}),
-    do: tag
-  defp find_reply_tag_in_ast({:cons, _, head, tail}) do
-    find_reply_tag_in_ast(head) || find_reply_tag_in_ast(tail)
-  end
-  defp find_reply_tag_in_ast({:tuple, _, elements}) do
-    Enum.find_value(elements, &find_reply_tag_in_ast/1)
-  end
-  defp find_reply_tag_in_ast(_), do: nil
 
   defp extract_guard_state(%IR.GuardExpr{op: :==, value: {:atom, state}}), do: state
   defp extract_guard_state(%IR.CompoundGuardExpr{left: l}), do: extract_guard_state(l)
