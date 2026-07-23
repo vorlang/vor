@@ -38,3 +38,5 @@ tla2tools.jar
 /.claude/
 tla/states/
 *.bin
+
+.DS_Store

@@ -110,16 +110,26 @@ defmodule Mix.Tasks.Vor.Simulate do
 
         case Vor.Simulator.run_file(file, config) do
           {:ok, :pass, stats} ->
-            workload_info =
-              if Map.get(stats, :workload_sent, 0) > 0,
-                do:
-                  ", workload: #{stats.workload_sent} sent/#{stats.workload_ok} ok/#{stats.workload_errors} err/#{stats.workload_timeouts} timeout",
-                else: ""
-
             Mix.shell().info(
               "  ✓ PASS — #{stats.invariant_checks} checks, " <>
-                "#{stats.faults_injected} faults, 0 violations#{workload_info}"
+                "#{stats.faults_injected} faults, 0 violations#{workload_info(stats)}"
             )
+
+            report_axes(stats)
+
+          {:ok, :under_tested, stats} ->
+            Mix.shell().info(
+              "  ⚠ UNDER-TESTED — no violation, but the run exercised less than it claimed:"
+            )
+
+            Enum.each(stats.integrity.reasons, fn r -> Mix.shell().info("      - #{r}") end)
+
+            Mix.shell().info(
+              "    #{stats.invariant_checks} checks, #{stats.faults_injected} faults#{workload_info(stats)}"
+            )
+
+            report_axes(stats)
+            Mix.shell().info("    Replay: mix vor.simulate #{file} --seed #{seed}")
 
           {:error, :violation, name, details, stats} ->
             Mix.shell().error("  ✗ FAIL — violation: \"#{name}\"")
@@ -135,10 +145,66 @@ defmodule Mix.Tasks.Vor.Simulate do
           {:error, :system_crash, reason} ->
             Mix.shell().error("  ✗ System crashed: #{inspect(reason)}")
             Mix.raise("Simulation failed: system crash")
+
+          {:error, :dependency_failed, dep, reason} ->
+            Mix.shell().error("  ✗ Dependency failed: #{inspect(dep)} — #{inspect(reason)}")
+            Mix.raise("Simulation failed: dependency #{inspect(dep)} did not start")
         end
       end)
     end
   end
+
+  defp workload_info(stats) do
+    if Map.get(stats, :workload_sent, 0) > 0 do
+      ", workload: #{stats.workload_sent} sent/#{stats.workload_ok} ok/#{stats.workload_errors} err/#{stats.workload_timeouts} timeout"
+    else
+      ""
+    end
+  end
+
+  # Print the Phase 2b relevance + coverage axes: what a pass actually engaged.
+  defp report_axes(stats) do
+    report_relevance(Map.get(stats, :relevance, []))
+    report_coverage(Map.get(stats, :coverage))
+  end
+
+  defp report_relevance([]), do: :ok
+
+  defp report_relevance(relevance) do
+    Mix.shell().info("    Invariant relevance:")
+
+    Enum.each(relevance, fn inv ->
+      {mark, label} =
+        case inv.relevance do
+          :substantive -> {"✓", "substantive"}
+          :vacuous -> {"⚠", "VACUOUS"}
+          :unexercised -> {"·", "unexercised"}
+        end
+
+      detail =
+        case inv.relevance do
+          :vacuous -> "subject `#{inv.subject}` never observed"
+          _ -> "subject live in #{inv.subject_live_checks} of #{inv.total_checks} checks"
+        end
+
+      Mix.shell().info("      #{mark} \"#{inv.name}\"  #{label}  (#{detail})")
+    end)
+  end
+
+  defp report_coverage(nil), do: :ok
+
+  defp report_coverage(%{totals: totals}) do
+    {rs, ds} = totals.states
+    {rh, dh} = totals.handlers
+    {re, de} = totals.emits
+
+    Mix.shell().info(
+      "    Coverage: reached #{rs}/#{ds} declared states, " <>
+        "#{rh}/#{dh} handlers, #{re}/#{de} emitted messages"
+    )
+  end
+
+  defp report_coverage(_), do: :ok
 
   defp discover_system_files do
     Path.wildcard("examples/*.vor")

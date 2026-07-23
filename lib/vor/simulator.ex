@@ -12,7 +12,8 @@ defmodule Vor.Simulator do
   partition messages.
   """
 
-  alias Vor.Simulator.{InvariantChecker, MessageProxy, SupervisorBuilder, Timeline, Workload}
+  alias Vor.Simulator.{Coverage, InvariantChecker, MessageProxy, SupervisorBuilder, Timeline, Workload}
+  alias Vor.Explorer.Vacuity
 
   @doc """
   Compile, load, and simulate a `.vor` file containing a system block.
@@ -40,6 +41,10 @@ defmodule Vor.Simulator do
       {:ok, req_pids} ->
         case SupervisorBuilder.start_link(system_info) do
           {:ok, sup_pid} ->
+            # Attach the coverage collector before agents do meaningful work, so
+            # early transitions/messages are observed (task 2b.2).
+            collector = Coverage.start()
+
             Process.sleep(500)
 
             agent_pids = discover_agents(system_info)
@@ -51,6 +56,9 @@ defmodule Vor.Simulator do
             })
 
             result = run_loop(agent_pids, system_info, config, timeline, sup_pid)
+
+            coverage = Coverage.stop(collector, system_info)
+            result = put_coverage(result, coverage)
 
             try do
               Supervisor.stop(sup_pid, :normal, 5000)
@@ -70,6 +78,15 @@ defmodule Vor.Simulator do
         {:error, :dependency_failed, dep, reason}
     end
   end
+
+  # Fold the coverage report into whichever result shape run_loop returned.
+  defp put_coverage({:ok, outcome, stats}, coverage),
+    do: {:ok, outcome, Map.put(stats, :coverage, coverage)}
+
+  defp put_coverage({:error, :violation, name, details, stats}, coverage),
+    do: {:error, :violation, name, details, Map.put(stats, :coverage, coverage)}
+
+  defp put_coverage(other, _coverage), do: other
 
   # -------------------------------------------------------------------
   # Simulation loop
@@ -108,22 +125,132 @@ defmodule Vor.Simulator do
 
     Process.sleep(config.duration_ms)
 
-    if injector, do: Task.shutdown(injector, :brutal_kill)
-    Task.shutdown(checker, 5000)
-    if workload_task, do: Task.shutdown(workload_task, :brutal_kill)
+    # Execution-integrity: capture whether each harness Task crashed (vs was
+    # shut down normally). A crashed fault injector / checker / workload means
+    # the run silently exercised less than it claimed (the "Seed 7" problem).
+    injector_status = task_status(injector, :brutal_kill)
+    checker_status = task_status(checker, 5000)
+    workload_status = task_status(workload_task, :brutal_kill)
 
     Agent.stop(pid_agent)
 
     events = Timeline.get(timeline)
     Agent.stop(timeline)
 
-    stats = events |> compute_stats() |> Map.put(:events, events)
+    integrity =
+      assess_integrity(config, events, [
+        {:fault_injector, injector_status},
+        {:invariant_checker, checker_status},
+        {:workload, workload_status}
+      ])
+
+    stats =
+      events
+      |> compute_stats()
+      |> Map.put(:events, events)
+      |> Map.put(:integrity, integrity)
+      |> Map.put(:relevance, assess_relevance(events, system_info[:invariants] || []))
 
     case find_violation(events) do
-      nil -> {:ok, :pass, stats}
+      # A found violation is a real bug even if the harness later degraded.
       {name, details} -> {:error, :violation, name, details, stats}
+      # A pass whose harness degraded is UNDER-TESTED, not a clean pass.
+      nil -> if integrity.degraded?, do: {:ok, :under_tested, stats}, else: {:ok, :pass, stats}
     end
   end
+
+  # A harness Task's fate. `nil`/`:killed`/`:shutdown`/`:normal` = shut down or
+  # still running (healthy); any other exit reason = it crashed.
+  defp task_status(nil, _shutdown), do: :not_started
+
+  defp task_status(task, shutdown) do
+    case Task.yield(task, 0) || Task.shutdown(task, shutdown) do
+      {:ok, _} -> :completed
+      nil -> :running
+      {:exit, reason} when reason in [:normal, :shutdown, :killed] -> :running
+      {:exit, reason} -> {:crashed, reason}
+    end
+  end
+
+  # Did the run actually exercise what it claimed? A degraded run must not read
+  # as a clean pass. Signals: a harness component crashed; no invariant check
+  # ran; or (with faults enabled) not a single fault was injected.
+  defp assess_integrity(config, events, task_statuses) do
+    faults_enabled = Map.get(config, :inject_faults, true)
+
+    injected =
+      Enum.count(events, fn {_, t, _} -> t in [:kill, :partition_start, :delay_start] end)
+
+    checks_run = Enum.count(events, fn {_, t, _} -> t in [:check_ok, :violation] end)
+
+    check_interval = Map.get(config, :check_interval_ms, 1000)
+    checks_planned = if check_interval > 0, do: div(config.duration_ms, check_interval), else: 0
+
+    crashes = for {name, {:crashed, reason}} <- task_statuses, do: {name, reason}
+
+    reasons =
+      []
+      |> maybe(crashes != [], "harness component(s) crashed: #{inspect(Enum.map(crashes, &elem(&1, 0)))}")
+      |> maybe(checks_run == 0, "no invariant checks ran")
+      |> maybe(faults_enabled and injected == 0, "fault injection was requested but no faults were injected")
+
+    %{
+      degraded?: reasons != [],
+      reasons: Enum.reverse(reasons),
+      faults_injected: injected,
+      invariant_checks: checks_run,
+      checks_planned: checks_planned,
+      harness_crashes: crashes
+    }
+  end
+
+  defp maybe(list, true, reason), do: [reason | list]
+  defp maybe(list, false, _reason), do: list
+
+  # Relevance axis (Phase 2b, task 2b.3): for each invariant, in how many of the
+  # live checks was its *subject* actually true? A pass over samples where the
+  # subject never appears is vacuous — the same notion the model checker applies
+  # to explored states, here applied to observed live state. Each `:check_ok` /
+  # `:violation` event carries a `subject_active` map recorded by the checker.
+  defp assess_relevance(events, invariants) do
+    samples =
+      for {_, t, d} <- events,
+          t in [:check_ok, :violation],
+          is_map(d),
+          Map.has_key?(d, :subject_active),
+          do: d.subject_active
+
+    total = length(samples)
+
+    Enum.map(invariants, fn inv ->
+      live = Enum.count(samples, fn sa -> Map.get(sa, inv.name, false) end)
+
+      relevance =
+        cond do
+          total == 0 -> :unexercised
+          live > 0 -> :substantive
+          true -> :vacuous
+        end
+
+      %{
+        name: inv.name,
+        relevance: relevance,
+        subject_live_checks: live,
+        total_checks: total,
+        subject: describe_invariant_subject(inv)
+      }
+    end)
+  end
+
+  defp describe_invariant_subject(%{body: body}) do
+    try do
+      Vacuity.describe_subject(body)
+    rescue
+      _ -> "(subject)"
+    end
+  end
+
+  defp describe_invariant_subject(_), do: "(subject)"
 
   # Seed a Task's own `:rand` state deterministically from the run seed, with a
   # per-Task offset so the fault and workload streams are independent.
@@ -153,6 +280,12 @@ defmodule Vor.Simulator do
 
         :delay ->
           inject_delay(pid_agent, config, timeline)
+      end
+
+      # Test-only hook: crash the fault loop after injecting one fault, to
+      # exercise the execution-integrity / UNDER-TESTED path (the Seed-7 case).
+      if Map.get(config, :__crash_fault_loop__, false) do
+        raise "vor test: forced fault-loop crash"
       end
 
       fault_loop(pid_agent, system_info, config, timeline, sup_pid, deadline)
@@ -258,15 +391,16 @@ defmodule Vor.Simulator do
       result = InvariantChecker.check(real_pids, system_info.agent_info, system_info.invariants)
 
       case result do
-        :ok ->
-          Timeline.record(timeline, :check_ok)
+        {:ok, subject_active} ->
+          Timeline.record(timeline, :check_ok, %{subject_active: subject_active})
 
-        {:violation, name, agent_states} ->
+        {:violation, name, agent_states, subject_active} ->
           recent = Timeline.recent(timeline, 10)
 
           Timeline.record(timeline, :violation, %{
             name: name,
             agent_states: agent_states,
+            subject_active: subject_active,
             recent_events: recent
           })
       end
@@ -496,6 +630,7 @@ defmodule Vor.Simulator do
            agent_names: Enum.map(agents, & &1.name),
            agent_info: agent_info,
            accepts_by_name: accepts_by_name,
+           declared_surface: declared_surface(result),
            connections: result.system_ir.connections,
            invariants: result.system_ir.invariants,
            chaos: result.system_ir.chaos,
@@ -505,6 +640,67 @@ defmodule Vor.Simulator do
       {:error, _} = err ->
         err
     end
+  end
+
+  @doc """
+  The per-instance declared surface stored in a compiled `system_info` (enum
+  state values, handler tags, accepted/emitted message tags). Used by sweep
+  aggregation to compute union coverage against a stable declaration.
+  """
+  def declared_surface_for(system_info), do: system_info[:declared_surface] || %{}
+
+  # Per-instance declared surface for coverage (Phase 2b, task 2b.2): enum state
+  # values, handler tags, accepted and emitted message tags. Keyed by instance
+  # name to match the `agent` field telemetry carries (`__vor_agent_name__`).
+  defp declared_surface(result) do
+    Enum.into(result.system_ir.agents, %{}, fn instance ->
+      surface =
+        case Map.get(result.agents, instance.type_name) do
+          %{ir: ir} ->
+            %{
+              states: declared_states(ir.state_fields),
+              handlers: declared_handler_tags(ir.handlers),
+              accepts: declared_msg_tags(ir.protocol, :accepts),
+              emits: declared_msg_tags(ir.protocol, :emits)
+            }
+
+          _ ->
+            %{states: %{}, handlers: [], accepts: [], emits: []}
+        end
+
+      {instance.name, surface}
+    end)
+  end
+
+  # Only enum state fields (a union of atom values) contribute reachable states.
+  defp declared_states(nil), do: %{}
+
+  defp declared_states(state_fields) do
+    Enum.reduce(state_fields || [], %{}, fn
+      %{name: name, values: values}, acc when is_list(values) and length(values) > 1 ->
+        if Enum.all?(values, &is_atom/1), do: Map.put(acc, name, values), else: acc
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  defp declared_handler_tags(nil), do: []
+
+  defp declared_handler_tags(handlers) do
+    handlers
+    |> Enum.map(fn h -> h.pattern && h.pattern.tag end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp declared_msg_tags(nil, _key), do: []
+
+  defp declared_msg_tags(protocol, key) do
+    (Map.get(protocol, key) || [])
+    |> Enum.map(& &1.tag)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
   end
 
   defp agent_type_for(system_ir, instance_name) do

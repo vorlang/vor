@@ -34,12 +34,24 @@ defmodule Vor.Simulator.InvariantChecker do
       last_action: :live_check
     }
 
-    Enum.find_value(invariants, :ok, fn inv ->
-      case Invariant.check(ps, inv) do
-        :ok -> nil
-        {:violation, name} -> {:violation, name, agent_states}
-      end
-    end)
+    # Relevance axis (Phase 2b): was each invariant's *subject* actually true in
+    # this live sample? A pass over samples where the subject never appears is
+    # vacuous — same notion as the model checker (`Invariant.subject_active?/2`).
+    subject_active =
+      Enum.into(invariants, %{}, fn inv -> {inv.name, Invariant.subject_active?(ps, inv.body)} end)
+
+    violation =
+      Enum.find_value(invariants, fn inv ->
+        case Invariant.check(ps, inv) do
+          :ok -> nil
+          {:violation, name} -> {:violation, name, agent_states}
+        end
+      end)
+
+    case violation do
+      nil -> {:ok, subject_active}
+      {:violation, name, states} -> {:violation, name, states, subject_active}
+    end
   end
 
   @doc """

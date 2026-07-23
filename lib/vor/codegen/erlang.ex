@@ -1716,7 +1716,14 @@ defmodule Vor.Codegen.Erlang do
       {:clause, l, [{:var, l, :VorSendReg}], [], [registry_send]}
     ]}
 
-    [safe_send]
+    # Directed sends are emissions too: surface them on the same telemetry stream
+    # as `emit`/`reply` so declared-vs-observed coverage (Phase 2b) can see them.
+    tel = Tel.call([:vor, :message, :emitted], [
+      {:agent, Tel.agent_name_expr(map_var, l)},
+      {:message_tag, {:atom, l, tag}}
+    ], l)
+
+    tel ++ [safe_send]
   end
 
   defp action_to_erl(%IR.Action{type: :broadcast, data: %IR.BroadcastAction{tag: tag, fields: fields}}, l, map_var) do
@@ -1773,7 +1780,14 @@ defmodule Vor.Codegen.Erlang do
       {:clause, l, [{:var, l, :VorBroadcastConns}], [], [foreach_call]}
     ]}
 
-    [safe_broadcast]
+    # A broadcast is an emission of `tag` (once, to all peers). Surface it on the
+    # emitted telemetry stream so Phase 2b coverage can observe it.
+    tel = Tel.call([:vor, :message, :emitted], [
+      {:agent, Tel.agent_name_expr(map_var, l)},
+      {:message_tag, {:atom, l, tag}}
+    ], l)
+
+    tel ++ [safe_broadcast]
   end
 
   defp action_to_erl(_action, _l, _map_var), do: []

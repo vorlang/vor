@@ -203,6 +203,7 @@ defmodule Vor.Features.SimulationTest do
       duration_ms: 3000,
       seed: 999,
       kill_interval: {500, 1000},
+      fault_interval: {500, 1000},
       check_interval_ms: 300,
       verbose: false,
       inject_faults: true
@@ -691,9 +692,12 @@ defmodule Vor.Features.SimulationTest do
     """
 
     path = write_temp_vor(source)
-    # Override duration via config map
+    # Override duration via config map. A 2s run at the default fault interval may
+    # inject no faults (correctly reported as under-tested); this test only cares
+    # that the config override took effect and no violation was found.
     result = Vor.Simulator.run_file(path, %{duration_ms: 2000, seed: 99})
-    assert {:ok, :pass, _} = result
+    assert {:ok, outcome, _} = result
+    assert outcome in [:pass, :under_tested]
   end
 
   test "system without chaos block uses defaults when simulated" do
@@ -724,7 +728,10 @@ defmodule Vor.Features.SimulationTest do
 
     path = write_temp_vor(source)
     result = Vor.Simulator.run_file(path, %{duration_ms: 2000, seed: 42})
-    assert {:ok, :pass, _} = result
+    # Short default run may inject no faults → under-tested; either non-violating
+    # outcome shows the chaos defaults were applied and the system ran.
+    assert {:ok, outcome, _} = result
+    assert outcome in [:pass, :under_tested]
   end
 
   test "simulation with partition injection (informative)" do

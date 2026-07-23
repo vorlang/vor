@@ -123,6 +123,8 @@ on `Successor.successors/4` (returns `{successors, fired_handler_ids}`).
 - `lib/vor/simulator/invariant_checker.ex` — queries live state, evaluates invariants
 - `lib/vor/simulator/timeline.ex` — timestamped event log
 - `lib/vor/simulator/workload.ex` — protocol-driven message generation
+- `lib/vor/simulator/coverage.ex` — declared-vs-observed coverage from the live telemetry stream (Phase 2b)
+- `lib/vor/simulator/sweep.ex` — multi-seed aggregation: outcome counts, union coverage, union relevance (Phase 2b)
 - `lib/mix/tasks/vor.simulate.ex` — mix task with CLI flags
 
 ### Mix tasks
@@ -269,13 +271,27 @@ mix vor.simulate --duration 120000
 mix vor.simulate --partition --delay --workload 20
 ```
 
+### Coverage & relevance (Phase 2b)
+
+A simulation pass carries evidence of what it actually exercised — the simulation-tier analogue of the model checker's Phase 1 vacuity detection. Three axes:
+
+- **Execution integrity → `UNDER-TESTED`.** A pass whose harness degraded is not a clean pass. `Vor.Simulator` assesses each run — did a harness component (fault injector, invariant checker, workload) crash, did any invariant check run, were requested faults actually injected — and returns `{:ok, :under_tested, stats}` (⚠ UNDER-TESTED) with the reasons, distinct from `{:ok, :pass, stats}`. This closes the "Seed 7" hole (a pass whose fault injection had silently died early). `stats.integrity` carries `degraded?`, `reasons`, `faults_injected`, `invariant_checks`, `harness_crashes`.
+- **Declared-vs-observed coverage** (`Vor.Simulator.Coverage`). Consumes the compiler's existing telemetry (`[:vor, :transition]`, `[:vor, :message, :received]`, `[:vor, :message, :emitted]`) to compare declared enum state values / handlers / `accepts` / `emits` against what the run reached. `stats.coverage` has per-instance `states`/`handlers`/`accepts`/`emits` (`{declared, reached, missing}`) and `{reached, declared}` totals. No new per-run instrumentation — the declared surface is extracted at compile time into `system_info.declared_surface`.
+- **Invariant relevance** (`stats.relevance`). Each live check records whether the invariant's subject was true (`InvariantChecker` returns `subject_active`, reusing `Invariant.subject_active?/2`); an invariant whose subject is never observed is reported `vacuous`, else `substantive` (`unexercised` if no check ran).
+
+**Sweeps** (`Vor.Simulator.Sweep.run/3`) run N seeds and aggregate outcome counts, **union** coverage (reached by ≥1 seed — never-reached-by-any is the strong "the config can't exercise this" signal), and union relevance.
+
+Note: `send`/`broadcast` emit `[:vor, :message, :emitted]` telemetry (added in Phase 2b), but a gen_statem reply surfaces a generic `ok` rather than the declared reply tag, so the `emits` axis under-reports for reply-heavy protocols. See `evidence/phase2b-simulation-coverage.md`.
+
 ### Modules
 
-- `lib/vor/simulator.ex` — orchestrator, config merging
+- `lib/vor/simulator.ex` — orchestrator, config merging, integrity + relevance assessment
 - `lib/vor/simulator/message_proxy.ex` — GenServer proxy with fault policies
 - `lib/vor/simulator/supervisor_builder.ex` — proxy-aware supervisor tree
 - `lib/vor/simulator/workload.ex` — protocol-driven message generation
-- `lib/vor/simulator/invariant_checker.ex` — live state querying via `:sys.get_state`
+- `lib/vor/simulator/invariant_checker.ex` — live state querying via `:sys.get_state`, subject-activity
+- `lib/vor/simulator/coverage.ex` — declared-vs-observed coverage from telemetry
+- `lib/vor/simulator/sweep.ex` — multi-seed union aggregation
 - `lib/vor/simulator/timeline.ex` — Agent-backed event log
 - `lib/mix/tasks/vor.simulate.ex` — mix task
 
