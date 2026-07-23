@@ -44,8 +44,8 @@ Four constructs in six lines:
 Try it:
 
 ```elixir
-iex> {:ok, mod} = Vor.Compiler.compile(File.read!("tutorial/step1.vor"))
-iex> {:ok, pid} = GenServer.start_link(mod, [])
+iex> {:ok, result} = Vor.compile_and_load(File.read!("tutorial/step1.vor"))
+iex> {:ok, pid} = GenServer.start_link(result.module, [])
 iex> GenServer.call(pid, {:ping, %{payload: "hello"}})
 {:pong, %{payload: "hello"}}
 ```
@@ -92,12 +92,12 @@ New constructs:
 Try it:
 
 ```elixir
-iex> {:ok, mod} = Vor.Compiler.compile(File.read!("tutorial/step2.vor"))
-iex> {:ok, pid} = GenServer.start_link(mod, [])
-iex> GenServer.cast(pid, {:increment})
-iex> GenServer.cast(pid, {:increment})
-iex> GenServer.cast(pid, {:increment})
-iex> GenServer.call(pid, {:get})
+iex> {:ok, result} = Vor.compile_and_load(File.read!("tutorial/step2.vor"))
+iex> {:ok, pid} = GenServer.start_link(result.module, [])
+iex> GenServer.cast(pid, {:increment, %{}})
+iex> GenServer.cast(pid, {:increment, %{}})
+iex> GenServer.cast(pid, {:increment, %{}})
+iex> GenServer.call(pid, {:get, %{}})
 {:count, %{value: 3}}
 ```
 
@@ -148,23 +148,23 @@ New constructs:
 Try it:
 
 ```elixir
-iex> {:ok, mod} = Vor.Compiler.compile(File.read!("tutorial/step3.vor"))
-iex> {:ok, pid} = GenServer.start_link(mod, [max: 3])
-iex> GenServer.call(pid, {:increment})
+iex> {:ok, result} = Vor.compile_and_load(File.read!("tutorial/step3.vor"))
+iex> {:ok, pid} = GenServer.start_link(result.module, [max: 3])
+iex> GenServer.call(pid, {:increment, %{}})
 {:ok, %{remaining: 2}}
-iex> GenServer.call(pid, {:increment})
+iex> GenServer.call(pid, {:increment, %{}})
 {:ok, %{remaining: 1}}
-iex> GenServer.call(pid, {:increment})
+iex> GenServer.call(pid, {:increment, %{}})
 {:ok, %{remaining: 0}}
-iex> GenServer.call(pid, {:increment})
-{:full}
+iex> GenServer.call(pid, {:increment, %{}})
+{:full, %{}}
 ```
 
 Start another instance with a different limit:
 
 ```elixir
-iex> {:ok, pid2} = GenServer.start_link(mod, [max: 100])
-iex> GenServer.call(pid2, {:increment})
+iex> {:ok, pid2} = GenServer.start_link(result.module, [max: 100])
+iex> GenServer.call(pid2, {:increment, %{}})
 {:ok, %{remaining: 99}}
 ```
 
@@ -224,8 +224,8 @@ New constructs:
 Try it:
 
 ```elixir
-iex> {:ok, mod} = Vor.Compiler.compile(File.read!("tutorial/step4.vor"))
-iex> {:ok, pid} = GenServer.start_link(mod, [default_max: 10])
+iex> {:ok, result} = Vor.compile_and_load(File.read!("tutorial/step4.vor"))
+iex> {:ok, pid} = GenServer.start_link(result.module, [default_max: 10])
 iex> GenServer.call(pid, {:get_limit, %{client: :pro}})
 {:limit, %{max: 100}}
 iex> GenServer.call(pid, {:get_limit, %{client: :enterprise}})
@@ -262,7 +262,7 @@ This is where Vor diverges from every other BEAM language. An **invariant** is a
 
 To demonstrate invariants, we need a **state machine** — an agent with named states and transitions between them. When an agent declares an enum state field, it compiles to a gen_statem instead of a gen_server.
 
-Create `tutorial/step5.vor`:
+Create `tutorial/step5_broken.vor`:
 
 ```vor
 agent Gate do
@@ -305,8 +305,8 @@ Wait — that invariant will fail. The `{:open_gate}` handler emits `{:ok}` when
 Actually, this is a good teaching moment. Let's see what happens:
 
 ```elixir
-iex> Vor.Compiler.compile(File.read!("tutorial/step5.vor"))
-{:error, %{type: :invariant_violation, ...}}
+iex> Vor.compile(File.read!("tutorial/step5_broken.vor"))
+{:error, %{type: :invariant_violation, violations: [...]}}
 ```
 
 The compiler catches it. The safety invariant says `never(phase == :closed and emitted({:ok, _}))` but the `{:open_gate}` handler emits `{:ok}` while in the `:closed` state. The compiler walked the state graph, found the violating path, and rejected the program.
@@ -354,14 +354,14 @@ end
 Now it compiles:
 
 ```elixir
-iex> {:ok, mod} = Vor.Compiler.compile(File.read!("tutorial/step5_fixed.vor"))
-iex> {:ok, pid} = :gen_statem.start_link(mod, [], [])
-iex> :gen_statem.call(pid, {:enter})
-{:denied}
-iex> :gen_statem.call(pid, {:open_gate})
-{:opened}
-iex> :gen_statem.call(pid, {:enter})
-{:allowed}
+iex> {:ok, result} = Vor.compile_and_load(File.read!("tutorial/step5_fixed.vor"))
+iex> {:ok, pid} = :gen_statem.start_link(result.module, [], [])
+iex> :gen_statem.call(pid, {:enter, %{}})
+{:denied, %{}}
+iex> :gen_statem.call(pid, {:open_gate, %{}})
+{:opened, %{}}
+iex> :gen_statem.call(pid, {:enter, %{}})
+{:allowed, %{}}
 ```
 
 New constructs:
@@ -449,14 +449,14 @@ New constructs:
 Try it:
 
 ```elixir
-iex> {:ok, mod} = Vor.Compiler.compile(File.read!("tutorial/step6.vor"))
-iex> {:ok, pid} = :gen_statem.start_link(mod, [auto_close_ms: 500], [])
-iex> :gen_statem.call(pid, {:open_gate})
-{:opened}
+iex> {:ok, result} = Vor.compile_and_load(File.read!("tutorial/step6.vor"))
+iex> {:ok, pid} = :gen_statem.start_link(result.module, [auto_close_ms: 500], [])
+iex> :gen_statem.call(pid, {:open_gate, %{}})
+{:opened, %{}}
 iex> # Wait for auto-close...
 iex> Process.sleep(700)
-iex> :gen_statem.call(pid, {:enter})
-{:denied}
+iex> :gen_statem.call(pid, {:enter, %{}})
+{:denied, %{}}
 ```
 
 The gate opened, nobody closed it within 500ms, so the liveness monitor fired the resilience handler and closed it automatically. No stuck-open gates. No process consuming memory forever in a state it was never supposed to stay in.
@@ -532,8 +532,8 @@ Try it:
 
 ```elixir
 iex> Vor.Examples.TutorialHelpers.reset()
-iex> {:ok, mod} = Vor.Compiler.compile(File.read!("tutorial/step7.vor"))
-iex> {:ok, pid} = GenServer.start_link(mod, [max_requests: 3, window_ms: 60_000])
+iex> {:ok, result} = Vor.compile_and_load(File.read!("tutorial/step7.vor"))
+iex> {:ok, pid} = GenServer.start_link(result.module, [max_requests: 3, window_ms: 60_000])
 iex> GenServer.call(pid, {:request, %{client: "alice"}})
 {:ok, %{remaining: 2}}
 iex> GenServer.call(pid, {:request, %{client: "alice"}})
@@ -541,7 +541,7 @@ iex> GenServer.call(pid, {:request, %{client: "alice"}})
 iex> GenServer.call(pid, {:request, %{client: "alice"}})
 {:ok, %{remaining: 0}}
 iex> GenServer.call(pid, {:request, %{client: "alice"}})
-{:rejected}
+{:rejected, %{}}
 iex> GenServer.call(pid, {:request, %{client: "bob"}})
 {:ok, %{remaining: 2}}
 ```
@@ -605,16 +605,17 @@ New constructs:
 Try it:
 
 ```elixir
-iex> {:ok, modules} = Vor.Compiler.compile_system(File.read!("tutorial/step8.vor"))
-iex> {:ok, sup_pid} = modules.system.start_link()
-iex> [{producer_pid, _}] = Registry.lookup(Pipeline.Registry, :producer)
+iex> {:ok, result} = Vor.Compiler.compile_system_and_load(File.read!("tutorial/step8.vor"))
+iex> {:ok, sup_pid} = result.system.start_link.()
+iex> registry = result.system.registry
+iex> [{producer_pid, _}] = Registry.lookup(registry, :producer)
 iex> GenServer.call(producer_pid, {:produce, %{item: 10}})
-{:sent}
+{:sent, %{}}
 iex> GenServer.call(producer_pid, {:produce, %{item: 20}})
-{:sent}
+{:sent, %{}}
 iex> Process.sleep(50)  # wait for async messages
-iex> [{consumer_pid, _}] = Registry.lookup(Pipeline.Registry, :consumer)
-iex> GenServer.call(consumer_pid, {:get_total})
+iex> [{consumer_pid, _}] = Registry.lookup(registry, :consumer)
+iex> GenServer.call(consumer_pid, {:get_total, %{}})
 {:total, %{value: 30}}
 iex> Supervisor.stop(sup_pid)
 ```

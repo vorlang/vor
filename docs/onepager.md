@@ -1,128 +1,118 @@
 # Vor
 
-**A BEAM-native language with relations, protocols, and verifiable invariants**
+**A compilation target for AI agents building distributed systems on the BEAM — verified state machines, checked protocols, chaos testing**
 
-*Relations for knowledge, handlers for effects  ·  The spec is the program*
+*One file. Proven, instrumented, chaos-tested. No Docker. No Kubernetes.*
 
 ---
 
 ## What is Vor?
 
-Vor is a programming language that compiles to Erlang/OTP on the BEAM — the same compilation model as Elixir. At runtime, a Vor agent is indistinguishable from a hand-written gen_server or gen_statem. Erlang, Elixir, Gleam, and Vor coexist seamlessly in one VM.
+Vor is a programming language that compiles to Erlang/OTP on the BEAM. At runtime, a Vor agent is a standard gen_server or gen_statem. At compile time, the compiler proves safety invariants, checks protocol compatibility, generates telemetry, and produces chaos-testable binaries — all from a single source file.
 
-What Vor adds is a verification layer that OTP doesn't provide. You declare state machines with enumerated states, message protocols with typed interfaces, and invariants as temporal logic properties. The compiler verifies these declarations at compile time. For multi-agent systems, `mix vor.check` model-checks system-level invariants by exploring all reachable combined states through all possible message interleavings — with state abstraction, integer bounding, and symmetry reduction to keep exploration tractable. Named for the Norse goddess who witnesses oaths, Vor programs are binding declarations that the compiler enforces.
+Designed for AI-speed development: AI agents write the `.vor` file, the compiler checks it, the chaos simulator stress-tests it, and the binary ships pre-instrumented. No human writes invariants separately. No human adds telemetry. No human configures chaos tests. The declarations in the source file drive everything.
 
-## Core Primitives
+## Three tiers of checking
 
-**State Declarations** — Explicit enumeration of valid states. When present, the agent compiles to a gen_statem. The compiler has the complete state graph and can verify transitions against safety invariants. Non-enum state fields (integers, atoms, maps, lists) are stored in the gen_statem data map or the gen_server state map, with type-appropriate defaults.
+```
+mix compile        →  single-agent safety proofs          (ms)
+mix vor.check      →  finds multi-agent counterexamples    (seconds)
+mix vor.simulate   →  chaos-tests real BEAM processes      (minutes)
+```
 
-**Protocols** — Typed message interfaces for agents. `accepts` declares what an agent receives. `emits` declares synchronous replies. `sends` declares messages forwarded to other agents. Protocol composition is checked at compile time when agents are wired together in a system block — tag mismatches and field name mismatches are compile errors.
+**Compile-time safety.** The compiler walks every reachable state of a single agent and proves that declared safety invariants hold. Violations fail compilation. A `proven` invariant whose subject is unreachable is a compile error, not a silent pass — the checker reports when it engaged with nothing.
 
-**Invariants** — Temporal properties in the tradition of TLA+. Safety invariants ("this must never happen") are tagged `proven` and verified at compile time by exhaustive graph traversal. Liveness invariants ("this must eventually happen") are tagged `monitored` and enforced at runtime via gen_statem state timeouts. The compiler rejects `proven` invariants it cannot verify — it fails closed, never silently accepting unverifiable properties. Proven invariants cannot depend on extern results.
+**Multi-agent bug-finding.** `mix vor.check` explores message interleavings across connected agents to surface counterexamples, using cone-of-influence abstraction and integer saturation. It is a bug-finder first — finding a violation is fast; exhaustive proof holds only at small bounds (the state space explodes with message-queue depth) — and it never runs during `mix compile`. It caught that Raft's *global* "at most one leader" was mis-specified (two leaders in different terms is legal Raft); the corrected **per-term** invariant is proven and substantive.
 
-**Multi-Agent Model Checking** — System-level safety invariants are verified by product state exploration via `mix vor.check`. The explorer constructs all reachable combined states, systematically delivers messages in every possible order, and checks invariants at every reachable state. State abstraction tracks only invariant-relevant fields. Integer saturation bounds unbounded fields. Symmetry reduction exploits agent interchangeability (6× reduction for three identical Raft nodes). Counterexample traces show the exact message interleaving that causes a violation. The Raft "at most one leader" invariant is proven exhaustively in 1,001 states.
+**Chaos simulation.** `mix vor.simulate` starts real BEAM processes, kills them, partitions connections, delays messages, generates client workload, and checks invariants against live state — reporting declared-vs-observed coverage and flagging a run `UNDER-TESTED` if the harness degraded. Inputs (fault schedule, workload) are seeded; the BEAM scheduler and real timers are not, so replay is reliable but not byte-for-byte. No external infrastructure.
 
-**System-Level Invariant Language** — Count-based (`count(agents where role == :leader) > 1`), existential (`exists A, B where A.phase == :held and B.phase == :held`), universal (`for_all agents, mode == :idle or mode == :active`), cross-agent comparison (`A.current_term != B.current_term`), and named agent references (`n1.role == :leader`).
+## Auto-generated telemetry
 
-**Resilience** — Declarative failure handling. What happens when a liveness invariant is violated, when a process is stuck, when recovery is needed. Resilience handlers are generated as regular handler clauses and included in the state graph — the safety verifier checks them too, ensuring the recovery path doesn't introduce new bugs.
+The compiler knows every state field, every message type, every transition, and every handler. It generates `:telemetry.execute` calls in the compiled bytecode for:
 
-**Relations** — Bidirectional mappings for knowledge and data transformation. Define a relation once; query it in any direction. Fact-based relations support multi-directional lookup. Equation-based relations are automatically inverted at compile time — define `F = C * 9/5 + 32`, query with either variable. The solver handles the directionality.
+- Agent start/stop
+- Every message received (with tag and current state)
+- Every state transition (with old/new values, sensitive fields redacted)
+- Every message emitted
+- Every protocol constraint violation
 
-**Multi-Agent Systems** — Agents are wired together in `system` blocks with named instances, parameters, and connection topology. The compiler generates an OTP Supervisor and Registry. `send` delivers messages to specific named agents. `broadcast` delivers to all connected agents. Agents discover each other via the Registry and automatically re-register on restart.
+Zero instrumentation code. Attach any telemetry backend (Prometheus, StatsD) and every agent is observable.
 
-**Init Handlers** — `on :init` runs once during agent startup, before accepting messages. Supports extern calls for loading persisted state, parameter-based initialization, and setup logic.
+## Protocol input constraints
 
-**Extern Declarations** — Escape hatches to Erlang, Elixir, and Gleam for anything Vor doesn't handle natively. Extern calls are untrusted by default — wrapped in try/catch. A `proven` invariant whose verification path depends on an extern result is rejected at compile time, consistent with fail-closed philosophy.
+```vor
+protocol do
+  accepts {:transfer, amount: integer} where amount > 0 and amount < 100000
+end
+```
 
-**Gleam Extern Support** — First-class interop with Gleam modules via `extern gleam` blocks. Gleam's slash-separated module paths compile directly to BEAM module calls. When Gleam's `package-interface.json` is available, the Vor compiler validates extern declarations against Gleam's actual type signatures at compile time.
+Constraints are checked at runtime before any handler runs. Invalid messages are rejected with a structured error and a telemetry event. No separate validation library.
 
-## Type Safety Strategy
+## Sensitive fields
 
-**Coordination verification (today).** The compiler proves state machine properties, checks protocol compatibility, verifies handler coverage, and model-checks multi-agent system invariants.
+```vor
+state api_key: binary sensitive
+```
 
-**Gleam boundary validation (today).** Extern declarations are validated against Gleam's type metadata.
+Fields marked `sensitive` are automatically redacted in telemetry metadata. The field name still appears (you know a transition happened), the value doesn't.
 
-**Internal type tracking (today).** The compiler propagates types through handler body expressions. Guaranteed crashes (map operations on integers, arithmetic on maps) are caught at compile time. Gleam extern return types flow through the handler body.
+## Core primitives
 
-**Long-term direction.** E-graph-based equality saturation for verifying CRDT merge properties. Multi-agent liveness checking in the product graph.
+**Agents** — state machines with enumerated states, parameterized configuration, and init handlers. Compile to gen_statem (with enum states) or gen_server (without).
 
-## What's Working
+**Protocols** — typed message interfaces: `accepts`, `emits`, `sends`. Composition checked at compile time across connected agents. Input constraints via `where` clauses.
 
-The compiler is real and tested:
+**Invariants** — temporal properties with explicit guarantee tiers. `proven` = verified at compile time. `monitored` = enforced at runtime with declared resilience handlers. The compiler fails closed — never silently accepts unverifiable properties.
 
-- Full pipeline: `.vor` source → Lexer → Parser → AST → IR → Verification → Erlang codegen → BEAM binary
-- Compile-time safety verification via state graph traversal
-- Multi-agent model checking via product state exploration with state abstraction, integer bounding, queue bounding, and symmetry reduction
-- Raft "at most one leader" proven exhaustively (1,001 states with symmetry, 8,008 without)
-- System-level invariants: count, exists, for_all, cross-agent comparison, named agent references
-- Runtime liveness monitoring via gen_statem state timeouts
-- Internal type tracking through handler body expressions
-- Bidirectional relation solver with compile-time equation inversion
-- Protocol composition checking across multi-agent systems
-- Registry-based inter-agent messaging with `send` and `broadcast`
-- Gleam extern support with compile-time type boundary validation
-- Extern proven boundary enforcement (compile error, not warning)
-- Init handlers for persistent agent startup
-- Native map operations (get, put, merge, has, delete, size, sum) with LWW and max merge strategies
-- Native list operations (head, tail, append, prepend, length, empty)
-- TLA+ specifications verifying the safety verifier and graph extraction algorithms
-- 349+ tests, 9 property-based test suites
-- Five working examples with verified invariants and multi-agent coordination
-- CRDT examples verified native: G-Counter, PN-Counter, version-based OR-Set — zero extern calls
-- Compilation under 5ms for any agent, verification under 2ms for any graph
+**System blocks** — multi-agent topologies with named instances and connections. System-level invariants: `count`, `exists`, `for_all`, cross-agent comparisons.
 
-## Examples
+**Relations** — bidirectional mappings with compile-time equation inversion.
 
-**Distributed lock** — gen_statem with FIFO wait queue. Proven safety invariant: "never grant the lock while it's held." Liveness timeout with automatic release via resilience handler. Verification is total: every property is proven, no extern dependencies in the verification path.
+**Externs** — escape hatches to Gleam (type-validated), Elixir, or Erlang. Proven invariants cannot depend on extern results.
 
-**Circuit breaker** — gen_statem with three states (closed/open/half_open). Proven safety invariant: "no forwarding when open." Liveness monitoring for recovery timeout.
+## What Vor eliminates
 
-**G-Counter CRDT** — fully native (zero externs), periodic gossip via `every`, cluster convergence verified. Demonstrates CRDT merge with `map_merge(:max)`.
+Compared to a typical distributed systems stack:
 
-**Rate limiter** — gen_server with extern calls to ETS, parameterized limits, per-client tracking. Demonstrates the Vor-Elixir boundary.
+- No separate design specification (the spec is the program)
+- No separate, drift-prone design spec — the checker runs on the real code (a bug-finder, not a TLA+ replacement)
+- No external chaos testing infrastructure
+- No external contract tests (protocol checked at compile time)
+- No Docker containers
+- No Kubernetes orchestration
+- No service mesh
+- No inter-service load balancers
+- No external message queue
+- No serialization between services
+- No telemetry instrumentation code
+- No external input validation framework
+- No manual concurrency primitives
+- No Helm charts
 
-**Raft consensus** — three-node cluster with leader election, conditional vote granting, and leader promotion on majority. System-level invariant "at most one leader" proven exhaustively via `mix vor.check` — 1,001 states with symmetry reduction, all message interleavings checked.
+What you still need: infrastructure provisioning, reverse proxy for external HTTP, telemetry backend, CI/CD, load testing, secrets management.
 
-## Boundaries
+## Two-language stack
 
-**What Vor verifies:** single-agent state machine properties (proven at compile time), multi-agent system properties (via product state exploration), handler coverage, protocol composition, liveness with declared recovery, type correctness through handler bodies.
+- **Vor** — coordination: state machines, protocols, invariants, bug-finding, chaos, telemetry
+- **Gleam** — data processing when needed, called through type-validated extern boundary
 
-**What Vor monitors:** liveness invariants at runtime, with automatic recovery. Violations are observable events.
+All five examples are fully native Vor. Gleam provides typed library functions for complex data operations when the native expression language isn't sufficient.
 
-**What Vor delegates:** complex data transformation, database access, HTTP, string processing. These fall to Gleam (type-safe, validated at the boundary) or Elixir/Erlang (via extern declarations).
+## What's working
 
-## When Things Break
-
-**Safety invariant violated at compile time:** compilation fails with a clear error.
-
-**System-level invariant violation found by model checker:** `mix vor.check` reports the exact counterexample trace.
-
-**Proven invariant depends on extern:** compilation fails.
-
-**Type error in handler body:** guaranteed crashes caught at compile time.
-
-**Liveness invariant violated at runtime:** resilience handler fires.
-
-**Protocol mismatch:** compilation fails.
-
-## Intellectual Heritage
-
-**Erlang/OTP** (processes, fault tolerance — runtime foundation) · **TLA+** (temporal logic, safety/liveness — verification foundation, also verifies Vor's own verifier) · **Stateright** (embedded model checking on executable code — inspiration for multi-agent verification) · **Prolog & miniKanren** (relational programming) · **Alloy** (first-order relational logic).
-
-## Design Principles
-
-**The spec is the program.** No separate implementation artifact. No drift.
-
-**Guarantee tiers are explicit.** Every property is labeled proven or monitored. The compiler fails closed.
-
-**The extern boundary is a trust boundary.** Proven invariants cannot depend on extern results. Gleam externs are type-validated.
-
-**Failure is first-class.** Invariants can be violated. Resilience handlers define recovery. Recovery paths are verified.
-
-**The BEAM is the foundation.** Vor compiles to OTP and adds verification above it.
-
-**Clean language boundaries.** Vor for verified coordination. Gleam for type-safe data processing. Elixir for OTP infrastructure.
+- Full compiler pipeline to BEAM bytecode
+- Three tiers: compile-time proofs, multi-agent bug-finding, chaos simulation
+- Vacuity / relevance detection across the checker and the simulator — vacuous `proven` invariants are compile errors
+- Auto-generated telemetry for gen_server and gen_statem
+- Protocol input constraints with `where` clauses
+- Sensitive field redaction
+- Raft per-term leader uniqueness proven and substantive at bounded scale (the global variant was mis-specified — a documented war story)
+- Chaos simulation with kill, partition, delay, workload, and declared-vs-observed coverage
+- 500+ tests, 9 property-based test suites
+- All five examples fully native — zero externs
+- G-Counter CRDT fully native (zero externs); gossip fires under real timers, though map contents abstract to `:unknown`, so value-level convergence is not checkable
+- VorDB as first real consumer
 
 ---
 
-*vorlang.org  ·  Targets: BEAM/OTP  ·  License: MIT  ·  Status: Working compiler, 349+ tests, Raft proven in 1,001 states*
+*vorlang.org  ·  BEAM/OTP  ·  MIT License  ·  500+ tests*
