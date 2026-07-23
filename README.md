@@ -4,52 +4,44 @@ A programming language for the BEAM designed as a compilation target for AI codi
 
 [vorlang.org](https://vorlang.org)
 
-> ## ⚠️ Verification scope (important)
->
-> The multi-agent model checker (`mix vor.check`) is a **bug-finder** that can
-> *also* do **bounded exhaustive verification at small configurations** — it is
-> **not** compile-time verification of distributed systems, and `mix compile`
-> never runs it. Finding a counterexample is fast; exhaustive proof is tractable
-> only at small bounds (the state space explodes with message-queue size).
-> Partial-order reduction is sound but, on the honest Raft model, buys only ~1×
-> (always-enabled broadcasting timers block it), so the interleaving wall stands.
-> See **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** and the measurements in
-> **[evidence/](evidence/)**.
->
-> **What currently works (as described):**
-> - Single-agent verification (`mix compile` — completeness, local safety invariants)
-> - Protocol constraints / `where` clauses (compile-time protocol compatibility)
-> - Backpressure (`max_queue`)
-> - Compiler-generated telemetry
-> - Chaos simulation (`mix vor.simulate`)
-> - Multi-agent bug-finding + small-bounds bounded verification (`mix vor.check`,
->   `--deep`). It caught that Raft's *global* `"at most one leader"` was
->   **mis-specified** (two leaders in different terms is legal Raft); the
->   corrected **per-term** invariant is now **proven and substantive** — Vor's
->   first real multi-agent result.
->
-> **What does not (yet) hold:**
-> - Multi-agent **exhaustive** checking is intractable beyond small bounds
->   (interleaving explosion); not a `mix compile`-time operation.
-> - Symmetry reduction is **unsound** (not orbit-exact; can prune real states) — deprioritized.
-> - Map/collection contents abstract to `:unknown`, so value-level convergence
->   (e.g. G-Counter) is reachable but not checkable.
-
 ## Why
 
 AI agents are writing more and more code, and they'll inevitably build distributed systems. The code is being produced faster than humans can review it. We need compilers that catch what human review would miss.
 
 The BEAM gives you process isolation, supervision, message passing, and distribution — eliminating data races, buffer overflows, and manual thread management. What it doesn't give you is verification that your state machines are complete, your protocols are compatible, or your system recovers correctly from failures. Most distributed systems discover these bugs in production.
 
-Vor adds the verification layer. You declare state machines, message protocols, safety invariants, and input constraints in a single source file. The compiler proves what it can, the model checker explores message interleavings, and the chaos simulator stress-tests real processes under failure:
+Vor adds a checking layer. You declare state machines, message protocols, safety invariants, and input constraints in a single source file, and three tiers of checking all read that same declaration:
 
 ```
 mix compile        →  proves local safety properties           (milliseconds)
-mix vor.check      →  model-checks multi-agent invariants      (seconds)
+mix vor.check      →  finds multi-agent counterexamples        (seconds)
 mix vor.simulate   →  chaos-tests real BEAM processes          (minutes)
 ```
 
-An AI agent writes one file. Three commands verify it. The compiled binary is a standard OTP gen_server or gen_statem — pre-instrumented with telemetry, no separate spec, no instrumentation code.
+One file. Three tiers. The compiled binary is a standard OTP `gen_server` or `gen_statem` — pre-instrumented with telemetry, no separate spec, no instrumentation code.
+
+## The part that matters: Vor tells you when it checked nothing
+
+A checker that returns "✓ Proven" over a state space where the property's subject can't exist is *sound*, *honest about its bounds*, and **useless** — and most tools can't tell the difference. Vor can, because it knows what your program *declared* it should do and compares that against what was actually reached.
+
+Every invariant reports two axes:
+
+| Axis | Values | Meaning |
+|---|---|---|
+| **Strength** | `proven` / `bounded` / `monitored` | How strong is the evidence |
+| **Relevance** | `substantive` / `vacuous` / `unexercised` | Did the check engage with anything |
+
+```
+✓ Proven    "no grant when held"    substantive   (subject true in 2 of 4 states)
+⚠ Bounded   "at most one leader"    VACUOUS       (subject `role == :leader` never true)
+⚠ Monitored "breaker recovers"      UNEXERCISED   (`half_open` never reached)
+```
+
+A `proven`-tier invariant whose subject is unreachable is a **compile error**, not a warning — the same fail-closed principle as the extern boundary: *never claim to have verified a property you never exercised.*
+
+The simulator carries the same discipline. A run whose fault injection died partway through reports **`UNDER-TESTED`**, never a clean pass. Both tiers also report declared-vs-observed coverage: which declared states, handlers, and message types were actually reached.
+
+This is what a language buys that a library can't. Detecting that a check engaged with nothing requires a machine-readable declaration of what "something" would have been.
 
 ## Example
 
@@ -113,16 +105,16 @@ end
 
 What the compiler does with this:
 
-- The `safety` invariant is proven at compile time — the program is rejected if any reachable state violates it
+- The `safety` invariant is proven at compile time — the program is rejected if any reachable state violates it, **or if the invariant turns out to be vacuous**
 - The `where` constraint rejects messages with invalid priority before the handler runs
 - The `sensitive` annotation redacts `auth_token` in all telemetry events
 - The `liveness` invariant is monitored at runtime with automatic recovery; `liveness ... proven` is verified at compile time via reachability analysis
 - Every state transition and message generates telemetry automatically
-- The compiled binary is a standard OTP gen_statem
+- The compiled binary is a standard OTP `gen_statem`
 
-## Multi-agent model checking
+## Multi-agent checking
 
-Wire agents together in a system block and `mix vor.check` explores all message interleavings within configured bounds:
+Wire agents together in a system block and `mix vor.check` explores message interleavings within configured bounds:
 
 ```vor
 system RaftCluster do
@@ -137,139 +129,118 @@ system RaftCluster do
   connect :n3 -> :n1
   connect :n3 -> :n2
 
-  safety "at most one leader" proven do
-    never(count(agents where role == :leader) > 1)
+  safety "at most one leader per term" proven do
+    never(exists A, B where A.role == :leader and B.role == :leader
+                            and A.current_term == B.current_term)
   end
 end
 ```
 
-```
-$ mix vor.check
-Tracked fields:    current_term, role, vote_count
-Abstracted fields: commit_index, log, voted_for
-Integer bound:     3
-Max queue:         10
-Symmetry:          enabled (3 identical agents, 6× reduction)
-✓ Bounded-verified (1001 states, depth 10)     # only with --no-fire-timers
-```
+**`mix vor.check` is a bug-finder first.** Finding a counterexample is fast — often under a second. Exhaustive verification is available too, but only at small bounds: the state space explodes with message-queue depth, and neither symmetry reduction nor partial-order reduction changes that (see [evidence/](evidence/)). It never runs during `mix compile`.
 
-> ⚠️ **The result above is the old blind mode** (`--no-fire-timers`) and is
-> **vacuous**: without firing the election timeout no node ever becomes a leader,
-> so the "1001 states" contain only followers. **By default the checker now fires
-> timers**, election happens, and `mix vor.check examples/raft_cluster.vor`
-> reports that `"at most one leader"` is **violated** (two leaders in different
-> terms — the invariant is globally too strong for Raft). See
-> [KNOWN_ISSUES.md](KNOWN_ISSUES.md) §1 and
-> [evidence/phase3a-timer-measurement.md](evidence/phase3a-timer-measurement.md).
+### How the invariant above got that way
 
-The model checker uses cone-of-influence abstraction, integer saturation, and symmetry reduction. Same code that runs in production. The result is bounded-verified — exhaustive within configured bounds, not an unconditional proof.
+The original example declared `never(count(agents where role == :leader) > 1)`. It reported `✓ Proven (1001 states)` — and that result was **vacuous**: the explorer wasn't firing election timeouts, so no node ever became a leader. The property held over a state space in which its subject could not exist.
+
+Once timers fired, the checker found a counterexample in 0.16 s — and it turned out the *invariant itself* was wrong. Raft guarantees one leader **per term**; a stale leader from term 1 legitimately coexists with a term-2 leader until it steps down. The corrected per-term invariant is `proven` and `substantive`.
+
+Two errors — an empty model and a mis-specified property — and the first hid the second. That's why relevance reporting exists. Full account in [evidence/](evidence/) and [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ## Chaos testing
 
-Chaos testing complements verification by exercising real compiled code under failure — it catches implementation bugs, timing issues, and recovery failures that the model checker can't reach.
+Chaos testing exercises real compiled code under failure — catching implementation bugs, timing issues, and recovery failures the model checker can't reach. It's also structurally immune to vacuity: there's no abstract model to be empty, because real processes either did the thing or didn't.
 
-Declare a chaos scenario inline:
+Declare a scenario inline:
 
 ```vor
-system RaftCluster do
-  agent :n1, RaftNode(node_id: :n1, cluster_size: 3)
-  agent :n2, RaftNode(node_id: :n2, cluster_size: 3)
-  agent :n3, RaftNode(node_id: :n3, cluster_size: 3)
-
-  connect :n1 -> :n2
-  connect :n1 -> :n3
-  connect :n2 -> :n1
-  connect :n2 -> :n3
-  connect :n3 -> :n1
-  connect :n3 -> :n2
-
-  safety "at most one leader" proven do
-    never(count(agents where role == :leader) > 1)
-  end
-
-  chaos do
-    duration 60s
-    seed 42
-    kill every: 5..15s
-    partition duration: 1..5s
-    delay by: 50..200ms
-    workload rate: 10
-    check every: 500ms
-  end
+chaos do
+  duration 60s
+  seed 42
+  kill every: 5..15s
+  partition duration: 1..5s
+  delay by: 50..200ms
+  workload rate: 10
+  check every: 500ms
 end
 ```
 
 ```bash
 mix vor.simulate
-```
-
-Or configure entirely from the CLI:
-
-```bash
 mix vor.simulate --partition --delay --workload 10 --duration 30000 --seed 42
 ```
 
 Starts real BEAM processes, injects real failures, checks invariants against live state:
 
-- **Kill injection** — randomly kills agent processes, supervisors restart them
-- **Network partitions** — proxy processes intercept and drop messages between partitioned groups
-- **Message delays** — proxy holds messages for configurable durations
-- **Workload generation** — sends client messages matching `accepts` declarations at configurable rates
-- **Invariant checking** — periodically queries live agent state and evaluates system invariants
-- **Seed reproducibility** — replay any run with `--seed N`
-- **Declarative config** — `chaos do ... end` block in the system, CLI flags override file config
+- **Kill injection** — kills agent processes; supervisors restart them
+- **Network partitions** — proxy processes intercept and drop messages between groups
+- **Message delays** — proxies hold messages for configurable durations
+- **Workload generation** — sends client messages matching `accepts` declarations
+- **Invariant checking** — periodically queries live state via `:sys.get_state`
+- **Coverage and integrity** — reports declared-vs-observed coverage, and flags a run as `UNDER-TESTED` if the harness degraded
+- **Seeded inputs** — fault schedule and workload are deterministic in the seed
 
-For BEAM-native systems, no external chaos infrastructure is needed — the BEAM provides process kill, message interception, and state querying as function calls.
+On **seed reproducibility**: all *inputs* are seeded, so a given seed produces the same fault schedule and workload. The BEAM's scheduler interleaving and real OTP timer firing are **not** controlled, so replay is highly reliable but not byte-for-byte deterministic. Measured reproduction of a known Raft violation: 100% on an idle machine, degrading under heavy load. See [evidence/](evidence/).
+
+No external chaos infrastructure is needed — the BEAM provides process kill, message interception, and state querying as function calls.
 
 ## Auto-generated telemetry
 
-The compiler knows every state field, message type, transition, and handler. It generates telemetry calls in the compiled bytecode — no instrumentation code in the source file.
+The compiler knows every state field, message type, transition, and handler, and generates telemetry calls in the compiled bytecode — no instrumentation code in the source.
 
 | Event | Metadata |
 |---|---|
 | `[:vor, :agent, :start]` | agent name, type (gen_server/gen_statem) |
 | `[:vor, :message, :received]` | agent, message tag, current state |
 | `[:vor, :transition]` | agent, field, from, to (sensitive fields redacted) |
-| `[:vor, :message, :emitted]` | agent, message tag |
+| `[:vor, :message, :emitted]` | agent, message tag (every outbound form: `emit`/reply, `send`, `broadcast`) |
 | `[:vor, :constraint, :violated]` | agent, message tag, constraint description |
 | `[:vor, :backpressure, :rejected]` | agent, message tag, queue length, limit |
 
-Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every agent is observable. You still need a metrics backend (Prometheus/Grafana) to view the data — Vor generates the events, you bring the dashboard.
+Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every agent is observable. This same stream is what feeds simulation coverage — telemetry generated *from the declaration* is how coverage knows what to look for. Emitted-message events carry the **declared** tag straight from the compiler (not recovered from a runtime reply value), so the coverage "which message types were exercised" axis is exact for `gen_server` and `gen_statem` alike.
 
 ## What's working
 
-**Verification and testing:**
+**Checking:**
 - Compile-time safety invariants proven by exhaustive state graph traversal
-- Compile-time liveness verification — `liveness "..." proven` checks that every obligated state has a reachable path to fulfillment
-- Multi-agent bounded model checking with cone-of-influence abstraction, integer saturation, symmetry reduction
-- Multi-agent liveness via Tarjan's SCC — detects cycles where progress is permanently blocked
-- Chaos testing with kill, partition, delay, workload on real BEAM processes
+- Compile-time liveness verification via reachability analysis
+- **Vacuity / relevance detection** across both the checker and the simulator; vacuous `proven` invariants are compile errors
+- Declared-vs-observed coverage — reached states, handlers, and message types vs. what was declared
+- Multi-agent bounded model checking with cone-of-influence abstraction and integer saturation
+- Multi-agent liveness via Tarjan's SCC
+- Chaos testing with kill, partition, delay, and workload on real BEAM processes, with execution-integrity reporting
 - Protocol version compatibility checking — `mix vor.compat` detects breaking changes before rolling deploy
-- Queryable spec inventory — `mix vor.surface` emits declared agents, protocols, and invariants as JSON or text
-- Verification posture report — `mix vor.coverage` aggregates the inventory into coverage metrics and gaps (JSON/text)
+- Queryable spec inventory — `mix vor.surface` (JSON/text)
+- Verification posture report — `mix vor.coverage`
 
 **Language features:**
 - Parameterized agents, init handlers, periodic timers (`every`)
-- Protocol input constraints with `where` clauses — invalid messages rejected before handlers run
-- Default values on `accepts` fields — `quantity: integer default: 1`, filled in for omitting senders
-- Protocol version compatibility checking — `mix vor.compat new.vor --against old.vor` flags rolling-deploy breakage
-- Backpressure declarations — `max_queue` limits with `priority` bypass for health checks
-- Sensitive field annotations — redacted in telemetry
-- `requires` declarations in system blocks — infrastructure dependencies started before agents during simulation
-- Native map operations (get, put, merge, has, delete, size, sum) with merge strategies
-- Native list operations (head, tail, append, prepend, length, empty)
-- Auto-generated telemetry for transitions, messages, lifecycle, and backpressure events
+- Protocol input constraints with `where` clauses
+- Default values on `accepts` fields
+- Backpressure declarations — `max_queue` with `priority` bypass
+- Sensitive field annotations, redacted in telemetry
+- `requires` declarations for infrastructure dependencies
+- Native map and list operations
 - Gleam extern support with compile-time type boundary validation
 - Bidirectional relations with compile-time equation inversion
 
-**Testing:**
-- 471+ tests, 9 property-based test suites, zero compiler warnings
-- All five examples fully native — zero externs:
-  - Distributed lock: proven safety, protocol constraints (message-driven; verified)
-  - Circuit breaker: proven safety; recovery/`half_open` now reachable (timers fire)
-  - Raft consensus: `mix vor.check` now **finds a real violation** of `"at most one leader"` (two leaders in different terms — the invariant is too strong) ([evidence](evidence/phase3a-timer-measurement.md))
-  - G-Counter CRDT: native map ops; gossip now fires, but map contents abstract to `:unknown` so convergence is not value-checkable ([KNOWN_ISSUES.md](KNOWN_ISSUES.md) §5)
-  - Rate limiter: native map ops, per-client tracking (message-driven)
+**Examples** (all five fully native, zero externs):
+
+| Example | Status |
+|---|---|
+| Distributed lock | Proven safety, protocol constraints; substantive |
+| Raft consensus | Per-term leader uniqueness proven and substantive; the global variant is a documented war story |
+| Circuit breaker | Proven safety; `half_open` is **not reachable in simulation** — the recovery timer is never armed |
+| G-Counter CRDT | Native map ops; gossip fires, but map contents abstract to `:unknown`, so convergence is not value-checkable |
+| Rate limiter | Native map ops, per-client tracking |
+
+## Limitations
+
+- **Multi-agent exhaustive checking is intractable beyond small bounds.** Interleaving explosion; not a `mix compile`-time operation. Partial-order reduction is sound but buys ~1× on the Raft model (always-enabled broadcasting timers block it).
+- **Symmetry reduction is unsound** — the canonicalization is not orbit-exact and can prune real states. Known, filed, deprioritized (it only bought ~2× on an honest model).
+- **Map and collection contents abstract to `:unknown`**, so value-level convergence (e.g. G-Counter) is reachable but not checkable.
+- **Simulation replay is not byte-for-byte deterministic** — inputs are seeded; scheduler interleaving is not.
+
+Full detail in [KNOWN_ISSUES.md](KNOWN_ISSUES.md); measurements in [evidence/](evidence/).
 
 ## Try it
 
