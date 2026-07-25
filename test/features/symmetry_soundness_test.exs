@@ -166,6 +166,71 @@ defmodule Vor.SymmetrySoundnessTest do
     refute on_violation?
   end
 
+  # ----------------------------------------------------------------------
+  # Default posture — symmetry is OFF unless explicitly opted in (July 2026).
+  # Because the reduction is unsound (above), the sound default is off; a caller
+  # must opt in with `symmetry: true`/`:auto` to accept the unsoundness.
+  # ----------------------------------------------------------------------
+
+  # A homogeneous two-agent system where symmetry *would* apply if enabled.
+  @homogeneous """
+  agent Worker do
+    state phase: :idle | :busy
+
+    protocol do
+      accepts {:go}
+      emits {:done}
+    end
+
+    on {:go} when phase == :idle do
+      transition phase: :busy
+      emit {:done}
+    end
+  end
+
+  system Pool do
+    agent :a, Worker()
+    agent :b, Worker()
+
+    safety "bounded busy" proven do
+      never(count(agents where phase == :busy) > 5)
+    end
+  end
+  """
+
+  test "symmetry is OFF by default (sound), even for a homogeneous system" do
+    {:ok, _status, stats} =
+      Explorer.check_file(@homogeneous, max_depth: 10, max_states: 5_000, allow_vacuous: true)
+
+    assert stats.symmetry == false,
+           "symmetry must be off by default — the reduction is unsound (KNOWN_ISSUES §2)"
+  end
+
+  test "symmetry can be opted into explicitly on a homogeneous system" do
+    {:ok, _status, stats} =
+      Explorer.check_file(@homogeneous,
+        max_depth: 10,
+        max_states: 5_000,
+        symmetry: true,
+        allow_vacuous: true
+      )
+
+    assert stats.symmetry == true,
+           "an explicit `symmetry: true` must enable the (unsound) reduction where applicable"
+  end
+
+  test "explicit symmetry: false stays off" do
+    {:ok, _status, stats} =
+      Explorer.check_file(@homogeneous,
+        max_depth: 10,
+        max_states: 5_000,
+        symmetry: false,
+        allow_vacuous: true
+      )
+
+    assert stats.symmetry == false
+  end
+
   defp summarize({:ok, status, stats}),
     do: "#{status} (#{stats.states_explored} states, depth #{stats.max_depth_reached}, symmetry=#{stats.symmetry})"
 

@@ -83,7 +83,8 @@ Key codegen features:
 > invariant is now PROVEN and substantive — Vor's first real multi-agent result).
 > Remaining caveats: exhaustive checking is
 > tractable only at small bounds (interleaving explosion); symmetry
-> canonicalization is not orbit-exact (unsound); map contents abstract to
+> canonicalization is not orbit-exact (unsound — so it is now **off by default**,
+> opt-in via `--symmetry`); map contents abstract to
 > `:unknown` (value-level convergence not checkable). Identifier routing is fixed.
 
 - `lib/vor/explorer.ex` — product state BFS exploration
@@ -303,7 +304,7 @@ State space reduction:
 - **Cone-of-influence** — only track fields transitively relevant to the invariant
 - **Integer saturation** — bound tracked integers (default 3)
 - **Queue bounding** — bound pending message queue (default 10)
-- **Symmetry** — canonicalize agent ordering for homogeneous systems
+- **Symmetry** — canonicalize agent ordering for homogeneous systems. **Off by default (unsound** — not orbit-exact, can prune reachable states; KNOWN_ISSUES §2). Opt-in via `--symmetry` / `symmetry: true`; the explorer default and `symmetry: false` keep exploration sound.
 
 Handler simulation interprets IR action trees directly (same IR as codegen). Extern results are `:unknown` — conditionals on `:unknown` fork both branches (conservative over-approximation).
 

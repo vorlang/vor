@@ -20,7 +20,7 @@ defmodule Mix.Tasks.Vor.Check do
       mix vor.check examples/raft_cluster.vor  # smoke-check a specific file
       mix vor.check --deep                     # bounded exhaustive verification (wider bounds)
       mix vor.check --max-queue 6              # widen the message-buffer bound
-      mix vor.check --no-symmetry              # disable symmetry reduction
+      mix vor.check --symmetry                 # opt into symmetry reduction (UNSOUND — see below)
       mix vor.check --no-por                   # disable partial-order reduction
       mix vor.check --no-fire-timers           # old blind mode (ignore timers)
 
@@ -42,9 +42,14 @@ defmodule Mix.Tasks.Vor.Check do
       explores more interleavings at the cost of state-space growth.
     * `--no-por` — disable partial-order reduction (on by default; it explores
       one representative interleaving per independent-event equivalence class).
-    * `--no-symmetry` — disable symmetry reduction. By default symmetry is
-      auto-detected for homogeneous fully-symmetric systems whose
-      invariants do not reference specific named agents.
+    * `--symmetry` — opt into symmetry reduction. **OFF by default: it is
+      unsound.** The canonicalization is not orbit-exact and can map states from
+      different permutation orbits to one fingerprint, pruning reachable states
+      (and any counterexample reachable only through them) — see KNOWN_ISSUES.md
+      §2. It buys only ~2× on the honest model. Enable it only for a fast,
+      lossy pre-scan where you accept that a "no counterexample" result is not
+      trustworthy. When enabled it applies to homogeneous fully-symmetric systems
+      whose invariants don't reference specific named agents.
     * `--no-fire-timers` — do not fire timer/timeout/resilience transitions.
       By default they fire as nondeterministic successors (the honest model);
       this flag restores the old blind mode in which timer-gated behavior is
@@ -86,9 +91,10 @@ defmodule Mix.Tasks.Vor.Check do
     max_states = Keyword.get(opts, :max_states, if(deep, do: 200_000, else: 40_000))
     integer_bound = Keyword.get(opts, :integer_bound, if(deep, do: 3, else: 2))
     max_queue = Keyword.get(opts, :max_queue, if(deep, do: 4, else: 2))
-    # `--no-symmetry` arrives as `symmetry: false`; default `:auto` lets the
-    # explorer detect when reduction is safe.
-    symmetry_opt = Keyword.get(opts, :symmetry, :auto)
+    # Symmetry reduction is OFF by default because it is unsound (KNOWN_ISSUES §2).
+    # `--symmetry` arrives as `symmetry: true` (opt in); `--no-symmetry` as
+    # `symmetry: false` (explicit). Absent either flag, default to `false`.
+    symmetry_opt = Keyword.get(opts, :symmetry, false)
     allow_vacuous = Keyword.get(opts, :allow_vacuous, false)
     fire_timers = Keyword.get(opts, :fire_timers, true)
     por = Keyword.get(opts, :por, true)
@@ -142,6 +148,7 @@ defmodule Mix.Tasks.Vor.Check do
                 )
               end
 
+              warn_unsound_symmetry(stats)
               :ok
 
             {:ok, :bounded, stats} ->
@@ -157,6 +164,7 @@ defmodule Mix.Tasks.Vor.Check do
                 "    No counterexample found in the part explored — this is neither a proof nor a clean bug-find. Reduce the model or raise --max-states/--max-queue."
               )
 
+              warn_unsound_symmetry(stats)
               :ok
 
             {:ok, :no_invariants, _stats} ->
@@ -313,11 +321,25 @@ defmodule Mix.Tasks.Vor.Check do
         _ -> Enum.reduce(2..n, 1, &(&1 * &2))
       end
 
-    "enabled (#{n} identical agents, #{factor}× reduction)"
+    "enabled — ⚠ UNSOUND (#{n} identical agents, up to #{factor}× reduction; may prune reachable states — KNOWN_ISSUES §2)"
   end
 
-  defp symmetry_label(%{symmetry: false}), do: "disabled"
+  defp symmetry_label(%{symmetry: false}), do: "off (sound; enable with --symmetry)"
   defp symmetry_label(_), do: "?"
+
+  # A "no counterexample" conclusion under symmetry reduction is not trustworthy:
+  # the reduction is unsound (KNOWN_ISSUES §2) and can prune the very state that
+  # would have exposed a violation. Finding a counterexample under symmetry is
+  # still valid, so this warns only on the absence verdicts.
+  defp warn_unsound_symmetry(%{symmetry: true}) do
+    Mix.shell().error(
+      "  ⚠ Symmetry reduction was ON (--symmetry) — it is UNSOUND (KNOWN_ISSUES §2) and can " <>
+        "prune reachable states, so this absence-of-counterexample result is NOT trustworthy. " <>
+        "Re-run without --symmetry to trust it."
+    )
+  end
+
+  defp warn_unsound_symmetry(_), do: :ok
 
   defp default_files do
     Path.wildcard("examples/*.vor")

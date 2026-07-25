@@ -45,7 +45,7 @@ This is what a language buys that a library can't. Detecting that a check engage
 
 ## Example
 
-A distributed lock with a proven safety invariant, protocol constraints, and sensitive field handling ([full source](examples/lock.vor)):
+A distributed lock with a proven safety invariant, protocol constraints, and sensitive field handling — a fuller variant of the runnable [examples/lock.vor](examples/lock.vor) (this one adds priority constraints and a sensitive field to show more of the language in one glance):
 
 ```vor
 agent LockManager(lock_timeout_ms: integer) do
@@ -75,7 +75,8 @@ agent LockManager(lock_timeout_ms: integer) do
   end
 
   on {:release, client: C} when phase == :held do
-    if list_empty(wait_queue) == :true do
+    is_empty = list_empty(wait_queue)
+    if is_empty == :true do
       transition phase: :free
       transition holder: :nil
       emit {:ok}
@@ -236,7 +237,7 @@ Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every a
 ## Limitations
 
 - **Multi-agent exhaustive checking is intractable beyond small bounds.** Interleaving explosion; not a `mix compile`-time operation. Partial-order reduction is sound but buys ~1× on the Raft model (always-enabled broadcasting timers block it).
-- **Symmetry reduction is unsound** — the canonicalization is not orbit-exact and can prune real states. Known, filed, deprioritized (it only bought ~2× on an honest model).
+- **Symmetry reduction is unsound** — the canonicalization is not orbit-exact and can prune real states, so it is now **off by default** (opt-in via `--symmetry`, which labels the result unsound). It only bought ~2× on an honest model; a correct orbit-exact version is future work.
 - **Map and collection contents abstract to `:unknown`**, so value-level convergence (e.g. G-Counter) is reachable but not checkable.
 - **Simulation replay is not byte-for-byte deterministic** — inputs are seeded; scheduler interleaving is not.
 

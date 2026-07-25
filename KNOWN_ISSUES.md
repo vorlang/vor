@@ -80,8 +80,15 @@ permutation π applied consistently to agent names, message endpoints, **and
 payload agent IDs**, taking the lexicographically smallest serialization over all
 `|S₃| = 6` permutations.
 
-**Status:** not fixed (deliberately deferred — a correct canonicalization will
-change multi-agent state counts, so it should be done as a deliberate change).
+**Status:** the underlying canonicalization is still unsound (not fixed), but as
+of July 2026 **symmetry reduction is OFF by default** — the sound default. It is
+opt-in only, via `mix vor.check --symmetry` (or `symmetry: true`/`:auto` to the
+explorer API), and when enabled the output labels it `⚠ UNSOUND` and warns that
+any absence-of-counterexample result is not trustworthy. A correct orbit-exact
+canonicalization (canonicalize under a single permutation applied consistently to
+agent names, message endpoints, and payload agent IDs; take the smallest
+serialization over all `|Sₙ|` permutations) remains future work — it will change
+multi-agent state counts, so it should be done as a deliberate change.
 
 ---
 

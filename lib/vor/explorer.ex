@@ -71,7 +71,11 @@ defmodule Vor.Explorer do
     max_states = Keyword.get(opts, :max_states, @default_max_states)
     integer_bound = Keyword.get(opts, :integer_bound, @default_integer_bound)
     max_queue = Keyword.get(opts, :max_queue, @default_max_queue)
-    symmetry_opt = Keyword.get(opts, :symmetry, :auto)
+    # Symmetry reduction is OFF by default: the canonicalization is not
+    # orbit-exact and can prune reachable states — an *unsound* reduction (see
+    # KNOWN_ISSUES.md §2). Opt in with `symmetry: true` (or `:auto`) only when the
+    # speed is worth that unsoundness. `false` (the default) keeps exploration sound.
+    symmetry_opt = Keyword.get(opts, :symmetry, false)
     allow_vacuous = Keyword.get(opts, :allow_vacuous, false)
     # Fire timer/timeout/resilience transitions as nondeterministic successors
     # (Phase 3a). Default on — a checker that ignores declared timer behavior is

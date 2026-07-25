@@ -181,10 +181,21 @@ declared tag appears in the telemetry metadata (verified red→green).
 - **Enum-only states.** Coverage's state axis only tracks declared enum fields;
   `map`/scalar state (gcounter, rate_limiter) contributes no reachable-state
   count. Those examples are covered on the message axes instead.
-- **Timeout-handler emits.** A `emit` inside a timer/timeout handler (no caller
-  to reply to) is not surfaced on the emitted stream. No shipped example relies
-  on this; the reply-heavy call-handler path — the coverage-relevant one — is
-  covered.
+- **Timeout-handler emits are not a coverage gap (verified 2026-07-24).** `emit`
+  means a *synchronous reply to the caller*, and a timer/timeout/periodic handler
+  has no caller — so an `emit` there produces **no observable message** and the
+  codegen drops it. The absence of emitted-telemetry is therefore correct, not
+  under-reporting. Verified directly: an `every` timer running both
+  `emit {:tick}` and `broadcast {:beat}` fires `[:vor, :message, :emitted]` only
+  for `beat` (the broadcast, which does send messages) — the emit produces
+  nothing. Every *observable* outbound action is covered: call-reply emits (the
+  gen_statem reply-tag fix), and `send`/`broadcast` from message handlers,
+  periodic (`every`) timers, and resilience/state-timeout handlers. (Two
+  separate, tracked-elsewhere codegen items, not telemetry gaps: an `emit` in a
+  timer handler is effectively dead code — a warning would be a reasonable lint;
+  and the `on :*_fired` message-timer path currently drops *all* non-transition
+  actions, so a `send`/`broadcast` there would not fire at all. No shipped
+  example exercises either.)
 
 ---
 
