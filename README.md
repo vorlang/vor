@@ -137,7 +137,7 @@ system RaftCluster do
 end
 ```
 
-**`mix vor.check` is a bug-finder first.** Finding a counterexample is fast — often under a second. Exhaustive verification is available too, but only at small bounds: the state space explodes with message-queue depth, and neither symmetry reduction nor partial-order reduction changes that (see [evidence/](evidence/)). It never runs during `mix compile`.
+**`mix vor.check` is a bug-finder first.** Finding a counterexample is fast — often under a second. Exhaustive verification is available too, but only at small bounds: the state space explodes with message-queue depth, and partial-order reduction doesn't change that (see [evidence/](evidence/)). It never runs during `mix compile`.
 
 ### How the invariant above got that way
 
@@ -237,7 +237,6 @@ Attach any `:telemetry` backend (Prometheus, StatsD, console logger) and every a
 ## Limitations
 
 - **Multi-agent exhaustive checking is intractable beyond small bounds.** Interleaving explosion; not a `mix compile`-time operation. Partial-order reduction is sound but buys ~1× on the Raft model (always-enabled broadcasting timers block it).
-- **Symmetry reduction is unsound** — the canonicalization is not orbit-exact and can prune real states, so it is now **off by default** (opt-in via `--symmetry`, which labels the result unsound). It only bought ~2× on an honest model; a correct orbit-exact version is future work.
 - **Map and collection contents abstract to `:unknown`**, so value-level convergence (e.g. G-Counter) is reachable but not checkable.
 - **Simulation replay is not byte-for-byte deterministic** — inputs are seeded; scheduler interleaving is not.
 

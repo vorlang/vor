@@ -1,241 +1,74 @@
 defmodule Vor.SymmetrySoundnessTest do
   @moduledoc """
-  Investigation harness (NOT a fix). Tests the hypothesis that
-  `Vor.Explorer.Symmetry.canonical_fingerprint/1` is not a valid orbit
-  representative under the agent-permutation group S_n, and that the resulting
-  fingerprint collisions can prune a real safety violation out of the BFS.
+  TOMBSTONE — symmetry reduction was REMOVED on 2026-08-08, not fixed.
 
-  These tests are written to OBSERVE current behavior. Test 1 is expected to
-  FAIL its second assertion (the collision assertion) if the hypothesis holds;
-  it is written so the failure message prints the two colliding fingerprints.
-  Test 2 measures whether the collision actually hides a counterexample.
+  This file used to be the investigation harness proving that
+  `Vor.Explorer.Symmetry.canonical_fingerprint/1` was not a valid orbit
+  representative under the agent-permutation group Sₙ, and that its fingerprint
+  collisions could prune a real safety violation out of the BFS. The module and
+  its function no longer exist, so the tests can no longer run. Their content is
+  preserved here as the record; see `KNOWN_ISSUES.md` §2 (resolved-by-removal),
+  `evidence/phase3a-timer-measurement.md`, and
+  `evidence/por-and-voting-diagnostics.md` for the full analysis.
 
-  No source under lib/ is modified by this file.
-  """
-  use ExUnit.Case, async: false
+  There are deliberately NO runnable tests below — this is a documentation
+  tombstone, not a test module.
 
-  alias Vor.Explorer
-  alias Vor.Explorer.{ProductState, Symmetry}
+  ## Why it was removed rather than repaired
 
-  # A single in-flight message, IDENTICAL in content across the two states.
-  # Shape matches what the explorer stores: {tag, %{field => value}}.
-  @msg {:vote_granted, %{term: 1, voter: :node3}}
+  The canonicalization performed three *uncoordinated* collapses — (1) sorted the
+  per-agent states into an unordered multiset, (2) stripped from/to endpoints
+  from pending messages and bagged the payloads, (3) kept payload agent IDs
+  verbatim — with no single permutation π tying them together. So it could map
+  states in different Sₙ orbits to the same fingerprint and prune reachable
+  states (and any counterexample reachable only through them): unsound, not
+  merely imprecise. And the honest-model measurement showed a *correct* fix would
+  buy only ~2× (`evidence/phase3a-timer-measurement.md`). Unsound + marginal =
+  dead weight with ongoing maintenance cost, so it was deleted.
 
-  # ----------------------------------------------------------------------
-  # Test 1 — fingerprint collision across distinct S_3 orbits
-  # ----------------------------------------------------------------------
-  #
-  # Three agents with pairwise-distinct local states => trivial stabilizer,
-  # so the ONLY permutation fixing the agent map is the identity. Any
-  # difference in the message endpoints therefore cannot be absorbed by a
-  # permutation: the two states are in different S_3 orbits.
-  # CHARACTERIZATION TEST for a KNOWN, UNFIXED bug (see KNOWN_ISSUES.md §2:
-  # "Symmetry canonicalization is not orbit-exact"). It asserts the *current,
-  # incorrect* behavior — the two distinct-orbit states DO collide — so the
-  # suite stays green while the defect is documented. When the canonicalization
-  # is fixed (Phase 3), this test will start failing, which is the signal to
-  # update it to assert the corrected (non-colliding) behavior.
-  test "KNOWN BUG: canonical_fingerprint collides two states from different S3 orbits" do
-    agents = %{
-      node1: %{role: :leader},
-      node2: %{role: :candidate},
-      node3: %{role: :follower}
-    }
+  ## Test 1 — the cross-orbit fingerprint collision (preserved counterexample)
 
-    # Same agents, same message content; message recipient differs only.
-    a = %ProductState{agents: agents, pending_messages: [{:node3, :node2, @msg}]}
-    b = %ProductState{agents: agents, pending_messages: [{:node3, :node1, @msg}]}
+  Message content (identical across the two states):
 
-    plain_a = ProductState.fingerprint(a)
-    plain_b = ProductState.fingerprint(b)
-    canon_a = Symmetry.canonical_fingerprint(a)
-    canon_b = Symmetry.canonical_fingerprint(b)
+      @msg = {:vote_granted, %{term: 1, voter: :node3}}
 
-    IO.puts("""
+  Two product states with three pairwise-distinct agent roles — a *trivial*
+  stabilizer, so only the identity permutation fixes the agent map — differing
+  ONLY in the recipient of one in-flight message:
 
-    ── Test 1 fingerprints ───────────────────────────────────────────────
-    ProductState.fingerprint(a)      = #{inspect(plain_a)}
-    ProductState.fingerprint(b)      = #{inspect(plain_b)}
-    Symmetry.canonical_fingerprint(a)= #{inspect(canon_a)}
-    Symmetry.canonical_fingerprint(b)= #{inspect(canon_b)}
-    canonical collide? #{canon_a == canon_b}
-    ──────────────────────────────────────────────────────────────────────
-    """)
+      agents = %{
+        node1: %{role: :leader},
+        node2: %{role: :candidate},
+        node3: %{role: :follower}
+      }
 
-    # Sanity: the non-symmetric fingerprint MUST distinguish them.
-    assert plain_a != plain_b,
-           "non-symmetric fingerprint unexpectedly merged two distinct states"
+      a = %ProductState{agents: agents, pending_messages: [{:node3, :node2, @msg}]}
+      b = %ProductState{agents: agents, pending_messages: [{:node3, :node1, @msg}]}
 
-    # KNOWN BUG (asserted as current behavior): the two states lie in different
-    # S3 orbits (three pairwise-distinct agent states => trivial stabilizer, so
-    # only the identity fixes the agent map, and the message endpoints differ),
-    # yet canonical_fingerprint/1 maps them to the SAME value. A correct orbit
-    # representative would keep them distinct. When Phase 3 fixes this, flip the
-    # assertion to `refute canon_a == canon_b`.
-    assert canon_a == canon_b,
-           "expected the known cross-orbit collision; canonicalization may have been fixed — update this test"
-  end
+  These lie in DIFFERENT S₃ orbits (no permutation carries `a` to `b`, because
+  the agent map is fixed only by the identity and the message endpoints differ).
+  The sound `ProductState.fingerprint/1` distinguished them, as it must. But
+  `Symmetry.canonical_fingerprint/1` mapped both to the SAME value — a
+  cross-orbit collision. Since the BFS pruned on fingerprint membership, the
+  state (and any violation reachable only through it) could be dropped
+  unexplored.
 
-  # ----------------------------------------------------------------------
-  # Test 2 — does the collision hide a real violation?
-  # ----------------------------------------------------------------------
-  #
-  # Weaken the Raft majority gate so a two-leader state is genuinely
-  # reachable, then compare exploration with symmetry OFF vs ON. If symmetry
-  # OFF finds the "at most one leader" violation but symmetry ON reports
-  # proven, the reduction pruned the path to the bug => unsound.
-  #
-  # The weakening is an IN-MEMORY string edit of the example source; it does
-  # NOT touch examples/raft_cluster.vor on disk.
-  test "weakened-majority Raft: does symmetry prune the two-leader counterexample?" do
-    raft_source = File.read!("examples/raft_cluster.vor")
+  The arithmetic tell: a correct quotient over S₃ (three agents) caps reduction
+  at 6×. The old reduction reported 8× on the vacuous Raft fixture (1001 vs 8008
+  states) — arithmetically impossible for a valid symmetry reduction, and the
+  signature of over-merging across orbits.
 
-    # ===== TEMPORARY, CLEARLY-MARKED WEAKENING (in memory only) =====
-    # Original gate: `if new_votes > half do` (strict majority).
-    # Weakened gate: `if new_votes >= 1 do` (any single vote => leader),
-    # which makes a two-leader state reachable.
-    weakened =
-      String.replace(raft_source, "if new_votes > half do", "if new_votes >= 1 do")
+  ## Test 2 — does the collision hide a real violation on Raft?
 
-    assert weakened != raft_source, "expected to find the majority gate to weaken"
-    # ===== END WEAKENING =====
-
-    # Inject the system-level safety invariant (the example file has none),
-    # exactly as the existing suite does.
-    augmented =
-      String.replace(weakened, ~r/\nend\s*\z/, """
-
-        safety "at most one leader" proven do
-          never(count(agents where role == :leader) > 1)
-        end
-      end
-      """)
-
-    # This investigation studies the symmetry fingerprint on the small vacuous
-    # model, so it pins fire_timers: false (the old blind mode) as a stable
-    # fixture; allow_vacuous keeps the vacuous `proven` invariant from erroring.
-    opts = [max_depth: 30, max_states: 50_000, allow_vacuous: true, fire_timers: false]
-
-    off = Explorer.check_file(augmented, Keyword.put(opts, :symmetry, false))
-    on = Explorer.check_file(augmented, Keyword.put(opts, :symmetry, :auto))
-
-    IO.puts("""
-
-    ── Test 2 results (weakened majority) ────────────────────────────────
-    symmetry OFF : #{summarize(off)}
-    symmetry ON  : #{summarize(on)}
-    ──────────────────────────────────────────────────────────────────────
-    """)
-
-    off_violation? = match?({:error, :violation, "at most one leader", _, _}, off)
-    on_violation? = match?({:error, :violation, "at most one leader", _, _}, on)
-
-    IO.puts("symmetry OFF found violation? #{off_violation?}")
-    IO.puts("symmetry ON  found violation? #{on_violation?}")
-
-    # ── Root-cause probe ────────────────────────────────────────────────
-    # Test 2 is INCONCLUSIVE: neither run finds a violation, and the state
-    # counts are IDENTICAL to the un-weakened baseline (8008 / 1001), so the
-    # weakened gate was never exercised. The probe below explains why: across
-    # the whole explored space every node stays :follower, so no leader is
-    # ever elected and the majority gate lives in unreachable (during BFS)
-    # code. The explorer's successor relation only delivers messages +
-    # injects representative externals; it never fires the resilience/timeout
-    # transition that moves :follower -> :candidate.
-    probe =
-      String.replace(raft_source, ~r/\nend\s*\z/, """
-
-        safety "all nodes always follower" proven do
-          never(count(agents where role == :follower) < 3)
-        end
-      end
-      """)
-
-    probe_off = Explorer.check_file(probe, Keyword.put(opts, :symmetry, false))
-    IO.puts("probe 'all nodes always follower' (symmetry off): #{summarize(probe_off)}")
-
-    # PROVEN => the predicate `count(role==:follower) < 3` is never reached,
-    # i.e. all three nodes are followers in every explored state.
-    assert match?({:ok, :proven, _}, probe_off),
-           "expected all nodes to remain :follower; if this changed, re-examine Test 2"
-
-    # Document the observed (inconclusive-for-impact) reality: no leader is
-    # reachable, so neither run reports a violation. This does NOT vindicate
-    # symmetry — it means the Raft example cannot exercise the collision.
-    refute off_violation?
-    refute on_violation?
-  end
-
-  # ----------------------------------------------------------------------
-  # Default posture — symmetry is OFF unless explicitly opted in (July 2026).
-  # Because the reduction is unsound (above), the sound default is off; a caller
-  # must opt in with `symmetry: true`/`:auto` to accept the unsoundness.
-  # ----------------------------------------------------------------------
-
-  # A homogeneous two-agent system where symmetry *would* apply if enabled.
-  @homogeneous """
-  agent Worker do
-    state phase: :idle | :busy
-
-    protocol do
-      accepts {:go}
-      emits {:done}
-    end
-
-    on {:go} when phase == :idle do
-      transition phase: :busy
-      emit {:done}
-    end
-  end
-
-  system Pool do
-    agent :a, Worker()
-    agent :b, Worker()
-
-    safety "bounded busy" proven do
-      never(count(agents where phase == :busy) > 5)
-    end
-  end
+  The follow-up weakened Raft's majority gate (in-memory string edit, never
+  touching `examples/raft_cluster.vor`) to try to make a genuine two-leader state
+  reachable, then compared exploration with symmetry OFF vs ON. Finding: on that
+  fixture no leader was reachable at all, so neither run reported a violation —
+  the Raft example could not *exercise* the collision. That did not vindicate the
+  reduction (Test 1 already proved it unsound in principle); it only meant this
+  particular example was not a witness. Full write-up in
+  `evidence/por-and-voting-diagnostics.md`.
   """
 
-  test "symmetry is OFF by default (sound), even for a homogeneous system" do
-    {:ok, _status, stats} =
-      Explorer.check_file(@homogeneous, max_depth: 10, max_states: 5_000, allow_vacuous: true)
-
-    assert stats.symmetry == false,
-           "symmetry must be off by default — the reduction is unsound (KNOWN_ISSUES §2)"
-  end
-
-  test "symmetry can be opted into explicitly on a homogeneous system" do
-    {:ok, _status, stats} =
-      Explorer.check_file(@homogeneous,
-        max_depth: 10,
-        max_states: 5_000,
-        symmetry: true,
-        allow_vacuous: true
-      )
-
-    assert stats.symmetry == true,
-           "an explicit `symmetry: true` must enable the (unsound) reduction where applicable"
-  end
-
-  test "explicit symmetry: false stays off" do
-    {:ok, _status, stats} =
-      Explorer.check_file(@homogeneous,
-        max_depth: 10,
-        max_states: 5_000,
-        symmetry: false,
-        allow_vacuous: true
-      )
-
-    assert stats.symmetry == false
-  end
-
-  defp summarize({:ok, status, stats}),
-    do: "#{status} (#{stats.states_explored} states, depth #{stats.max_depth_reached}, symmetry=#{stats.symmetry})"
-
-  defp summarize({:error, :violation, name, trace, stats}),
-    do: "VIOLATION #{inspect(name)} (#{stats.states_explored} states, trace len #{length(trace)}, symmetry=#{stats.symmetry})"
-
-  defp summarize(other), do: inspect(other)
+  # No `use ExUnit.Case`, no tests: the code under test has been deleted.
 end

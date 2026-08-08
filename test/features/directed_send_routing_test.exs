@@ -63,7 +63,7 @@ defmodule Vor.DirectedSendRoutingTest do
 
   test "a directed send whose target comes from a message payload is delivered" do
     {:ok, :proven, stats} =
-      Explorer.check_file(@source, max_depth: 12, max_states: 50_000, symmetry: false)
+      Explorer.check_file(@source, max_depth: 12, max_states: 50_000)
 
     reached_ponged? =
       stats.state_map

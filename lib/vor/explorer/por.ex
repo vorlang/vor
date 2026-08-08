@@ -58,7 +58,7 @@ defmodule Vor.Explorer.POR do
       reference (their atomic propositions). A successor is *visible* if it
       changed one of these on its target agent.
     * `visited` — the BFS visited fingerprint set (for the cycle proviso).
-    * `fingerprint` — the fingerprint function the BFS uses (symmetry-aware).
+    * `fingerprint` — the fingerprint function the BFS uses for deduplication.
 
   Returns a subset of `successors` (or all of them). Never returns more than it
   was given, and returns `[]` only when given `[]`.

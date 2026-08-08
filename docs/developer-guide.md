@@ -82,10 +82,9 @@ Key codegen features:
 > timeout-driven behavior is explored (Raft's corrected per-term leader-uniqueness
 > invariant is now PROVEN and substantive — Vor's first real multi-agent result).
 > Remaining caveats: exhaustive checking is
-> tractable only at small bounds (interleaving explosion); symmetry
-> canonicalization is not orbit-exact (unsound — so it is now **off by default**,
-> opt-in via `--symmetry`); map contents abstract to
-> `:unknown` (value-level convergence not checkable). Identifier routing is fixed.
+> tractable only at small bounds (interleaving explosion); map contents abstract
+> to `:unknown` (value-level convergence not checkable). Identifier routing is
+> fixed. (The formerly-unsound symmetry reduction was removed — KNOWN_ISSUES §2.)
 
 - `lib/vor/explorer.ex` — product state BFS exploration
 - `lib/vor/explorer/product_state.ex` — combined agent state representation
@@ -93,7 +92,6 @@ Key codegen features:
 - `lib/vor/explorer/successor.ex` — successor state generation
 - `lib/vor/explorer/invariant.ex` — system-level invariant evaluation
 - `lib/vor/explorer/relevance.ex` — cone-of-influence field analysis
-- `lib/vor/explorer/symmetry.ex` — symmetry detection and canonicalization
 - `lib/vor/explorer/vacuity.ex` — invariant **relevance** axis (subject reachability → substantive/vacuous/unexercised)
 - `lib/vor/explorer/coverage.ex` — declared-vs-reached coverage (unreached enum values, unfired handlers/resilience/timers)
 - `lib/vor/explorer/por.ex` — partial-order reduction (static ample/persistent sets; different-target-agent events are independent *only when the bounded queue does not truncate* — a queue-growing/truncating event is treated as dependent; invisible-agent ample sets + cycle proviso)
@@ -304,7 +302,9 @@ State space reduction:
 - **Cone-of-influence** — only track fields transitively relevant to the invariant
 - **Integer saturation** — bound tracked integers (default 3)
 - **Queue bounding** — bound pending message queue (default 10)
-- **Symmetry** — canonicalize agent ordering for homogeneous systems. **Off by default (unsound** — not orbit-exact, can prune reachable states; KNOWN_ISSUES §2). Opt-in via `--symmetry` / `symmetry: true`; the explorer default and `symmetry: false` keep exploration sound.
+- **Partial-order reduction** — explore one representative interleaving per independent-event class (sound; `--no-por` to disable). See `lib/vor/explorer/por.ex`.
+
+(A symmetry reduction existed but was removed in 2026-08 as unsound — KNOWN_ISSUES §2.)
 
 Handler simulation interprets IR action trees directly (same IR as codegen). Extern results are `:unknown` — conditionals on `:unknown` fork both branches (conservative over-approximation).
 

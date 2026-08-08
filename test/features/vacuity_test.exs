@@ -166,8 +166,7 @@ defmodule Vor.Features.VacuityTest do
                max_depth: 40,
                max_states: 5_000_000,
                integer_bound: 2,
-               max_queue: 2,
-               symmetry: false
+               max_queue: 2
              )
 
     assert status in [:proven, :bounded]
@@ -187,7 +186,7 @@ defmodule Vor.Features.VacuityTest do
     # Contrast: with timers OFF (the old blind mode) no leader is reachable, so
     # the very same invariant is vacuous — the pass would be untested.
     assert {:error, :vacuous_proven, _names, vstats} =
-             Explorer.check_file(source, max_depth: 10, max_states: 50_000, symmetry: false, fire_timers: false)
+             Explorer.check_file(source, max_depth: 10, max_states: 50_000, fire_timers: false)
 
     assert [%{relevance: :vacuous}] = vstats.vacuity
   end

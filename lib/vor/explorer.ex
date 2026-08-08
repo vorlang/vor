@@ -14,7 +14,7 @@ defmodule Vor.Explorer do
   the invariants and stores them on the system IR but does not run the BFS.
   """
 
-  alias Vor.Explorer.{Coverage, Invariant, LivenessChecker, POR, ProductState, Relevance, Successor, Symmetry, Tarjan, Vacuity}
+  alias Vor.Explorer.{Coverage, Invariant, LivenessChecker, POR, ProductState, Relevance, Successor, Tarjan, Vacuity}
   alias Vor.IR
 
   @default_max_depth 50
@@ -27,8 +27,7 @@ defmodule Vor.Explorer do
           max_depth_reached: non_neg_integer(),
           relevance: Relevance.t() | nil,
           integer_bound: non_neg_integer(),
-          max_queue: non_neg_integer(),
-          symmetry: boolean()
+          max_queue: non_neg_integer()
         }
 
   @doc """
@@ -71,11 +70,6 @@ defmodule Vor.Explorer do
     max_states = Keyword.get(opts, :max_states, @default_max_states)
     integer_bound = Keyword.get(opts, :integer_bound, @default_integer_bound)
     max_queue = Keyword.get(opts, :max_queue, @default_max_queue)
-    # Symmetry reduction is OFF by default: the canonicalization is not
-    # orbit-exact and can prune reachable states — an *unsound* reduction (see
-    # KNOWN_ISSUES.md §2). Opt in with `symmetry: true` (or `:auto`) only when the
-    # speed is worth that unsoundness. `false` (the default) keeps exploration sound.
-    symmetry_opt = Keyword.get(opts, :symmetry, false)
     allow_vacuous = Keyword.get(opts, :allow_vacuous, false)
     # Fire timer/timeout/resilience transitions as nondeterministic successors
     # (Phase 3a). Default on — a checker that ignores declared timer behavior is
@@ -98,8 +92,6 @@ defmodule Vor.Explorer do
       |> Enum.flat_map(&Relevance.invariant_fields/1)
       |> MapSet.new()
 
-    symmetry = Symmetry.enabled?(system_ir, safety_invariants, symmetry_opt)
-
     relevance = Relevance.compute(system_ir, instance_irs, safety_invariants ++ liveness_invariants)
 
     initial =
@@ -113,8 +105,7 @@ defmodule Vor.Explorer do
       max_depth_reached: 0,
       relevance: relevance,
       integer_bound: integer_bound,
-      max_queue: max_queue,
-      symmetry: symmetry
+      max_queue: max_queue
     }
 
     case check_all_invariants(initial, safety_invariants) do
@@ -123,7 +114,7 @@ defmodule Vor.Explorer do
 
       :ok ->
         bfs_result = bfs(initial, instance_irs, system_ir, safety_invariants, max_depth, max_states,
-          relevance, integer_bound, max_queue, symmetry, fire_timers, por, invariant_fields)
+          relevance, integer_bound, max_queue, fire_timers, por, invariant_fields)
 
         case bfs_result do
           {:ok, status, stats} ->
@@ -298,8 +289,7 @@ defmodule Vor.Explorer do
       max_depth_reached: 0,
       relevance: nil,
       integer_bound: @default_integer_bound,
-      max_queue: @default_max_queue,
-      symmetry: false
+      max_queue: @default_max_queue
     }
 
   defp check_all_invariants(state, invariants) do
@@ -316,8 +306,8 @@ defmodule Vor.Explorer do
   # used to reconstruct the counterexample if a violation is found.
   # ----------------------------------------------------------------------
 
-  defp bfs(initial, instance_irs, system_ir, invariants, max_depth, max_states, relevance, integer_bound, max_queue, symmetry, fire_timers, por, invariant_fields) do
-    initial_fp = fingerprint(initial, symmetry)
+  defp bfs(initial, instance_irs, system_ir, invariants, max_depth, max_states, relevance, integer_bound, max_queue, fire_timers, por, invariant_fields) do
+    initial_fp = fingerprint(initial)
     queue = :queue.in({initial, [initial], initial_fp}, :queue.new())
     visited = MapSet.new([initial_fp])
     stats = %{
@@ -326,7 +316,6 @@ defmodule Vor.Explorer do
       relevance: relevance,
       integer_bound: integer_bound,
       max_queue: max_queue,
-      symmetry: symmetry,
       fire_timers: fire_timers,
       por: por,
       invariant_fields: invariant_fields,
@@ -335,10 +324,10 @@ defmodule Vor.Explorer do
       fired_handlers: MapSet.new()
     }
 
-    do_bfs(queue, visited, instance_irs, system_ir, invariants, max_depth, max_states, stats, relevance, integer_bound, max_queue, symmetry)
+    do_bfs(queue, visited, instance_irs, system_ir, invariants, max_depth, max_states, stats, relevance, integer_bound, max_queue)
   end
 
-  defp do_bfs(queue, visited, instance_irs, system_ir, invariants, max_depth, max_states, stats, relevance, integer_bound, max_queue, symmetry) do
+  defp do_bfs(queue, visited, instance_irs, system_ir, invariants, max_depth, max_states, stats, relevance, integer_bound, max_queue) do
     case :queue.out(queue) do
       {:empty, _} ->
         {:ok, :proven, stats}
@@ -349,7 +338,7 @@ defmodule Vor.Explorer do
             {:ok, :bounded, stats}
 
           state.depth >= max_depth ->
-            do_bfs(rest, visited, instance_irs, system_ir, invariants, max_depth, max_states, stats, relevance, integer_bound, max_queue, symmetry)
+            do_bfs(rest, visited, instance_irs, system_ir, invariants, max_depth, max_states, stats, relevance, integer_bound, max_queue)
 
           true ->
             {successors, fired} =
@@ -366,14 +355,14 @@ defmodule Vor.Explorer do
             successors =
               if stats.por do
                 POR.ample(successors, state, stats.invariant_fields, visited,
-                  fn s -> fingerprint(s, symmetry) end)
+                  fn s -> fingerprint(s) end)
               else
                 successors
               end
 
             step =
               Enum.reduce_while(successors, {rest, visited, stats, nil}, fn succ, {q, v, s, _} ->
-                fp = fingerprint(succ, symmetry)
+                fp = fingerprint(succ)
 
                 # Track adjacency edge regardless of visited status
                 s = update_in(s, [:adjacency], fn adj ->
@@ -412,12 +401,11 @@ defmodule Vor.Explorer do
                 {:error, :violation, name, full_trace, new_stats}
 
               {new_queue, new_visited, new_stats, nil} ->
-                do_bfs(new_queue, new_visited, instance_irs, system_ir, invariants, max_depth, max_states, new_stats, relevance, integer_bound, max_queue, symmetry)
+                do_bfs(new_queue, new_visited, instance_irs, system_ir, invariants, max_depth, max_states, new_stats, relevance, integer_bound, max_queue)
             end
         end
     end
   end
 
-  defp fingerprint(state, true), do: Symmetry.canonical_fingerprint(state)
-  defp fingerprint(state, _), do: ProductState.fingerprint(state)
+  defp fingerprint(state), do: ProductState.fingerprint(state)
 end

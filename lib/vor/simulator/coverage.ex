@@ -90,9 +90,9 @@ defmodule Vor.Simulator.Coverage do
 
   def handle_event(_event, _measurements, _meta, _table), do: :ok
 
-  # The transition codegen emits `:redacted` placeholders under symmetry
-  # fingerprinting, and `:unknown`/`:undefined` when a from-state can't be
-  # determined statically. None of those are real reached values.
+  # The transition codegen emits `:redacted` placeholders for sensitive fields,
+  # and `:unknown`/`:undefined` when a from-state can't be determined statically.
+  # None of those are real reached values.
   defp valid_state?(v) when v in [nil, :redacted, :unknown, :undefined], do: false
   defp valid_state?(v) when is_atom(v), do: true
   defp valid_state?(_), do: false

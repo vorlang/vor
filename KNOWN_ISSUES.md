@@ -7,8 +7,9 @@ roadmap.
 Summary of impact: **single-agent verification, protocol constraints,
 backpressure, generated telemetry, and chaos simulation work as described.
 Multi-agent bounded model checking does not verify any behavior that is gated
-behind a timer, timeout, or resilience handler, and its symmetry reduction is
-unsound.** Any multi-agent model-checking result for such behavior is vacuous.
+behind a timer, timeout, or resilience handler.** Any multi-agent
+model-checking result for such behavior is vacuous. (The formerly-unsound
+symmetry reduction has since been removed — see §2.)
 
 ---
 
@@ -48,47 +49,27 @@ deep check / bug-finder, not a compile-time operation.
 
 ---
 
-## 2. Symmetry canonicalization is not orbit-exact (unsound reduction)
+## 2. Symmetry reduction — RESOLVED BY REMOVAL (2026-08-08)
 
-`Vor.Explorer.Symmetry.canonical_fingerprint/1` (`lib/vor/explorer/symmetry.ex:107`)
-is intended to pick one representative per orbit under the agent-permutation
-group (S₃ for three identical agents). It does not. It performs **three
-uncoordinated collapses**:
-
-1. sorts the per-agent states into an unordered multiset (drops which agent holds
-   which state);
-2. strips the `from`/`to` fields from every pending message and bags the
-   payloads; and
-3. keeps **payload agent IDs verbatim** (e.g. `voter: :node3`).
-
-Because no single consistent permutation ties these together, the function can
-map states lying in **different S₃ orbits** to the **same** fingerprint. Since the
-BFS prunes on fingerprint membership (`lib/vor/explorer/explorer.ex:316`), a
-state — and any violation reachable only through it — can be **pruned away
-unexplored**. This makes the reduction **unsound**, not merely imprecise. (A
-correct quotient over S₃ caps at 6× for three agents; any larger reduction factor
-indicates over-merging across orbits, not a valid symmetry reduction.)
-
-**Minimal reproduction:** `test/features/symmetry_soundness_test.exs`, the test
-`"KNOWN BUG: canonical_fingerprint collides two states from different S3 orbits"`.
-It constructs two states with three pairwise-distinct agent roles (trivial
-stabilizer) whose only difference is a message recipient, and asserts the current
-(incorrect) collision. It is written to start failing once the bug is fixed.
-
-**Correct fix (not done here):** canonicalize under a *single*
-permutation π applied consistently to agent names, message endpoints, **and
-payload agent IDs**, taking the lexicographically smallest serialization over all
-`|S₃| = 6` permutations.
-
-**Status:** the underlying canonicalization is still unsound (not fixed), but as
-of July 2026 **symmetry reduction is OFF by default** — the sound default. It is
-opt-in only, via `mix vor.check --symmetry` (or `symmetry: true`/`:auto` to the
-explorer API), and when enabled the output labels it `⚠ UNSOUND` and warns that
-any absence-of-counterexample result is not trustworthy. A correct orbit-exact
-canonicalization (canonicalize under a single permutation applied consistently to
-agent names, message endpoints, and payload agent IDs; take the smallest
-serialization over all `|Sₙ|` permutations) remains future work — it will change
-multi-agent state counts, so it should be done as a deliberate change.
+Symmetry reduction was **deleted**, not repaired. The former
+`Vor.Explorer.Symmetry.canonical_fingerprint/1` was not orbit-exact: it performed
+three uncoordinated collapses (sorted the per-agent states into a multiset,
+stripped from/to endpoints from pending messages and bagged the payloads, and
+kept payload agent IDs verbatim) with no single permutation tying them together,
+so it could map states in **different Sₙ orbits** to the same fingerprint and
+prune reachable states — and any counterexample reachable only through them
+(**unsound**, not merely imprecise; the arithmetically-impossible 8× on the
+vacuous Raft fixture, where a correct S₃ quotient caps at 6×, was the tell). It
+was already opt-in with unsound-warnings, and the honest-model measurement showed
+a *correct* fix would buy only ~2× — so unsound + marginal made repair not worth
+the ongoing cost of preserving its code paths, warnings, and tests through every
+explorer change. The full analysis and the constructed cross-orbit counterexample
+live in `evidence/phase3a-timer-measurement.md`,
+`evidence/por-and-voting-diagnostics.md`, and the tombstone
+`test/features/symmetry_soundness_test.exs`. Removal is behaviorally invisible:
+symmetry was already off by default, and the sound default-path state counts are
+unchanged (verified against the `evidence/phase3c-por-measurement.md` §7
+baseline).
 
 ---
 

@@ -21,7 +21,7 @@ defmodule Vor.Features.TimerFiringTest do
 
   test "firing the election timeout makes :candidate and :leader reachable in Raft" do
     source = File.read!("examples/raft_cluster.vor")
-    opts = [max_depth: 12, max_states: 500_000, integer_bound: 2, max_queue: 2, symmetry: false, allow_vacuous: true]
+    opts = [max_depth: 12, max_states: 500_000, integer_bound: 2, max_queue: 2, allow_vacuous: true]
 
     # Timers ON (default): election fires, leadership is reached.
     on = reachable_roles(source, opts)
@@ -46,7 +46,7 @@ defmodule Vor.Features.TimerFiringTest do
         end
         """
 
-    opts = [max_depth: 15, max_states: 100_000, symmetry: false]
+    opts = [max_depth: 15, max_states: 100_000]
 
     phases = fn o ->
       stats = Explorer.check_file(source, o) |> Tuple.to_list() |> List.last()
@@ -73,7 +73,7 @@ defmodule Vor.Features.TimerFiringTest do
       """)
 
     {:ok, _status, stats} =
-      Explorer.check_file(source, max_depth: 15, max_states: 500_000, max_queue: 4, symmetry: false)
+      Explorer.check_file(source, max_depth: 15, max_states: 500_000, max_queue: 4)
 
     # The gossip `every` timer fired at least once (recorded with an {:every, tag} id).
     assert Enum.any?(stats.fired_handlers, &match?({_type, {:every, _tag}}, &1)),
