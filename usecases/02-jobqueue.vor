@@ -1,0 +1,102 @@
+%% Probe 2: liveness-dominant job queue (see usecases/02-jobqueue.md).
+%% Load-bearing requirement: every submitted job eventually completes. Written
+%% the way a practitioner naturally would; what the tiers do with it is the finding.
+
+agent Worker(deadline_ms: integer) do
+  state phase: :idle | :busy
+  state current_job: atom
+
+  protocol do
+    accepts {:assign, job_id: atom}
+    accepts {:finish}
+    sends {:done, job_id: atom}
+    sends {:requeue, job_id: atom}
+  end
+
+  on {:assign, job_id: J} when phase == :idle do
+    transition phase: :busy
+    transition current_job: J
+  end
+
+  on {:finish} when phase == :busy do
+    transition phase: :idle
+    send :queue {:done, job_id: current_job}
+  end
+
+  %% The load-bearing liveness: a busy worker eventually goes idle. Note this is
+  %% per-worker-STATE, not per-JOB — see findings.
+  liveness "worker finishes eventually" monitored(within: deadline_ms) do
+    always(phase != :idle implies eventually(phase == :idle))
+  end
+
+  resilience do
+    on_invariant_violation("worker finishes eventually") ->
+      transition phase: :idle
+      send :queue {:requeue, job_id: current_job}
+  end
+end
+
+agent Queue do
+  %% Job-tracking counters — let us *try* the natural safety invariants
+  %% ("dispatched >= completed", "no job done twice"), which then hit F1
+  %% (system-tier grammar is ==/!= only). See findings.
+  state dispatched: integer
+  state completed: integer
+
+  protocol do
+    accepts {:submit, job_id: atom}
+    accepts {:done, job_id: atom}
+    accepts {:requeue, job_id: atom}
+    sends {:assign, job_id: atom}
+  end
+
+  on {:submit, job_id: J} do
+    transition dispatched: dispatched + 1
+    send :w1 {:assign, job_id: J}
+  end
+
+  on {:done, job_id: J} do
+    transition completed: completed + 1
+  end
+
+  on {:requeue, job_id: J} do
+    transition dispatched: dispatched + 1
+    send :w2 {:assign, job_id: J}
+  end
+end
+
+system JobSystem do
+  agent :queue, Queue()
+  agent :w1, Worker(deadline_ms: 300)
+  agent :w2, Worker(deadline_ms: 300)
+
+  connect :queue -> :w1
+  connect :queue -> :w2
+  connect :w1 -> :queue
+  connect :w2 -> :queue
+
+  %% THE LOAD-BEARING REQUIREMENT — every submitted job eventually completes.
+  %% We would like to declare it here as the primary system invariant:
+  %%
+  %%   liveness "every job completes" proven do
+  %%     always(job_submitted implies eventually(job_done))
+  %%   end
+  %%
+  %% It is NOT declared, because it cannot be honestly checked (see 02-jobqueue.md):
+  %%   - per-JOB liveness is inexpressible — the grammar is per-agent-STATE, and
+  %%     `job_submitted`/`job_done` parse as undefined identifiers that "prove"
+  %%     vacuously (F14);
+  %%   - the closest expressible form, `always(w.phase == :busy implies
+  %%     eventually(w.phase == :idle))`, comes back `proven` at this (multi-agent)
+  %%     tier even for a permanently-stuck worker (F10 — non-substantive).
+  %% The real guarantee this system has is the per-worker `monitored` liveness
+  %% above, enforced at runtime by the resilience handler. See the findings log.
+
+  chaos do
+    duration 5s
+    seed 1
+    kill every: 400..900ms
+    check every: 400ms
+    workload rate: 25
+  end
+end

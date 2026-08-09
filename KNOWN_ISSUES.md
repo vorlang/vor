@@ -215,3 +215,49 @@ model-vs-reality test (checker initial state == runtime `:sys.get_state`).
 grammar is `==`/`!=` per-agent). F8 — the explorer does not drive a *driverless*
 agent (no incoming connection/client), so a standalone data-carrying agent is not
 exercised past init. Both logged in `usecases/01-inventory.md`; neither fixed here.
+
+---
+
+## 9. Liveness tier — vacuous checking, blind coverage, no failure channel (OPEN, 2026-08-08)
+
+Surfaced by the first liveness-dominant use-case (`usecases/02-jobqueue.md`,
+Probe 2). The runtime mechanism works — a monitored deadline fires and its
+resilience handler recovers a job on real BEAM processes — but every tier that is
+supposed to *check* or *report* it is vacuous or blind. Logged, not fixed.
+
+**F10 — system-tier `liveness … proven` (multi-agent SCC) is non-substantive.**
+No constructed multi-agent system produced a liveness violation: a worker stuck
+`busy` forever and a two-agent livelock both returned `proven` (with agent-qualified
+*and* bare conditions). Two visible causes: `Vor.Explorer.Tarjan.find_sccs` discards
+trivial SCCs and terminal states get no stuttering self-loop (a deadlock sink is
+never examined); and `LivenessChecker.eval_product_condition` matches only bare
+`field op :value` / `count(...)`, silently returning `false` for agent-qualified
+conditions (`w1.phase == :busy`), so obligations never register. A green-but-empty
+one tier over from §8/F3. **The single-agent *compile-time* liveness verifier is, by
+contrast, sound** — it refuses the same deadlock with a teaching message.
+
+**F11 — coverage is blind to timer/timeout/resilience handlers.**
+`Vor.Simulator.Coverage` marks a handler reached only if its tag appears in
+*received message* telemetry. A `state_timeout` handler receives no message, so a
+resilience handler is reported `missing` even when it demonstrably fires (a worker
+reached `:idle` with `:finish` never received). It cannot distinguish "correctly
+unexercised on the happy path" from "fired and recovered a job."
+
+**F13 — the monitored/resilience tier has no violation-reporting path.**
+`monitored(within:)` only *recovers* at runtime (force-transition to the target
+state; resilience adds side-effects); it never emits a violation, and
+`mix vor.simulate` checks only *system* safety invariants. Breaking the requeue
+therefore drops jobs silently — the simulator stays green across seeds.
+
+**F9 / F12 — codegen crashes on plausible input with raw `erl_lint` errors.** A
+single-value enum state (`state phase: :running`) → `unbound_var :Phase`; a
+parameterised send target (`send peer {…}`, `peer` an agent param) → `unbound_var
+:Peer`. Only ≥2-value enums and literal-atom send targets compile. Neither produces
+a Vor diagnostic.
+
+**Accuracy corrections to §8.** F1 is narrower than first stated: cross-field
+integer **equality** (`never(exists Q where Q.completed != Q.dispatched)`) *is*
+expressible and substantive; the wall is inequalities/arithmetic (`>`, `<`, `+`).
+F8 does not block an agent with an incoming connection — the queue explored 345
+states. What stays inexpressible is per-**job** ("every job completes", "no job done
+twice") — data-indexed liveness/safety (**F14**).
