@@ -231,7 +231,7 @@ defmodule Vor.Codegen.Erlang do
       agent.handlers
       |> Enum.map(fn handler ->
         {pattern_form, defaults_prelude} = pattern_with_defaults(handler.pattern, defaults_by_tag, l)
-        {pre_actions, terminal} = split_terminal(handler.actions)
+        {pre_actions, terminal, _post_actions} = split_terminal(handler.actions)
 
         # Process actions sequentially, threading state variable through transitions
         {pre_exprs, current_var} = Enum.reduce(pre_actions, {[], :State}, fn action, {exprs, sv} ->
@@ -251,7 +251,7 @@ defmodule Vor.Codegen.Erlang do
         # For cast, ignore emit value — just update state
         terminal_exprs = case terminal do
           %IR.Action{type: :conditional, data: %IR.ConditionalAction{} = cond_action} ->
-            [compile_conditional_genserver(cond_action, l, current_var, state_var)]
+            [compile_conditional_genserver(cond_action, l, current_var, [])]
           _ ->
             []
         end
@@ -275,7 +275,7 @@ defmodule Vor.Codegen.Erlang do
   defp gen_handle_info(agent, l) do
     timer_clauses = Enum.map(agent.periodic_timers || [], fn timer ->
       # Process timer body sequentially, threading state variable
-      {pre_actions, _terminal} = split_terminal(timer.actions)
+      {pre_actions, _terminal, _post_actions} = split_terminal(timer.actions)
 
       {pre_exprs, current_var} = Enum.reduce(pre_actions, {[], :State}, fn action, {exprs, sv} ->
         case action do
@@ -313,46 +313,77 @@ defmodule Vor.Codegen.Erlang do
     {:function, l, :handle_info, 2, timer_clauses ++ [catchall]}
   end
 
-  # Compile a handler's action list into Erlang body expressions for gen_server
+  # Compile a handler's action list into Erlang body expressions for gen_server.
+  # A handler has an optional terminal (the first emit/conditional/solve, which
+  # produces the reply) with side-effect actions before AND after it. Actions
+  # after the terminal used to be silently dropped (DP0) — they are now threaded
+  # through, so `emit {...}; send/broadcast/transition` all take effect.
   defp compile_handler_body(actions, l, map_var) do
-    {pre_actions, terminal} = split_terminal(actions)
+    {pre_actions, terminal, post_actions} = split_terminal(actions)
 
-    # Process actions sequentially, threading state variable through transitions
-    {pre_exprs, current_var} = Enum.reduce(pre_actions, {[], map_var}, fn action, {exprs, sv} ->
+    {pre_exprs, mid_var} = thread_gs_actions(pre_actions, l, map_var, "VorGSpre")
+
+    case terminal do
+      %IR.Action{type: :emit, data: emit} ->
+        # Reply value captures data at emit time (`mid_var`); post-actions then
+        # thread further state changes into `final_var`, and the reply returns
+        # that final state so post-transitions persist.
+        reply_form = emit_to_erl(emit, l, mid_var)
+
+        tel =
+          Tel.call([:vor, :message, :emitted], [
+            {:agent, Tel.agent_name_expr(mid_var, l)},
+            {:message_tag, {:atom, l, tag_atom(emit.tag)}}
+          ], l)
+
+        {post_exprs, final_var} = thread_gs_actions(post_actions, l, mid_var, "VorGSpost")
+
+        pre_exprs ++
+          tel ++
+          post_exprs ++ [{:tuple, l, [{:atom, l, :reply}, reply_form, {:var, l, final_var}]}]
+
+      %IR.Action{type: :conditional, data: %IR.ConditionalAction{} = cond_action} ->
+        # post-actions are threaded into both branches (see compile_conditional_genserver).
+        pre_exprs ++ [compile_conditional_genserver(cond_action, l, mid_var, post_actions)]
+
+      %IR.Action{type: :solve, data: %IR.SolveAction{} = solve} ->
+        reject_post_terminal!(post_actions, "a solve")
+        pre_exprs ++ [compile_solve_genserver(solve, l, mid_var, mid_var)]
+
+      nil ->
+        pre_exprs ++ [{:tuple, l, [{:atom, l, :reply}, {:atom, l, :ok}, {:var, l, mid_var}]}]
+    end
+  end
+
+  # Thread a list of gen_server actions, carrying the state map var through
+  # transitions (each produces a fresh var) and emitting side-effects for the
+  # rest. `prefix` namespaces the generated vars so two threaded segments in one
+  # handler (pre- and post-terminal) don't collide.
+  defp thread_gs_actions(actions, l, start_var, prefix) do
+    Enum.reduce(actions, {[], start_var}, fn action, {exprs, sv} ->
       case action do
         %IR.Action{type: :transition, data: %IR.TransitionAction{field: field, value: value}} ->
-          new_sv = :"VorGS#{length(exprs)}"
-          update = {:match, l, {:var, l, new_sv},
-            gen_transition_call(field, transition_value_to_erl(value, l, sv), sv, l)}
+          new_sv = :"#{prefix}#{length(exprs)}"
+
+          update =
+            {:match, l, {:var, l, new_sv},
+             gen_transition_call(field, transition_value_to_erl(value, l, sv), sv, l)}
+
           {exprs ++ [update], new_sv}
+
         _ ->
           {exprs ++ action_to_erl(action, l, sv), sv}
       end
     end)
+  end
 
-    state_var = current_var
-    emit_map_var = current_var
+  # A conditional/solve builds a complete return in each branch, so actions after
+  # it in the source cannot be threaded in — refuse rather than silently drop.
+  defp reject_post_terminal!([], _desc), do: :ok
 
-    {emit_tel, terminal_expr} = case terminal do
-      %IR.Action{type: :emit, data: emit} ->
-        reply_form = emit_to_erl(emit, l, emit_map_var)
-        tel = Tel.call([:vor, :message, :emitted], [
-          {:agent, Tel.agent_name_expr(state_var, l)},
-          {:message_tag, {:atom, l, tag_atom(emit.tag)}}
-        ], l)
-        {tel, {:tuple, l, [{:atom, l, :reply}, reply_form, {:var, l, state_var}]}}
-
-      %IR.Action{type: :conditional, data: %IR.ConditionalAction{} = cond_action} ->
-        {[], compile_conditional_genserver(cond_action, l, emit_map_var, state_var)}
-
-      %IR.Action{type: :solve, data: %IR.SolveAction{} = solve} ->
-        {[], compile_solve_genserver(solve, l, emit_map_var, state_var)}
-
-      nil ->
-        {[], {:tuple, l, [{:atom, l, :reply}, {:atom, l, :ok}, {:var, l, state_var}]}}
-    end
-
-    pre_exprs ++ emit_tel ++ [terminal_expr]
+  defp reject_post_terminal!([%IR.Action{type: t} | _], desc) do
+    raise "vor: `#{t}` appears after #{desc}, which produces the reply — actions after it " <>
+            "would be silently dropped. Move it before the #{desc}."
   end
 
   # Generate state map updates for gen_server transitions
@@ -369,19 +400,28 @@ defmodule Vor.Codegen.Erlang do
     {:call, l, {:atom, l, op}, [value_to_erl(left, l, map_var), value_to_erl(right, l, map_var)]}
   end
 
+  # Split a handler's actions around the terminal (the first emit/conditional/
+  # solve, which produces the reply): {before, terminal | nil, after}. Callers
+  # that produce a reply thread the `after` actions through instead of dropping
+  # them (see `compile_handler_body`).
   defp split_terminal(actions) do
     terminal_idx = Enum.find_index(actions, fn a -> a.type in [:emit, :conditional, :solve] end)
     case terminal_idx do
-      nil -> {actions, nil}
-      idx -> {Enum.take(actions, idx), Enum.at(actions, idx)}
+      nil -> {actions, nil, []}
+      idx -> {Enum.take(actions, idx), Enum.at(actions, idx), Enum.drop(actions, idx + 1)}
     end
   end
 
-  defp compile_conditional_genserver(%IR.ConditionalAction{condition: cond_ir, then_actions: then_acts, else_actions: else_acts}, l, map_var, _state_var) do
+  defp compile_conditional_genserver(%IR.ConditionalAction{condition: cond_ir, then_actions: then_acts, else_actions: else_acts}, l, map_var, post_actions) do
     cond_form = condition_to_erl(cond_ir, l, map_var)
 
-    then_body = compile_handler_body(then_acts, l, map_var)
-    else_body = compile_handler_body(else_acts, l, map_var)
+    # Actions after the `if` (e.g. a trailing default `emit`) belong to BOTH
+    # branches — thread them into each so they aren't dropped (mirrors the
+    # gen_statem path, which appends the rest to each branch). This is what makes
+    # `if <side effects> end; emit {…}` reply with the declared emit instead of a
+    # silently-substituted `:ok`.
+    then_body = compile_handler_body(then_acts ++ post_actions, l, map_var)
+    else_body = compile_handler_body(else_acts ++ post_actions, l, map_var)
 
     {:case, l, cond_form, [
       {:clause, l, [{:atom, l, true}], [], then_body},
@@ -672,7 +712,7 @@ defmodule Vor.Codegen.Erlang do
       |> Enum.unzip()
 
     # Timer fired events: :info handlers
-    timer_clauses = gen_timer_info_clauses(agent, l)
+    timer_clauses = gen_timer_info_clauses(agent, monitors, l)
 
     # State timeout handlers (liveness monitoring)
     timeout_clauses = gen_state_timeout_clauses(agent, monitors, l)
@@ -691,15 +731,6 @@ defmodule Vor.Codegen.Erlang do
     periodic_clauses = gen_periodic_timer_statem_clauses(agent, l, state_field_name, monitors)
 
     {:function, l, :handle_event, 4, cast_clauses ++ call_clauses ++ guarded_catchalls ++ timer_clauses ++ timeout_clauses ++ periodic_clauses ++ [catchall]}
-  end
-
-  defp has_nested_emits?(actions) do
-    Enum.any?(actions, fn
-      %IR.Action{type: :emit} -> true
-      %IR.Action{type: :conditional, data: %IR.ConditionalAction{then_actions: ta, else_actions: ea}} ->
-        has_nested_emits?(ta) or has_nested_emits?(ea)
-      _ -> false
-    end)
   end
 
   defp is_timeout_handler?(handler, monitors) do
@@ -755,7 +786,7 @@ defmodule Vor.Codegen.Erlang do
   # Returns {exprs, final_data_var} — the final data var replaces the original in the return
   defp compile_init_handler_body(nil, _l, data_var), do: {[], data_var}
   defp compile_init_handler_body(%IR.Handler{actions: actions}, l, data_var) do
-    {pre_actions, _terminal} = split_terminal(actions)
+    {pre_actions, _terminal, _post_actions} = split_terminal(actions)
     {transitions, other_pre} = Enum.split_with(pre_actions, fn a -> a.type == :transition end)
 
     pre_exprs = Enum.flat_map(other_pre, &action_to_erl(&1, l, data_var))
@@ -993,8 +1024,15 @@ defmodule Vor.Codegen.Erlang do
 
               {exprs ++ [case_expr], dv, c + 200, true}
 
-            _ ->
+            # `noop` lowers to nil — a genuine no-op.
+            nil ->
               {exprs, dv, c, false}
+
+            # Structural exhaustiveness (A.2): a gen_statem handler action the
+            # body compiler doesn't recognize must fail loudly, not silently skip.
+            %IR.Action{type: type} ->
+              raise "vor codegen gap: action `#{type}` is not handled in a gen_statem handler " <>
+                      "body and would be silently dropped. Please report this."
           end
         end
       end)
@@ -1002,76 +1040,6 @@ defmodule Vor.Codegen.Erlang do
     {exprs, has_terminal}
   end
 
-
-  # Legacy compile_statem_body - kept for timeout handlers and other non-handler contexts
-  # Compile gen_statem handler body - returns {body_exprs, new_state_atom | nil, data_updates, emit_form | nil}
-  defp compile_statem_body(actions, l, state_field_name, data_field_names) do
-    {body_exprs, new_state, data_updates, emit_form} =
-      Enum.reduce(actions, {[], nil, [], nil}, fn action, {exprs, state, updates, emit} ->
-        case action do
-          %IR.Action{type: :emit, data: %IR.EmitAction{} = emit_data} ->
-            form = emit_to_erl(emit_data, l, :Data)
-            {exprs, state, updates, form}
-
-          %IR.Action{type: :transition, data: %IR.TransitionAction{field: field, value: value}} ->
-            if field == state_field_name and is_atom(value) do
-              # State transition (the gen_statem state atom)
-              {exprs, value, updates, emit}
-            else
-              # Data field update
-              val_form = transition_value_to_erl(value, l)
-              {exprs, state, updates ++ [{field, val_form}], emit}
-            end
-
-          %IR.Action{type: :var_binding, data: %IR.VarBindingAction{name: name, expr: expr}} ->
-            binding_form = {:match, l, {:var, l, erl_var(name)}, expr_to_erl(expr, l, :Data)}
-            {exprs ++ [binding_form], state, updates, emit}
-
-          %IR.Action{type: :conditional, data: %IR.ConditionalAction{} = cond_action} ->
-            cond_form = compile_statem_conditional(cond_action, l, state_field_name, data_field_names)
-            {exprs ++ [cond_form], state, updates, emit}
-
-          %IR.Action{type: :send, data: %IR.SendAction{}} = action ->
-            send_exprs = action_to_erl(action, l, :Data)
-            {exprs ++ send_exprs, state, updates, emit}
-
-          %IR.Action{type: :broadcast, data: %IR.BroadcastAction{}} = action ->
-            broadcast_exprs = action_to_erl(action, l, :Data)
-            {exprs ++ broadcast_exprs, state, updates, emit}
-
-          %IR.Action{type: :extern_call, data: %IR.ExternCallAction{}} = action ->
-            ext_exprs = action_to_erl(action, l, :Data)
-            {exprs ++ ext_exprs, state, updates, emit}
-
-          %IR.Action{type: :start_timer, data: %IR.TimerAction{}} ->
-            {exprs, state, updates, emit}
-
-          %IR.Action{type: :cancel_timer, data: %IR.TimerAction{}} ->
-            {exprs, state, updates, emit}
-
-          %IR.Action{type: :function_call, data: _} ->
-            {exprs, state, updates, emit}
-
-          _ ->
-            {exprs, state, updates, emit}
-        end
-      end)
-
-    {body_exprs, new_state, data_updates, emit_form}
-  end
-
-  defp transition_value_to_erl(value, l) when is_atom(value), do: {:atom, l, value}
-  defp transition_value_to_erl({:integer, n}, l), do: {:integer, l, n}
-  defp transition_value_to_erl({:atom, a}, l), do: {:atom, l, a}
-  defp transition_value_to_erl({:bound_var, var}, l), do: {:var, l, erl_var(var)}
-  defp transition_value_to_erl({:param, name}, l) do
-    {:call, l, {:remote, l, {:atom, l, :maps}, {:atom, l, :get}},
-      [{:atom, l, name}, {:var, l, :Data}]}
-  end
-  defp transition_value_to_erl({:arith, op, left, right}, l) do
-    erl_op = arith_op(op)
-    {:op, l, erl_op, value_to_erl(left, l, :Data), value_to_erl(right, l, :Data)}
-  end
 
   defp expr_to_erl({:arith, op, left, right}, l, map_var) do
     erl_op = arith_op(op)
@@ -1086,64 +1054,29 @@ defmodule Vor.Codegen.Erlang do
     {:call, l, {:atom, l, op}, [value_to_erl(left, l, map_var), value_to_erl(right, l, map_var)]}
   end
 
-  defp compile_statem_conditional(%IR.ConditionalAction{condition: cond_ir, then_actions: then_acts, else_actions: else_acts}, l, state_field_name, data_field_names) do
-    cond_form = condition_to_erl(cond_ir, l, :Data)
-
-    # For conditionals inside gen_statem, we compile each branch and wrap in case
-    then_body = compile_statem_conditional_branch(then_acts, l, state_field_name, data_field_names)
-    else_body = compile_statem_conditional_branch(else_acts, l, state_field_name, data_field_names)
-
-    {:case, l, cond_form, [
-      {:clause, l, [{:atom, l, true}], [], then_body},
-      {:clause, l, [{:atom, l, false}], [], else_body}
-    ]}
-  end
-
-  defp compile_statem_conditional_branch(actions, l, state_field_name, data_field_names) do
-    {body_exprs, _new_state, _data_updates, emit_form} =
-      compile_statem_body(actions, l, state_field_name, data_field_names)
-
-    cond do
-      emit_form != nil ->
-        # Direct emit - use it as the result
-        body_exprs ++ [emit_form]
-
-      body_exprs != [] and has_nested_emits?(actions) ->
-        # Emit is nested in a conditional in body_exprs
-        # The last body_expr (case) already evaluates to the emit value
-        body_exprs
-
-      true ->
-        body_exprs ++ [{:atom, l, :ok}]
-    end
-  end
-
-  defp gen_timer_info_clauses(agent, l) do
+  defp gen_timer_info_clauses(agent, monitors, l) do
     state_field_name = case agent.state_fields do
       [%IR.StateField{name: name} | _] -> name
       _ -> :phase
     end
 
-    data_field_names = MapSet.new((agent.data_fields || []), fn %IR.DataField{name: name} -> name end)
-
     agent.handlers
     |> Enum.filter(fn h -> h.pattern.tag |> Atom.to_string() |> String.ends_with?("_fired") end)
     |> Enum.map(fn handler ->
-      actions = handler.actions
-      {_body_exprs, new_state, _data_updates, _emit_form} =
-        compile_statem_body(actions, l, state_field_name, data_field_names)
-
-      state_result = case new_state do
-        nil -> {:var, l, :State}
-        value -> {:atom, l, value}
-      end
+      # Message-timer (`:*_fired`) handlers are caller-less info events — compile
+      # them through the SAME full handler-body path the periodic/resilience
+      # contexts use (nil call_info = no reply), so transitions, data updates,
+      # sends, and broadcasts all fire. (Previously this kept only the enum state
+      # change and silently dropped every other action — see conformance matrix.)
+      body =
+        compile_statem_handler_body(handler.actions, l, :Data, 0, state_field_name, monitors, nil)
 
       guard_erl = statem_guard_to_erl(handler.guard, l)
 
       {:clause, l,
         [{:atom, l, :info}, {:atom, l, handler.pattern.tag}, {:var, l, :State}, {:var, l, :Data}],
         guard_erl,
-        [{:tuple, l, [{:atom, l, :next_state}, state_result, {:var, l, :Data}]}]}
+        body}
     end)
   end
 
@@ -1796,7 +1729,18 @@ defmodule Vor.Codegen.Erlang do
     tel ++ [safe_broadcast]
   end
 
-  defp action_to_erl(_action, _l, _map_var), do: []
+  # `noop` lowers to nil — a genuine no-op.
+  defp action_to_erl(nil, _l, _map_var), do: []
+
+  # Structural exhaustiveness (A.2): any action type action_to_erl/3 does not
+  # explicitly compile must FAIL LOUDLY, never fall through to a silent `[]`.
+  # Handled here: extern_call, var_binding, send, broadcast (+ noop). Everything
+  # else is a codegen gap, not a silent drop.
+  defp action_to_erl(%IR.Action{type: type}, _l, _map_var) do
+    raise "vor codegen gap: action `#{type}` reached action_to_erl/3 with no clause and " <>
+            "would be silently dropped. Supported in this position: transition (by the caller), " <>
+            "extern_call, var_binding, send, broadcast, noop. Please report this."
+  end
 
   defp list_to_erl([], l), do: {:nil, l}
   defp list_to_erl([h | t], l), do: {:cons, l, h, list_to_erl(t, l)}

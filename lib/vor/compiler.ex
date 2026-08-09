@@ -17,6 +17,7 @@ defmodule Vor.Compiler do
          {:ok, ir} <- Vor.Lowering.lower(ast),
          _ <- (if trace, do: trace_lowering(ir)),
          :ok <- validate_init_handler(ir),
+         :ok <- validate_caller_less_emit(ir),
          {:ok, _warnings} <- Vor.Analysis.ProtocolChecker.check(ir),
          {:ok, _completeness_warnings} <- Vor.Analysis.Completeness.check(ir),
          {:ok, _type_warnings} <- Vor.Analysis.TypeChecker.check(ir),
@@ -385,6 +386,56 @@ defmodule Vor.Compiler do
         end
       err -> err
     end
+  end
+
+  # `emit` is a synchronous reply to the caller. Contexts with no caller — the
+  # periodic `every` timer, `:*_fired` message-timer handlers, and resilience
+  # handlers (fired by a monitored-liveness timeout) — have no one to reply to,
+  # so an `emit` there is dead code. Reject it explicitly instead of dropping it
+  # silently (the caller-less analogue of the init-handler restriction).
+  defp validate_caller_less_emit(%Vor.IR.Agent{} = agent) do
+    monitor_tags = MapSet.new(agent.monitors || [], & &1.event_tag)
+
+    contexts =
+      Enum.map(agent.periodic_timers || [], fn t -> {"periodic `every` timer", t.actions} end) ++
+        Enum.flat_map(agent.handlers || [], fn h ->
+          tag = h.pattern && h.pattern.tag
+
+          cond do
+            tag && MapSet.member?(monitor_tags, tag) -> [{"resilience handler", h.actions}]
+            tag && tag |> to_string() |> String.ends_with?("_fired") ->
+              [{"`:*_fired` message-timer handler", h.actions}]
+
+            true -> []
+          end
+        end)
+
+    case Enum.find(contexts, fn {_ctx, actions} -> has_emit_action?(actions) end) do
+      nil ->
+        :ok
+
+      {ctx, _} ->
+        {:error,
+         %{
+           type: :caller_less_emit,
+           message:
+             "Cannot use 'emit' in a #{ctx} — it has no caller to reply to. " <>
+               "'emit' is a synchronous reply and is only valid in a message handler (`on {...}`)."
+         }}
+    end
+  end
+
+  defp has_emit_action?(actions) do
+    Enum.any?(actions || [], fn
+      %Vor.IR.Action{type: :emit} ->
+        true
+
+      %Vor.IR.Action{type: :conditional, data: %Vor.IR.ConditionalAction{then_actions: ta, else_actions: ea}} ->
+        has_emit_action?(ta) or has_emit_action?(ea)
+
+      _ ->
+        false
+    end)
   end
 
   defp validate_init_handler(%Vor.IR.Agent{init_handler: nil}), do: :ok

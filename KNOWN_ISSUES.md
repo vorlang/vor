@@ -157,3 +157,29 @@ drops), shifting non-POR results too. Regression: `test/features/por_test.exs`
 builds the non-commuting saturated state and asserts POR keeps the full set
 (red→green against the pre-fix code). Consequence: sound POR now buys ~1× on the
 honest Raft model (see #4 and `evidence/phase3c-por-measurement.md` §7).
+
+---
+
+## 7. Codegen silent-drop class — RESOLVED (2026-08-08)
+
+Three times, generated code silently did less than the source declared: the
+timer gap (#1), the routing bug (#3), and the `:*_fired` action drop
+(message-timer handlers kept only the enum transition and discarded
+`send`/`broadcast`/data updates), plus its sibling — `emit` in a caller-less
+context, dropped as dead code. One failure class: a codegen dispatch point that
+*filtered* instead of *exhaustively handling*, quietly skipping actions it didn't
+recognize in a given context.
+
+**Resolved.** Every dispatch point now either handles an action or refuses to
+compile — nothing falls through silently: `:*_fired` handlers run their full body
+(fix); `emit` in a periodic/`:*_fired`/resilience handler is an explicit compile
+error (`:caller_less_emit`, reject); gen_server actions *after* the reply
+terminal are threaded through instead of dropped (a fourth instance, DP0, found
+while fixing the others — including `if <side-effects> end; emit {…}` which used
+to reply `:ok`); and the shared per-action compiler raises a "codegen gap … would
+be silently dropped" error on any unhandled action type. Proven by a generated
+**conformance matrix** (`test/features/codegen_conformance_test.exs`, in the
+normal `mix test`) that asserts each action's *observable effect* — a real peer
+receives the message, `:sys.get_state` shows the value, the caller gets the reply
+— never telemetry alone. Full enumeration, the pre-fix red run, and the fix/reject
+decisions: `evidence/conformance-matrix.md`.

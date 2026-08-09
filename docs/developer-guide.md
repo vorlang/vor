@@ -60,6 +60,8 @@ Key codegen features:
 - Protocol constraint checks generated as early-return guards before handler body
 - `__vor_agent_name__` stored in data map for telemetry metadata
 
+**Exhaustive action dispatch (no silent drops).** Every action-dispatch point either compiles an action or fails loudly — a dispatch point must never quietly skip an action it doesn't recognize in a context (the class behind the timer/routing/`:*_fired` bugs). `action_to_erl/3` and the gen_statem body reducer raise a "codegen gap" error on any unhandled action type (`noop`/nil is an explicit no-op); `emit` in a caller-less context (periodic `every`, `:*_fired`, resilience) is a compile error (`Vor.Compiler.validate_caller_less_emit/1`); and handler actions after the reply terminal are threaded through, not dropped. The invariant is enforced by the generated conformance matrix `test/features/codegen_conformance_test.exs`, which asserts each action's **observable effect** (never telemetry alone). See `evidence/conformance-matrix.md` and KNOWN_ISSUES §7.
+
 ## Module map
 
 ### Core pipeline
