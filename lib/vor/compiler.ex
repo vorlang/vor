@@ -122,9 +122,29 @@ defmodule Vor.Compiler do
         end
 
       :no_graph ->
-        # No state machine — no graph-based verification to do
-        :ok
+        # A gen_server has no state-machine graph, so a `proven` safety invariant
+        # cannot be discharged here. Fail closed — refuse rather than pass by
+        # omission (the gen_statem path already refuses an unverifiable body).
+        # The principle, verbatim: never claim to have verified a property you
+        # never exercised.
+        case get_safety_bodies(ir) do
+          [] ->
+            :ok
+
+          [{name, _body} | _] ->
+            {:error, %{type: :unsupported_invariant, name: name,
+                        message: fail_closed_no_graph_message(name)}}
+        end
     end
+  end
+
+  # Routes the author to the tier that works: names the limitation, the working
+  # alternative, and the downgrade path — same register as the vacuity errors.
+  defp fail_closed_no_graph_message(name) do
+    "safety \"#{name}\" is declared `proven`, but a gen_server agent has no " <>
+      "state-machine graph, so value/data invariants are not verified at compile " <>
+      "time. `mix vor.check` evaluates integer properties at the system tier — " <>
+      "declare it there as a system `safety … checked`, or downgrade to `monitored`."
   end
 
   defp verify_liveness(ir) do

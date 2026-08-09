@@ -44,14 +44,17 @@ agent Inventory(capacity: integer) do
     emit {:ok}
   end
 
-  %% Natural value invariants. On a gen_server agent these COMPILE and report
-  %% "proven" — but the single-agent verifier does not reason about integers,
-  %% so the proof is vacuous (see findings F2/F3: a mutation is not caught).
-  safety "stock never negative" proven do
+  %% Natural value invariants. Originally written `proven` — but the compile tier
+  %% now REFUSES them (F3 resolved, commit below): a gen_server has no state graph,
+  %% so it cannot verify a value invariant and no longer fake-proves one. Declared
+  %% `monitored` here — the honest tier the refusal routes to (runtime-enforced).
+  %% (They cannot be lifted to the system tier: the invariant grammar rejects
+  %% inequalities/arithmetic — F1, still open.)
+  safety "stock never negative" monitored do
     never(available < 0)
   end
 
-  safety "conservation" proven do
+  safety "conservation" monitored do
     never(reserved + available != total)
   end
 end

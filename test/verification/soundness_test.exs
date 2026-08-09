@@ -24,7 +24,10 @@ defmodule Vor.Verification.SoundnessTest do
 
     assert {:error, error} = Vor.Compiler.compile_string(source)
     assert error.type == :unsupported_invariant
-    assert String.contains?(error.message, "Cannot verify")
+    # The refusal teaches — it routes the author to the tier that can check the
+    # property, rather than a bare "cannot verify".
+    assert String.contains?(error.message, "does not support")
+    assert String.contains?(error.message, "mix vor.check")
   end
 
   test "supported proven invariant still passes" do

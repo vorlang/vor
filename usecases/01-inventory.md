@@ -54,13 +54,17 @@ end
 2 against capacity 3 yields `available=1, reserved=2, total=3` — conservation
 holds at runtime. The problems are entirely in the *checking* tiers.
 
+> **Update (F3/F4 resolved — see the Resolution section).** The table below is
+> the *pre-fix* reading that motivated the fixes; the post-fix verdicts are noted
+> in each row.
+
 | Invariant | Tier | Strength | Relevance | Notes |
 |---|---|---|---|---|
-| stock never negative | `mix compile` (gen_server agent) | **"proven"** | **vacuous** | Fake — mutation not caught (F3). No relevance axis at this tier to say so (F3). |
-| conservation | `mix compile` (gen_server agent) | **"proven"** | **vacuous** | Same — arithmetic invariant accepted by the grammar, not actually verified. |
-| *(same, on a gen_statem agent)* | `mix compile` | **refused** | — | `:unsupported_invariant`: "change 'proven' to 'monitored', or simplify" (F2 — honest refusal, but only on this path). |
-| stock never negative / conservation | `mix vor.check` (system tier) | **inexpressible** | — | Grammar rejects `<`, arithmetic, negative literals (F1, F6). Cannot be written in the system block at all. |
-| available reached zero | `mix vor.check` (system tier) | checked | **not substantive** | Violated at the *initial* state (1 state explored) — the checker starts integers at 0 and ignores `on :init` (F4/F5). |
+| stock never negative | `mix compile` (gen_server) | ~~"proven"~~ → **refused** | ~~vacuous~~ | Was fake — mutation not caught (F3). **Post-fix:** `:unsupported_invariant`, routed to `monitored`/`mix vor.check`. |
+| conservation | `mix compile` (gen_server) | ~~"proven"~~ → **refused** | ~~vacuous~~ | Same — now refused, not fake-proven. |
+| *(same, on a gen_statem agent)* | `mix compile` | **refused** | — | `:unsupported_invariant` (F2 — was the honest path; now both paths agree). |
+| stock never negative / conservation | `mix vor.check` (system tier) | **inexpressible** | — | Grammar rejects `<`, arithmetic, negative literals (**F1, still open**). Cannot be written in the system block. |
+| available reached zero | `mix vor.check` (system tier) | checked | ~~violated at init~~ | Was violated at the initial state (checker started integers at 0, ignored `on :init` — F4). **Post-fix:** init applied, `available = capacity` at the checker's initial state. |
 
 **Mutation test (F3):** replaced the guarded reserve
 (`if Q <= available do available - Q`) with an unconditional `available - Q` —
@@ -97,6 +101,11 @@ the expressiveness/verification walls are.
   error. This is precisely the pattern the checker ("I proved nothing") and
   simulator ("I tested less than I claimed") learned to surface, reappearing at
   the compile tier where nothing yet watches for it. **Most important finding.**
+  **RESOLVED** (CHANGELOG / KNOWN_ISSUES §8): `verify_safety` now fails closed — a
+  `proven` value/no-graph invariant is refused (`:unsupported_invariant`) with a
+  teaching message routing to `mix vor.check` / `monitored`, matching the
+  gen_statem path. The mutation is the regression test
+  (`test/features/value_verification_test.exs`).
 
 - **F4 — The model checker cannot exercise data-carrying agents that depend on
   non-zero initial quantities.** Integer state defaults to 0 and the explorer
@@ -104,6 +113,12 @@ the expressiveness/verification walls are.
   guarded handler (`reserve when Q <= available`, i.e. `Q <= 0`) is dead, the
   agent is frozen at the origin, and any system invariant is vacuous or trivially
   decided at the initial state. (Runtime is unaffected — `on :init` fires there.)
+  **RESOLVED** (partly): the explorer now applies `on :init` to its initial
+  `ProductState`, guarded by a model-vs-reality test (checker initial state ==
+  runtime `:sys.get_state`). *Still open:* the explorer does not inject external
+  client accepts for a *driverless* agent (no incoming connection), so a
+  standalone inventory is still not exercised past init — separate from F4, noted
+  as **F8**.
 
 - **F5 — The one expressible value probe is degenerate here.** `vor.check` *does*
   track integers substantively — verified independently: `never(exists A where
@@ -123,6 +138,16 @@ the expressiveness/verification walls are.
   and would abstract to `:unknown` regardless. But F1–F4 block the integer value
   invariants first — the `:unknown` abstraction the prediction targeted is not the
   operative wall.
+
+- **F8 — The explorer does not drive a *driverless* agent.** Found while fixing
+  F4: with `on :init` now applied (`available = 3`), the standalone `Inventory`
+  instance *still* explores only 1 state. The explorer delivers pending messages
+  and fires timers, but nothing sends to an agent that has no incoming connection
+  and no client, so its guarded handlers never fire and it stays at its initial
+  state. This confounds the natural "does a reserve reach `available < capacity`"
+  reachability oracle (which is also blocked by F1 — `< capacity` is inexpressible
+  at the system tier). To exercise a data-carrying agent in `mix vor.check` you
+  must wire a driver agent that sends to it. Separate from F4; open.
 
 ## 6. Reproduction
 

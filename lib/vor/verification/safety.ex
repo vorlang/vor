@@ -97,9 +97,11 @@ defmodule Vor.Verification.Safety do
 
       {:unknown, _raw} ->
         {:error, {:unsupported_invariant,
-          "Cannot verify invariant — the property uses " <>
-          "constructs the verifier does not yet support. " <>
-          "Change the tier from 'proven' to 'monitored', or simplify the property."}}
+          "the compile-time verifier proves single-agent state-machine " <>
+          "properties only and does not support this one. If it is a " <>
+          "value/integer property, `mix vor.check` evaluates those at the " <>
+          "system tier — declare it there as a system `safety … checked`. " <>
+          "Otherwise change the tier from `proven` to `monitored`, or simplify."}}
     end
   end
 

@@ -183,3 +183,35 @@ normal `mix test`) that asserts each action's *observable effect* — a real pee
 receives the message, `:sys.get_state` shows the value, the caller gets the reply
 — never telemetry alone. Full enumeration, the pre-fix red run, and the fix/reject
 decisions: `evidence/conformance-matrix.md`.
+
+---
+
+## 8. Value invariants — fail-closed + explorer init (RESOLVED / partial, 2026-08-08)
+
+Surfaced by the first data-carrying use-case (`usecases/01-inventory.md`):
+
+**F3 — a `proven` value invariant that was silently vacuous (RESOLVED).** A
+gen_server has no state-machine graph, so `verify_safety` had nothing to check and
+returned `:ok` — a `proven` value invariant (`never(available < 0)`,
+`never(reserved + available != total)`) passed by omission. A mutation
+(unconditional `available - Q`, which trivially reaches negative stock) still
+compiled as proven. The gen_statem path already refused such a body; the
+gen_server path fake-proved it. Fixed: `verify_safety` now fails closed — an
+unverifiable `proven` safety invariant (no-graph, or an `{:unknown}` body) is
+refused with a **teaching** `:unsupported_invariant` message that routes the
+author to `mix vor.check` (system tier) or `monitored`. The principle, verbatim:
+*never claim to have verified a property you never exercised.* Regression:
+`test/features/value_verification_test.exs` (the mutation must not compile as
+proven). No shipped example relied on the silent skip.
+
+**F4 — the explorer ignored `on :init` (RESOLVED).** Integer state defaulted to 0
+and `mix vor.check` did not run `on :init`, so a data-carrying agent started at
+the origin (guarded handlers dead, invariants vacuous). Fixed: the explorer
+applies the init handler to its initial `ProductState`, guarded by a
+model-vs-reality test (checker initial state == runtime `:sys.get_state`).
+
+**Still open.** F1 — value inequalities/arithmetic (`available >= 0`,
+`reserved + available == total`) are inexpressible as *system* invariants (the
+grammar is `==`/`!=` per-agent). F8 — the explorer does not drive a *driverless*
+agent (no incoming connection/client), so a standalone data-carrying agent is not
+exercised past init. Both logged in `usecases/01-inventory.md`; neither fixed here.

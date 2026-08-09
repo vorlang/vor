@@ -49,7 +49,7 @@ defmodule Vor.Explorer.ProductState do
           Map.get(instance_irs, instance.name) ||
             Map.get(instance_irs, instance.type_name)
 
-        Map.put(acc, instance.name, initial_agent_state(agent_ir, instance.params))
+        Map.put(acc, instance.name, initial_agent_state(agent_ir, instance.params, instance.name))
       end)
 
     %__MODULE__{
@@ -60,11 +60,11 @@ defmodule Vor.Explorer.ProductState do
     }
   end
 
-  defp initial_agent_state(nil, params) do
+  defp initial_agent_state(nil, params, _name) do
     Enum.into(params || [], %{})
   end
 
-  defp initial_agent_state(%IR.Agent{} = ir, params) do
+  defp initial_agent_state(%IR.Agent{} = ir, params, name) do
     state = %{}
 
     # Enum state field — first declared value is the initial state
@@ -87,10 +87,28 @@ defmodule Vor.Explorer.ProductState do
       end)
 
     # Parameters override defaults
-    Enum.reduce(params || [], state, fn {key, value}, acc ->
-      Map.put(acc, key, value)
-    end)
+    state =
+      Enum.reduce(params || [], state, fn {key, value}, acc ->
+        Map.put(acc, key, value)
+      end)
+
+    # Apply the `on :init` handler so the checker's initial state matches what
+    # the runtime produces after init (F4). Init has no caller/message and (by
+    # validation) no send/emit — a linear sequence of data-field transitions.
+    apply_init_handler(ir.init_handler, state, name)
   end
+
+  # Run the `on :init` handler's actions against the initial state, matching the
+  # runtime. Init is caller-less (no message, no send/emit by validation), so a
+  # linear sequence — take the single resulting state.
+  defp apply_init_handler(%IR.Handler{} = init, state, name) do
+    case Vor.Explorer.Simulator.simulate(init, state, {:init, %{}}, name, []) do
+      [{new_state, _msgs} | _] -> new_state
+      _ -> state
+    end
+  end
+
+  defp apply_init_handler(_other, state, _name), do: state
 
   defp default_for_type(:integer), do: 0
   defp default_for_type(:atom), do: nil
