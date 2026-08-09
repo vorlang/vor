@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-08-08 — Close the gen_server cast-path post-terminal drop (conformance follow-up)
+- **The cast cousin of DP0.** The gen_server *cast* clause builder dropped the same post-terminal actions the call path did (`emit {…}; broadcast {…}` invoked via `cast` → the broadcast never reached peers). The cast clause now threads post-terminal side-effects through (`thread_gs_actions`); a conditional terminal threads its trailing actions into both branches, matching the call path. New matrix cell *"gen_server cast: a broadcast AFTER emit reaches a real peer"* — verified red against the pre-fix builder, green after. The dispatch-point table in `evidence/conformance-matrix.md` now shows **zero open silent-drop paths**. 529 tests, 0 failures, zero warnings.
+
 ## 2026-08-08 — Codegen conformance suite: kill the silent-drop class
 - **The class.** Three times generated code silently did less than the source declared (timer gap, routing bug, `:*_fired` action drop). One failure mode: a codegen dispatch point that *filters* instead of *exhaustively handling*, quietly skipping actions it doesn't recognize in a context. This makes it structurally impossible and proves conformance empirically.
 - **Structural (Part A).** Every action-dispatch point now either handles an action or refuses to compile — nothing falls through silently. The shared `action_to_erl/3` and the gen_statem body reducer raise a "codegen gap … would be silently dropped" error on any unhandled action type (`noop`/nil stays an explicit no-op); the lossy legacy `compile_statem_body` path is deleted.

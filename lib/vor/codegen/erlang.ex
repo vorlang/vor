@@ -231,37 +231,33 @@ defmodule Vor.Codegen.Erlang do
       agent.handlers
       |> Enum.map(fn handler ->
         {pattern_form, defaults_prelude} = pattern_with_defaults(handler.pattern, defaults_by_tag, l)
-        {pre_actions, terminal, _post_actions} = split_terminal(handler.actions)
+        {pre_actions, terminal, post_actions} = split_terminal(handler.actions)
 
-        # Process actions sequentially, threading state variable through transitions
-        {pre_exprs, current_var} = Enum.reduce(pre_actions, {[], :State}, fn action, {exprs, sv} ->
-          case action do
-            %IR.Action{type: :transition, data: %IR.TransitionAction{field: field, value: value}} ->
-              new_sv = :"VorCast#{length(exprs)}"
-              update = {:match, l, {:var, l, new_sv},
-                gen_transition_call(field, transition_value_to_erl(value, l, sv), sv, l)}
-              {exprs ++ [update], new_sv}
+        {pre_exprs, mid_var} = thread_gs_actions(pre_actions, l, :State, "VorCast")
+
+        # On the cast path there is no caller, so the terminal's reply is ignored.
+        # Its non-reply side-effects, and every action AFTER it, must still run —
+        # thread them through instead of dropping (the cast cousin of DP0).
+        {terminal_exprs, post_exprs, final_var} =
+          case terminal do
+            %IR.Action{type: :conditional, data: %IR.ConditionalAction{} = cond_action} ->
+              # Thread post-terminal actions into both branches (same as the call
+              # path). The reply-tuples the branches build are discarded on the
+              # cast tail — but the side-effects (post send/broadcast) still run.
+              {[compile_conditional_genserver(cond_action, l, mid_var, post_actions)], [], mid_var}
+
             _ ->
-              {exprs ++ action_to_erl(action, l, sv), sv}
+              # emit/solve/nil terminal: reply ignored on cast; thread post side-effects.
+              {post, fv} = thread_gs_actions(post_actions, l, mid_var, "VorCastPost")
+              {[], post, fv}
           end
-        end)
 
-        state_var = current_var
-
-        # For cast, ignore emit value — just update state
-        terminal_exprs = case terminal do
-          %IR.Action{type: :conditional, data: %IR.ConditionalAction{} = cond_action} ->
-            [compile_conditional_genserver(cond_action, l, current_var, [])]
-          _ ->
-            []
-        end
-
-        result = {:tuple, l, [{:atom, l, :noreply}, {:var, l, state_var}]}
+        result = {:tuple, l, [{:atom, l, :noreply}, {:var, l, final_var}]}
 
         {:clause, l,
           [pattern_form, {:var, l, :State}],
           guard_to_erl(handler.guard, l),
-          defaults_prelude ++ pre_exprs ++ terminal_exprs ++ [result]}
+          defaults_prelude ++ pre_exprs ++ terminal_exprs ++ post_exprs ++ [result]}
       end)
 
     catchall = {:clause, l,
@@ -382,8 +378,8 @@ defmodule Vor.Codegen.Erlang do
   defp reject_post_terminal!([], _desc), do: :ok
 
   defp reject_post_terminal!([%IR.Action{type: t} | _], desc) do
-    raise "vor: `#{t}` appears after #{desc}, which produces the reply — actions after it " <>
-            "would be silently dropped. Move it before the #{desc}."
+    raise "vor: `#{t}` appears after #{desc} — actions after it would be silently " <>
+            "dropped. Move it before #{desc}."
   end
 
   # Generate state map updates for gen_server transitions

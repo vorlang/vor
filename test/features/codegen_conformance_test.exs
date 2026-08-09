@@ -333,6 +333,24 @@ defmodule Vor.Features.CodegenConformanceTest do
     assert hits == 1, "post-emit transition dropped (hits=#{inspect(hits)}) — DP0 split_terminal"
   end
 
+  # DP0's cast cousin — a gen_server handler invoked via cast: the reply (emit)
+  # is ignored, but a `broadcast` AFTER it must still reach a real peer.
+  test "gen_server cast: a broadcast AFTER emit reaches a real peer" do
+    n = uniq()
+
+    src =
+      "agent SndC#{n} do\n" <>
+        "  protocol do\n    accepts {:go}\n    emits {:ack}\n    sends {:beat}\n  end\n" <>
+        "  on {:go} do\n    emit {:ack}\n    broadcast {:beat}\n  end\nend\n\n" <>
+        "agent RcvC#{n} do\n  state got: integer\n  protocol do\n    accepts {:beat}\n  end\n" <>
+        "  on {:beat} do\n    transition got: 1\n  end\nend\n\n" <>
+        "system SysC#{n} do\n  agent :a, SndC#{n}()\n  agent :b, RcvC#{n}()\n  connect :a -> :b\nend"
+
+    got = run_peer(src, fn a -> GenServer.cast(a, {:go, %{}}) end, 160)
+
+    assert got == 1, "post-emit broadcast dropped on the cast path (got=#{inspect(got)}) — DP0 cast cousin"
+  end
+
   # ------------------------------------------------------------------
   # Coverage guard — the matrix must track the IR action set.
   # ------------------------------------------------------------------

@@ -20,17 +20,23 @@ update), `emit`, `send`, `broadcast`, `var_binding`, `conditional`,
 Every place codegen/lowering dispatches an action by type within a handler
 context, and what happens to an action the branch doesn't recognize:
 
-| # | Location | Context(s) it serves | Unhandled action → | Verdict |
+| # | Location | Context(s) it serves | Pre-fix: unhandled action → | Resolution |
 |---|---|---|---|---|
-| DP0 | `split_terminal/1` (`erlang.ex:372`) — `Enum.take(actions, idx)` | gen_server message handler | **actions *after* the first emit/conditional/solve are silently discarded** | **SILENT DROP (new finding)** |
-| DP1 | gen_server pre-action loops (`erlang.ex:239,282,323`) — `case action … _ -> action_to_erl(...)` | gen_server message handler | routes to DP5 | inherits DP5 |
-| DP2 | gen_server terminal dispatch (`erlang.ex:336`) — `case terminal … nil ->` (no `_`) | gen_server terminal | constrained to emit/conditional/solve/nil by `split_terminal`; cannot fall through | safe |
-| DP3 | `compile_statem_actions_v2/7` catch-all (`erlang.ex:996`) — `_ -> {exprs, dv, c, false}` | gen_statem message / state_timeout / periodic handlers | **silently skipped** | **SILENT SKIP** |
-| DP4 | `compile_statem_body/4` catch-all (`erlang.ex:1055`) — `_ -> {exprs, state, updates, emit}` | `:*_fired`, gen_statem conditional branches | **silently skipped** (also `:solve` unhandled) | **SILENT SKIP** |
-| DP5 | `action_to_erl/3` catch-all (`erlang.ex:1799`) — `_ -> []` | anything routed here: gen_server pre-actions, init, statem send/bcast/extern | **silently dropped** (handles only extern_call, var_binding, send, broadcast; misses transition, emit, conditional, solve, timers, function_call) | **SILENT DROP** |
-| DP6 | `gen_timer_info_clauses/2` (`erlang.ex:1121`) — builds clause body as only `[{:next_state, state, Data}]`, discarding `body_exprs` | `:*_fired` message-timer handler | **all non-transition actions dropped** (send/broadcast/data-update/emit) | **SILENT DROP (known)** |
-| DP7 | `compile_init_handler_body/3` (`erlang.ex:756`) — transitions handled, others via `action_to_erl` | `on :init` | routes to DP5 | inherits DP5 |
-| DP-L1 | `lower_action/2` (`lowering.ex:279–496`) — no catch-all clause | all (AST→IR) | `FunctionClauseError` (loud crash, not silent) | crash, not drop |
+| DP0 | `split_terminal/1` — `Enum.take(actions, idx)` | gen_server message handler (**call** path) | actions *after* the terminal silently discarded | **FIXED** — `split_terminal` returns `{before, terminal, after}`; `compile_handler_body` threads the `after` actions through |
+| DP0c | gen_server **cast** clause builder (`erlang.ex:231`) — dropped `post_actions` | gen_server message handler (**cast** path) | post-terminal actions silently discarded (DP0's cousin) | **FIXED** — cast clause threads post-terminal side-effects via `thread_gs_actions`; conditional-terminal + post raises |
+| DP1 | gen_server pre-action loops — `_ -> action_to_erl(...)` | gen_server message handler | routes to DP5 | resolved via DP5 |
+| DP2 | gen_server terminal dispatch — `case terminal … nil ->` (no `_`) | gen_server terminal | constrained to emit/conditional/solve/nil by `split_terminal`; cannot fall through | safe (unchanged) |
+| DP3 | `compile_statem_actions_v2/7` catch-all — `_ -> {exprs, dv, c, false}` | gen_statem message / state_timeout / periodic handlers | silently skipped | **CLOSED** — `nil` (noop) explicit; any other action type **raises** a "codegen gap" error |
+| DP4 | `compile_statem_body/4` catch-all — `_ -> {…}` | `:*_fired`, gen_statem conditional branches | silently skipped | **REMOVED** — the legacy `compile_statem_body` cluster is deleted (dispatch point gone) |
+| DP5 | `action_to_erl/3` catch-all — `_ -> []` | gen_server pre-actions, init, statem send/bcast/extern | silently dropped | **CLOSED** — `nil` (noop) explicit; any other action type **raises** a "codegen gap" error |
+| DP6 | `gen_timer_info_clauses/2` — clause body was only `[{:next_state, …}]` | `:*_fired` message-timer handler | all non-transition actions dropped | **FIXED** — routed through the full `compile_statem_handler_body` (nil call_info); runs the whole body |
+| DP7 | `compile_init_handler_body/3` — others via `action_to_erl` | `on :init` | routes to DP5 | resolved via DP5 (+ `validate_caller_less_emit`/init rules) |
+| DP-L1 | `lower_action/2` — no catch-all clause | all (AST→IR) | `FunctionClauseError` (loud crash, not silent) | loud, not a drop (unchanged) |
+
+**Open silent-drop paths after this work: zero.** Every path above is FIXED
+(threads the action), CLOSED (raises on unhandled), REMOVED (dead), or was never
+a silent drop. Caller-less `emit` (every / `:*_fired` / resilience) is an explicit
+compile error (`Vor.Compiler.validate_caller_less_emit/1`).
 
 **Confirmed empirically (pre-fix):**
 - **DP0** — `on {:go} do emit {:done}; transition count: count+1 end` (gen_server): reply is `{:done, %{}}`, but `:sys.get_state` shows `count: 0` — the post-emit transition is **dropped**.
@@ -120,6 +126,12 @@ more) held: DP0 is the new one.
   `compile_handler_body` threads the *after* actions (post-emit
   send/broadcast/transition) instead of dropping them; the reply carries the
   final state.
+- **DP0's cast cousin fixed** — the gen_server **cast** clause builder dropped
+  the same post-terminal actions (verified red: `emit {…}; broadcast {…}`
+  invoked via `cast` → peer never received). It now threads post-terminal
+  side-effects (`thread_gs_actions`); a conditional terminal threads its trailing
+  actions into both branches, matching the call path. Matrix cell: *"gen_server
+  cast: a broadcast AFTER emit reaches a real peer"* (red→green).
 - **emit-in-caller-less rejected** — `Vor.Compiler.validate_caller_less_emit/1`
   (a validation pass, sibling to the init check) returns
   `{:error, :caller_less_emit, …}` for `emit` in a periodic `every` timer,
@@ -137,8 +149,10 @@ more) held: DP0 is the new one.
   This is the fourth instance of the class, and — as the brief predicted — it was
   found while fixing the others.
 
-**GREEN run:** `mix test test/features/codegen_conformance_test.exs` → **32/0**.
-Full suite **528 tests, 0 failures**, zero warnings. The conformance suite runs
+**GREEN run:** `mix test test/features/codegen_conformance_test.exs` → **33/0**.
+Full suite **529 tests, 0 failures**, zero warnings. The conformance suite runs
 in the normal `mix test` flow, and its `test "matrix covers the handler-relevant
 IR action set"` trips if a new observable IR action type is added without a
 matrix row.
+
+**Zero open silent-drop paths** remain (see the A.1 resolution column).
