@@ -1,0 +1,69 @@
+%% Use-case probe: data-carrying state (see usecases/01-inventory.md).
+%% An inventory/reservation system whose interesting state is QUANTITIES,
+%% not coordination roles. The value invariants are written the way a
+%% practitioner naturally would. What happens to them IS the finding.
+
+agent Inventory(capacity: integer) do
+  state available: integer
+  state reserved: integer
+  state total: integer
+
+  protocol do
+    accepts {:reserve, qty: integer}
+    accepts {:release, qty: integer}
+    accepts {:confirm, qty: integer}
+    emits {:granted}
+    emits {:denied}
+    emits {:ok}
+  end
+
+  on :init do
+    transition available: capacity
+    transition total: capacity
+  end
+
+  on {:reserve, qty: Q} do
+    if Q <= available do
+      transition available: available - Q
+      transition reserved: reserved + Q
+      emit {:granted}
+    else
+      emit {:denied}
+    end
+  end
+
+  on {:release, qty: Q} do
+    transition available: available + Q
+    transition reserved: reserved - Q
+    emit {:ok}
+  end
+
+  on {:confirm, qty: Q} do
+    transition reserved: reserved - Q
+    transition total: total - Q
+    emit {:ok}
+  end
+
+  %% Natural value invariants. On a gen_server agent these COMPILE and report
+  %% "proven" — but the single-agent verifier does not reason about integers,
+  %% so the proof is vacuous (see findings F2/F3: a mutation is not caught).
+  safety "stock never negative" proven do
+    never(available < 0)
+  end
+
+  safety "conservation" proven do
+    never(reserved + available != total)
+  end
+end
+
+system Warehouse do
+  agent :inv_a, Inventory(capacity: 3)
+  agent :inv_b, Inventory(capacity: 3)
+
+  %% Only ==/!= per-agent are expressible at the system tier; the value
+  %% invariants above cannot be lifted here. "available reached 0" is the
+  %% closest expressible probe — reported with relevance in the .md.
+  safety "available reached zero" checked do
+    never(exists A where A.available == 0)
+  end
+end
