@@ -185,6 +185,27 @@ defmodule Mix.Tasks.Vor.Check do
 
               {:violation, name, file}
 
+            {:error, :liveness_violation, name, trace, stats} ->
+              print_abstraction(stats)
+
+              Mix.shell().error(
+                "  ✗ Liveness violated — \"#{name}\": the system can reach a state " <>
+                  "with an active obligation that is never fulfilled (a deadlock sink " <>
+                  "or a non-progress cycle):"
+              )
+
+              if trace != [], do: Mix.shell().error(format_counterexample(trace))
+
+              Mix.shell().error(
+                "  (found after #{stats.states_explored} states, max depth #{stats.max_depth_reached})"
+              )
+
+              {:violation, name, file}
+
+            {:error, :unsupported_liveness, name, reason, _stats} ->
+              Mix.shell().error("  ✗ Liveness \"#{name}\" cannot be verified: #{reason}")
+              {:violation, name, file}
+
             {:error, reason} ->
               Mix.shell().error("  ✗ Compile error: #{inspect(reason)}")
               {:compile_error, file, reason}

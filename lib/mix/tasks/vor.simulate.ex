@@ -166,7 +166,29 @@ defmodule Mix.Tasks.Vor.Simulate do
   defp report_axes(stats) do
     report_relevance(Map.get(stats, :relevance, []))
     report_coverage(Map.get(stats, :coverage))
+    report_monitored(Map.get(stats, :monitored))
   end
+
+  # F13 — the monitored tier, made visible: every monitored invariant whose
+  # deadline was exceeded during the run, and whether the recovery restored a
+  # good state (`recovered`) or left the agent stuck (`violated`).
+  defp report_monitored(%{invariants: [_ | _] = invs}) do
+    Mix.shell().info("    Monitored tier:")
+
+    Enum.each(invs, fn inv ->
+      {mark, label} =
+        case inv.status do
+          :recovered -> {"✓", "deadline_exceeded → recovered"}
+          :violated -> {"✗", "deadline_exceeded → NOT recovered (agent stuck: #{inspect(inv.agents_stuck)})"}
+        end
+
+      Mix.shell().info(
+        "      #{mark} \"#{inv.invariant}\"  #{label}  (#{inv.deadlines_exceeded} breach(es))"
+      )
+    end)
+  end
+
+  defp report_monitored(_), do: :ok
 
   defp report_relevance([]), do: :ok
 
@@ -212,6 +234,8 @@ defmodule Mix.Tasks.Vor.Simulate do
       File.read!(file) |> String.contains?("system ")
     end)
   end
+
+  defp format_violation(%{kind: :monitored, reason: reason}), do: "    #{reason}"
 
   defp format_violation(%{agent_states: agent_states, recent_events: recent}) do
     states_str =

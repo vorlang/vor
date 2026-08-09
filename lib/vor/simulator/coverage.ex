@@ -27,7 +27,12 @@ defmodule Vor.Simulator.Coverage do
   @events [
     [:vor, :transition],
     [:vor, :message, :received],
-    [:vor, :message, :emitted]
+    [:vor, :message, :emitted],
+    # F11 — a `state_timeout` resilience handler receives no message, so it was
+    # invisible to handler coverage (marked "missing" even when it fired). Its
+    # `resilience_fired` event carries the handler tag; treat it as a handler
+    # entry so the declared-vs-observed report can see it.
+    [:vor, :monitored, :resilience_fired]
   ]
 
   @doc """
@@ -83,6 +88,19 @@ defmodule Vor.Simulator.Coverage do
     agent = Map.get(meta, :agent, :undefined)
     tag = Map.get(meta, :message_tag)
     if tag, do: :ets.insert(table, {{:emitted, agent, tag}})
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  # F11 — a fired resilience handler counts as that handler being reached. Its
+  # declared tag (`:liveness_timeout_<name>`) is a handler, not an accept, so
+  # recording it as a "received" handler tag lets the handlers axis see it
+  # without polluting the accepts axis (the tag is not a declared accept).
+  def handle_event([:vor, :monitored, :resilience_fired], _measurements, meta, table) do
+    agent = Map.get(meta, :agent, :undefined)
+    tag = Map.get(meta, :handler)
+    if tag, do: :ets.insert(table, {{:received, agent, tag}})
     :ok
   rescue
     _ -> :ok

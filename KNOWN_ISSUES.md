@@ -218,46 +218,57 @@ exercised past init. Both logged in `usecases/01-inventory.md`; neither fixed he
 
 ---
 
-## 9. Liveness tier — vacuous checking, blind coverage, no failure channel (OPEN, 2026-08-08)
+## 9. Liveness tier — checking, coverage, failure channel (RESOLVED 2026-08-09; F14 open)
 
 Surfaced by the first liveness-dominant use-case (`usecases/02-jobqueue.md`,
 Probe 2). The runtime mechanism works — a monitored deadline fires and its
-resilience handler recovers a job on real BEAM processes — but every tier that is
-supposed to *check* or *report* it is vacuous or blind. Logged, not fixed.
+resilience handler recovers on real BEAM processes — but every tier that was
+supposed to *check* or *report* it was vacuous or blind. All four defects fixed
+in the 2026-08-09 fix round (see CHANGELOG); F14 (per-job properties) stays open
+as a language-design question.
 
-**F10 — system-tier `liveness … proven` (multi-agent SCC) is non-substantive.**
-No constructed multi-agent system produced a liveness violation: a worker stuck
-`busy` forever and a two-agent livelock both returned `proven` (with agent-qualified
-*and* bare conditions). Two visible causes: `Vor.Explorer.Tarjan.find_sccs` discards
-trivial SCCs and terminal states get no stuttering self-loop (a deadlock sink is
-never examined); and `LivenessChecker.eval_product_condition` matches only bare
-`field op :value` / `count(...)`, silently returning `false` for agent-qualified
-conditions (`w1.phase == :busy`), so obligations never register. A green-but-empty
-one tier over from §8/F3. **The single-agent *compile-time* liveness verifier is, by
-contrast, sound** — it refuses the same deadlock with a teaching message.
+**F10 — system-tier `liveness … proven` returned `proven` for stuck systems
+(RESOLVED).** The detection machinery (`run_liveness_check`) *did* find the
+violations — a terminal deadlock sink via `check_terminal_liveness`, a
+non-progress cycle via the SCC check — and wrote them into
+`stats.liveness.results`. The bug was that `check_file`'s **verdict ignored them**
+and returned `:proven` anyway (a dropped result, not — as first diagnosed — a
+Tarjan/`eval` failure). Fixed: the verdict consults the results and returns
+`{:error, :liveness_violation, …}`; a condition the evaluator cannot handle
+(agent-qualified, compound, `count(...)`) is **refused** (`:unsupported_liveness`)
+rather than silently evaluated to `false`. Regression:
+`test/features/liveness_verdict_test.exs`. The single-agent compile-time liveness
+verifier was already sound.
 
-**F11 — coverage is blind to timer/timeout/resilience handlers.**
-`Vor.Simulator.Coverage` marks a handler reached only if its tag appears in
-*received message* telemetry. A `state_timeout` handler receives no message, so a
-resilience handler is reported `missing` even when it demonstrably fires (a worker
-reached `:idle` with `:finish` never received). It cannot distinguish "correctly
-unexercised on the happy path" from "fired and recovered a job."
+**F11 — coverage was blind to timer/timeout/resilience handlers (RESOLVED).**
+`Vor.Simulator.Coverage` marked a handler reached only via *received message*
+telemetry; a `state_timeout` handler receives no message and was reported
+`missing` even when it fired. Fixed: coverage consumes the new
+`[:vor, :monitored, :resilience_fired]` event and records the handler tag —
+reached when it fires, correctly unreached when the deadline never fires.
+Periodic (`every`) timers live in a separate `periodic_timers` list, not the
+declared handler surface, so they had no false-missing (separate, non-defect gap).
 
-**F13 — the monitored/resilience tier has no violation-reporting path.**
-`monitored(within:)` only *recovers* at runtime (force-transition to the target
-state; resilience adds side-effects); it never emits a violation, and
-`mix vor.simulate` checks only *system* safety invariants. Breaking the requeue
-therefore drops jobs silently — the simulator stays green across seeds.
+**F13 — the monitored/resilience tier had no violation-reporting path (RESOLVED).**
+`monitored(within:)` only *recovered* at runtime and emitted nothing. Fixed:
+codegen emits `[:vor, :monitored, :deadline_exceeded]` / `:resilience_fired`
+(with `restores_target`), and `Vor.Simulator.MonitoredWatch` turns a
+deadline-exceeded-without-restoring-a-good-state into a reported violation, while
+a healthy recovery is surfaced as `deadline_exceeded → recovered`. **Scope note:**
+the monitored condition is per-agent-*state*, so it catches a recovery that fails
+to restore the agent's state, but *not* a dropped job (sabotaging the requeue
+while keeping the idle transition leaves the worker recovered) — that is a
+per-**job** loss (F14), which the monitored tier structurally cannot see.
 
-**F9 / F12 — codegen crashes on plausible input with raw `erl_lint` errors.** A
-single-value enum state (`state phase: :running`) → `unbound_var :Phase`; a
-parameterised send target (`send peer {…}`, `peer` an agent param) → `unbound_var
-:Peer`. Only ≥2-value enums and literal-atom send targets compile. Neither produces
-a Vor diagnostic.
+**F9 / F12 — codegen crashes replaced with working support (RESOLVED).** A
+single-value enum state (`state phase: :running`) now compiles as a one-state
+gen_statem; a parameterised send target (`send peer {…}`) resolves the param from
+the data map and routes correctly. Both were raw `erl_lint` `unbound_var` crashes.
+Regression: `test/features/codegen_diagnostics_test.exs`.
 
-**Accuracy corrections to §8.** F1 is narrower than first stated: cross-field
+**F1 correction / F14 still open.** F1 is narrower than first stated: cross-field
 integer **equality** (`never(exists Q where Q.completed != Q.dispatched)`) *is*
 expressible and substantive; the wall is inequalities/arithmetic (`>`, `<`, `+`).
-F8 does not block an agent with an incoming connection — the queue explored 345
-states. What stays inexpressible is per-**job** ("every job completes", "no job done
-twice") — data-indexed liveness/safety (**F14**).
+F8 does not block an agent with an incoming connection. **F14 (open):** per-**job**
+properties ("every job completes", "no job done twice") are data-indexed and
+inexpressible — a language-design question, not a bug.

@@ -1,11 +1,12 @@
 # 02 — Job queue with workers (liveness-dominant)
 
-> **TLC IOU (still open).** The prerequisite TLC rerun for commit `306e5b2`
-> (fail-closed `verify_safety`) has **not** happened — there is no Java runtime in
-> this environment (`java` → "Unable to locate a Java Runtime"; `tla/tla2tools.jar`
-> exists but cannot be invoked). CHANGELOG/KNOWN_ISSUES already carry the note; it
-> stays visible here. This probe touched **no** `.ex` source, so it neither adds
-> nor discharges that IOU.
+> **Update (2026-08-09 fix round).** F9, F10, F11, F12, F13 are **RESOLVED** — see
+> the per-finding notes in §5 and the CHANGELOG. The TLC IOU for `306e5b2` is
+> **discharged** (Java available; VorSafetyVerifier 15,934,464 states / 0
+> violations, VorGraphExtraction 903 / 0). **Correction:** F10's root cause was
+> *not* the Tarjan/`eval` machinery (that works — it detects sinks and cycles); it
+> was that `check_file`'s verdict **dropped** the computed liveness result. F14
+> (per-job properties) stays open.
 
 ## 1. What it models
 
@@ -116,6 +117,9 @@ sweep:
   diagnostic. Hit three times (`Queue`'s `:running`, a driver's `:on`). Route-around:
   use a ≥2-value enum or drop the field. **Error quality: terrible** — a raw
   compiler-internals leak for a plausible thing to write.
+  **RESOLVED (2026-08-09):** `is_enum_type?` now accepts a single atom, so it
+  compiles as a one-state gen_statem (it used to fall through to a data field whose
+  atom default was silently dropped). Regression: `codegen_diagnostics_test.exs`.
 
 - **F10 — System-tier `liveness … proven` (multi-agent SCC) is non-substantive.**
   I could not construct a single multi-agent system whose `liveness … proven`
@@ -135,6 +139,14 @@ sweep:
   catch**, one tier over from F3. *Contrast:* the **single-agent compile-time**
   liveness verifier IS sound — it refuses the same deadlock with a teaching
   message.
+  **RESOLVED (2026-08-09) — mechanism above was wrong.** The detection works:
+  `check_terminal_liveness` examines sinks and the SCC check finds cycles, and
+  both cases *did* write a `{:violation, …}` into `stats.liveness.results`. The
+  actual bug was that `check_file`'s verdict **ignored the results** and returned
+  `:proven` (a dropped result, not the Tarjan/`eval` gaps hypothesised here). The
+  verdict now consults them; unevaluable agent-qualified/compound/`count`
+  conditions are **refused** (`:unsupported_liveness`) rather than silently proved.
+  Regression: `liveness_verdict_test.exs`.
 
 - **F11 — Coverage is structurally blind to timer / timeout / resilience
   handlers.** `Simulator.Coverage` compares declared handlers against **received
@@ -146,6 +158,10 @@ sweep:
   *cannot see* the handler at all, so it cannot distinguish "correctly unexercised
   on the happy path" from "fired and recovered a job." Blind on exactly the tier
   this probe targets.
+  **RESOLVED (2026-08-09):** coverage consumes the new
+  `[:vor, :monitored, :resilience_fired]` event and records the handler tag, so a
+  fired resilience handler is marked *reached* and (correctly) *unreached* when the
+  deadline never fires. Regression: `monitored_channel_test.exs`.
 
 - **F12 — A dynamic/parameter send target crashes codegen.** `send peer {…}` where
   `peer` is an agent parameter generates `unbound_var :Peer` (raw `erl_lint`). Only
@@ -153,6 +169,9 @@ sweep:
   question — *can resilience requeue to a different, dynamically-chosen worker?*
   **No**; you can only requeue to a hardcoded name (the program requeues every
   timed-out job to `:w2`). **Error quality: terrible.**
+  **RESOLVED (2026-08-09):** `send peer {…}` now resolves the param from the data
+  map and routes correctly — a resilience handler *can* requeue to a
+  dynamically-chosen worker. Regression: `codegen_diagnostics_test.exs`.
 
 - **F13 — The monitored / resilience tier has no violation-reporting path.** At
   runtime, `monitored(within:)` only *recovers*: on the deadline it force-transitions
@@ -164,6 +183,16 @@ sweep:
   observable failure. (Subtle corner: a *non-empty* resilience handler *replaces* the
   default, so one that forgets `transition phase: :idle` would leave the worker stuck
   — the default safety net only applies when resilience is empty.)
+  **RESOLVED (2026-08-09):** codegen emits `[:vor, :monitored, :deadline_exceeded]`
+  / `:resilience_fired` (with `restores_target`), and `Vor.Simulator.MonitoredWatch`
+  reports a violation when a deadline is exceeded and the recovery does not restore
+  a good state; a healthy recovery is surfaced as `deadline_exceeded → recovered`.
+  **Scope (a conflict with the fix-round brief, flagged not papered over):**
+  because the monitored condition is per-worker-*state*, sabotaging the *requeue*
+  while keeping the idle transition does **not** go red — the worker recovers; the
+  dropped *job* is a per-job loss (F14) the monitored tier cannot see. The red case
+  is a recovery that fails to restore the worker's state.
+  Regression: `monitored_channel_test.exs`.
 
 - **F14 — "Every job completes" / "no job done twice" are inexpressible; the checker
   refinement of F1.** The requirement is per-**job** (data-indexed, quantified);

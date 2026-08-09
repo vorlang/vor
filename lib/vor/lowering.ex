@@ -97,8 +97,12 @@ defmodule Vor.Lowering do
   end
 
   defp is_enum_type?(types) do
-    # An enum type has multiple atoms joined by |
-    length(types) > 1 and Enum.all?(types, fn
+    # An enum type is one or more atom values (`:a | :b`, or the degenerate
+    # single-state `:running`). A single atom is a valid one-state machine — it
+    # used to fall through to a data field whose atom default was silently
+    # dropped, then crash codegen with an unbound state var (F9). It must exclude
+    # type references (`integer`, `atom`, …), which are data fields.
+    types != [] and Enum.all?(types, fn
       {:type, _} -> false
       _ -> true
     end)
@@ -470,8 +474,12 @@ defmodule Vor.Lowering do
   end
 
   defp lower_action(%AST.Send{target: target, tag: tag, fields: fields}, param_names) do
+    # A `{:var, name}` target may be a message-pattern binding (`send C {...}`),
+    # a param (`send peer {...}`), or a data field — resolve it the same way as a
+    # field value so a param/data-field target reads from the map instead of an
+    # unbound Erlang variable (F12).
     lowered_target = case target do
-      {:var, name} -> {:bound_var, to_atom(name)}
+      {:var, name} -> lower_value_ref(name, param_names)
       name -> to_atom(name)
     end
     %IR.Action{

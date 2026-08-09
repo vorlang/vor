@@ -51,8 +51,10 @@ Lowered representation consumed by both the verifier and codegen. Key difference
 
 ### Codegen (`lib/vor/codegen/erlang.ex`)
 Produces Erlang abstract format, compiled via `:compile.forms/2`. Two agent types:
-- gen_statem: agents with enum state fields
+- gen_statem: agents with enum state fields (a single-atom enum, `state phase: :running`, is a valid one-state machine)
 - gen_server: agents without enum state fields
+
+A send target may be a literal atom (`send :queue {...}`), a message-pattern binding (`send C {...}`), or a param/data-field resolved from the map (`send peer {...}` — read via `maps:get`).
 
 Key codegen features:
 - `__vor_transition__/4` wrapper function — handles state updates with telemetry and sensitive field redaction
@@ -160,6 +162,8 @@ Generated automatically in codegen when `config :vor, telemetry: true` (default)
 | `[:vor, :transition]` | state field change | agent, field, from, to |
 | `[:vor, :message, :emitted]` | emit/reply | agent, message_tag |
 | `[:vor, :constraint, :violated]` | protocol constraint failure | agent, message_tag, constraint |
+| `[:vor, :monitored, :deadline_exceeded]` | monitored deadline fired | invariant, agent, state |
+| `[:vor, :monitored, :resilience_fired]` | resilience/timeout handler ran | invariant, agent, handler, restores_target |
 
 Sensitive fields: transitions emit `from: :redacted, to: :redacted` for fields declared with `sensitive`.
 
@@ -327,11 +331,17 @@ System blocks accept `liveness "name" proven do ... end` alongside `safety` decl
 3. For each SCC, checks if any liveness obligation is active (P holds) but never fulfilled (Q never holds)
 4. Terminal states (no outgoing transitions) with unfulfilled obligations are also flagged
 
+The verdict **fails closed** on the result of steps 3–4: a detected violation makes `check_file` return `{:error, :liveness_violation, name, trace, stats}` (it used to compute the violation into `stats.liveness.results` and then return `:proven` anyway — see KNOWN_ISSUES §9/F10). A liveness condition the evaluator cannot handle — agent-qualified (`w1.phase == :busy`), compound, or `count(...)` — is **refused** with `{:error, :unsupported_liveness, name, reason, stats}` and a teaching message, never silently evaluated to `false` (which would "prove" it vacuously). Only a single `field == :value` / `field != :value` condition over per-agent enum state is evaluated.
+
 Liveness field references are extracted from raw body tokens so the relevance analysis correctly tracks them.
 
 Modules:
 - `lib/vor/explorer/tarjan.ex` — Tarjan's SCC algorithm
 - `lib/vor/explorer/liveness_checker.ex` — body parser + single/multi-agent checking
+
+### Monitored tier — runtime lifecycle and reporting
+
+`liveness "name" monitored(within: EXPR)` compiles to a gen_statem `state_timeout`: entering a monitored state arms the deadline; the resilience handler (or, when none is given, a default transition to the target state) runs when it fires. Codegen emits `[:vor, :monitored, :deadline_exceeded]` and `[:vor, :monitored, :resilience_fired]` (the latter carrying `restores_target`, i.e. whether the recovery returns the agent to a good, non-monitored state). `mix vor.simulate` consumes these via `Vor.Simulator.MonitoredWatch`: a deadline exceeded whose recovery does not restore a good state is a reported violation; otherwise the run surfaces `deadline_exceeded → recovered`. The monitored condition is per-agent-*state*, so it cannot see a per-job failure (e.g. a dropped job whose worker still recovers). Coverage also consumes `resilience_fired`, so a fired timeout handler shows as reached.
 
 ## Backpressure
 

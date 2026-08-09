@@ -215,8 +215,9 @@ defmodule Vor.Features.LivenessTest do
     """
 
     result = Vor.Explorer.check_file(source, max_depth: 10, max_states: 1000)
-    assert {:ok, _, stats} = result
-    # The stuck system should have liveness results with violations
+    # F10 fix: a detected liveness violation now fails the check (it used to be
+    # computed into stats.liveness.results and then ignored, returning :proven).
+    assert {:error, :liveness_violation, "eventually done", _trace, stats} = result
     assert stats.liveness != nil
     violations = Enum.filter(stats.liveness.results, fn
       {:violation, _, _} -> true
@@ -269,6 +270,9 @@ defmodule Vor.Features.LivenessTest do
         assert stats.liveness != nil
       {:error, :violation, _, _, _} ->
         # Safety violation — both promoted independently. That's fine for this test.
+        assert true
+      {:error, :liveness_violation, _, _, _} ->
+        # Liveness violation — a follower can get stuck. Also fine.
         assert true
     end
   end

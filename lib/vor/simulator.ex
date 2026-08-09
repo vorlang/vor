@@ -12,7 +12,7 @@ defmodule Vor.Simulator do
   partition messages.
   """
 
-  alias Vor.Simulator.{Coverage, InvariantChecker, MessageProxy, SupervisorBuilder, Timeline, Workload}
+  alias Vor.Simulator.{Coverage, InvariantChecker, MessageProxy, MonitoredWatch, SupervisorBuilder, Timeline, Workload}
   alias Vor.Explorer.Vacuity
 
   @doc """
@@ -44,6 +44,9 @@ defmodule Vor.Simulator do
             # Attach the coverage collector before agents do meaningful work, so
             # early transitions/messages are observed (task 2b.2).
             collector = Coverage.start()
+            # F13 — watch the monitored tier (deadline exceeded / resilience fired)
+            # so a broken recovery becomes a reported violation, not silence.
+            mon_watch = MonitoredWatch.start()
 
             Process.sleep(500)
 
@@ -59,6 +62,9 @@ defmodule Vor.Simulator do
 
             coverage = Coverage.stop(collector, system_info)
             result = put_coverage(result, coverage)
+
+            monitored = MonitoredWatch.stop(mon_watch)
+            result = put_monitored(result, monitored)
 
             try do
               Supervisor.stop(sup_pid, :normal, 5000)
@@ -87,6 +93,37 @@ defmodule Vor.Simulator do
     do: {:error, :violation, name, details, Map.put(stats, :coverage, coverage)}
 
   defp put_coverage(other, _coverage), do: other
+
+  # Fold the monitored-tier report into the result, and let a monitored
+  # violation (a deadline exceeded whose recovery did not restore a good state)
+  # fail a run that safety checks alone would have passed. A run that already
+  # found a violation keeps it; the monitored report is attached to stats either
+  # way so `deadline_exceeded → recovered` is visible even on a pass.
+  defp put_monitored({:ok, outcome, stats}, monitored) do
+    stats = Map.put(stats, :monitored, monitored)
+
+    case monitored.violations do
+      [] ->
+        {:ok, outcome, stats}
+
+      [{inv, agents} | _] ->
+        details = %{
+          name: "#{inv}",
+          kind: :monitored,
+          agents_stuck: agents,
+          reason:
+            "monitored deadline for \"#{inv}\" was exceeded and the resilience " <>
+              "handler did not restore a good state (agent stuck): #{inspect(agents)}"
+        }
+
+        {:error, :violation, "#{inv}", details, stats}
+    end
+  end
+
+  defp put_monitored({:error, :violation, name, details, stats}, monitored),
+    do: {:error, :violation, name, details, Map.put(stats, :monitored, monitored)}
+
+  defp put_monitored(other, _monitored), do: other
 
   # -------------------------------------------------------------------
   # Simulation loop

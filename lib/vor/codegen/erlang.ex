@@ -733,6 +733,47 @@ defmodule Vor.Codegen.Erlang do
     Enum.any?(monitors, fn m -> m.event_tag == handler.pattern.tag end)
   end
 
+  # F13 — monitored-lifecycle telemetry emitted at the top of a state_timeout
+  # clause. `deadline_exceeded` records the invariant, agent, and state at expiry;
+  # `resilience_fired` records that the recovery handler ran. Both carry the
+  # invariant name so the simulator (and coverage) can attribute them.
+  defp gen_monitored_telemetry(nil, _handler, _state_field, _l), do: []
+
+  defp gen_monitored_telemetry(monitor, handler, state_field_name, l) do
+    name = monitor.name || handler.pattern.tag
+    name_atom = {:atom, l, if(is_atom(name), do: name, else: String.to_atom("#{name}"))}
+    agent_expr = Tel.agent_name_expr(:Data, l)
+
+    # Does the recovery restore a good (non-monitored) state? If not, the agent
+    # stays stuck past its deadline — a genuine monitored violation the simulator
+    # must surface, vs. a `deadline_exceeded → recovered` when it does restore.
+    restores = resilience_restores_target?(handler.actions, monitor, state_field_name)
+    restores_atom = {:atom, l, restores}
+
+    Tel.call([:vor, :monitored, :deadline_exceeded],
+      [{:invariant, name_atom}, {:agent, agent_expr}, {:state, {:var, l, :State}}], l) ++
+      Tel.call([:vor, :monitored, :resilience_fired],
+        [{:invariant, name_atom}, {:agent, agent_expr}, {:handler, {:atom, l, handler.pattern.tag}},
+         {:restores_target, restores_atom}], l)
+  end
+
+  # A recovery restores a good state iff one of its top-level actions transitions
+  # the state field out of the monitored set (to the target or another excluded
+  # state). Conservative: a transition buried inside an if/else is not detected,
+  # so a genuinely-recovering-but-conditional handler reads as `false` — that
+  # under-claims recovery rather than over-claiming it.
+  defp resilience_restores_target?(actions, monitor, state_field_name) do
+    monitored = monitor.monitored_states || []
+
+    Enum.any?(actions, fn
+      %IR.Action{type: :transition, data: %IR.TransitionAction{field: ^state_field_name, value: value}} ->
+        value not in monitored
+
+      _ ->
+        false
+    end)
+  end
+
   defp state_timeout_actions(nil, _monitors, _l), do: []
   defp state_timeout_actions(new_state, monitors, l) do
     Enum.flat_map(monitors, fn monitor ->
@@ -762,8 +803,16 @@ defmodule Vor.Codegen.Erlang do
     Enum.map(timeout_handlers, fn handler ->
       monitor = Enum.find(monitors, fn m -> m.event_tag == handler.pattern.tag end)
 
+      # F13 — the monitored tier's violation-reporting channel. Entering this
+      # clause means the deadline was exceeded while the agent was still in a
+      # monitored state; the body then runs the resilience actions (or the
+      # default recovery to the target state). Emit both facts so the simulator
+      # can report "deadline exceeded → recovered" (or, if the agent never
+      # reaches the target state, a monitored violation) instead of silence.
+      monitor_telemetry = gen_monitored_telemetry(monitor, handler, state_field_name, l)
+
       # Compile the full handler body using the new data-threading codegen
-      body = compile_statem_handler_body(
+      body = monitor_telemetry ++ compile_statem_handler_body(
         handler.actions, l, :Data, 0, state_field_name, monitors, nil)
 
       excluded = [monitor.target_state | monitor.excluded_states]
@@ -1628,10 +1677,11 @@ defmodule Vor.Codegen.Erlang do
     end)
     msg = {:tuple, l, [{:atom, l, tag}, {:map, l, msg_pairs}]}
 
-    # Target can be a literal atom or a bound variable
+    # Target can be a literal atom, a message-pattern binding (`{:bound_var, _}`),
+    # or a param/data-field read from the map (`{:param, _}`, resolved via maps:get).
     target_form = case target do
-      {:bound_var, var} -> {:var, l, erl_var(var)}
       atom when is_atom(atom) -> {:atom, l, atom}
+      tagged -> value_to_erl(tagged, l, map_var)
     end
 
     # Safe send: check if registry exists, skip if standalone agent

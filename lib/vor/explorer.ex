@@ -143,10 +143,27 @@ defmodule Vor.Explorer do
               |> Enum.filter(fn v -> v.tier == :proven and v.relevance == :vacuous end)
               |> Enum.map(& &1.name)
 
-            if status == :proven and vacuous_proven != [] and not allow_vacuous do
-              {:error, :vacuous_proven, vacuous_proven, stats}
-            else
-              {:ok, status, stats}
+            # Fail-closed on liveness (F10). `run_liveness_check` computes
+            # violations (a terminal deadlock or an unfulfillable cycle) and
+            # refusals (a condition the evaluator cannot handle) into
+            # `stats.liveness.results` — but the verdict used to ignore them and
+            # return `:proven` anyway. A detected liveness violation must fail the
+            # check; an unevaluable liveness condition must refuse loudly rather
+            # than silently evaluate to "never satisfied" (which turns unsupported
+            # syntax into a vacuous proof). Same principle as F3.
+            case liveness_verdict(stats[:liveness]) do
+              {:violation, l_name, trace} ->
+                {:error, :liveness_violation, l_name, trace, stats}
+
+              {:unsupported, l_name, reason} ->
+                {:error, :unsupported_liveness, l_name, reason, stats}
+
+              :ok ->
+                if status == :proven and vacuous_proven != [] and not allow_vacuous do
+                  {:error, :vacuous_proven, vacuous_proven, stats}
+                else
+                  {:ok, status, stats}
+                end
             end
 
           other ->
@@ -163,19 +180,29 @@ defmodule Vor.Explorer do
       Enum.map(liveness_invariants, fn inv ->
         case LivenessChecker.parse_liveness_body(inv.body) do
           {:ok, parsed} ->
-            # Check SCCs (cycles) first
-            cycle_result = check_liveness_inv(inv, parsed, sccs, state_map)
+            # Fail-closed: refuse a condition the evaluator cannot handle rather
+            # than let `eval_liveness_condition` silently return `false` for it
+            # (which would read as "the obligation never arises" → vacuous proof).
+            case unevaluable_condition(parsed) do
+              nil ->
+                # Check SCCs (cycles) first, then terminal states (dead ends).
+                cycle_result = check_liveness_inv(inv, parsed, sccs, state_map)
 
-            case cycle_result do
-              {:ok, _} ->
-                # Also check terminal states (dead ends with active obligations)
-                check_terminal_liveness(inv, parsed, adjacency, state_map)
-              violation ->
-                violation
+                case cycle_result do
+                  {:ok, _} ->
+                    check_terminal_liveness(inv, parsed, adjacency, state_map)
+
+                  violation ->
+                    violation
+                end
+
+              reason ->
+                {:unsupported, inv.name, reason}
             end
 
           :unsupported ->
-            {:unsupported, inv.name}
+            {:unsupported, inv.name,
+             "liveness body must be `always(P implies eventually(Q))`"}
         end
       end)
 
@@ -183,6 +210,56 @@ defmodule Vor.Explorer do
   end
 
   defp run_liveness_check(_stats, _invariants), do: %{sccs_checked: 0, results: []}
+
+  # A liveness condition is evaluable only as a single `field == :value` /
+  # `field != :value` clause (the shape `eval_liveness_condition/2` understands).
+  # Agent-qualified (`w1.phase == :busy`), compound (`a and b`), `count(...)`, or
+  # any other shape returns a reason string so the check refuses instead of
+  # silently treating the condition as unsatisfiable.
+  defp unevaluable_condition(%{precondition: pre, postcondition: post}) do
+    cond do
+      not evaluable_condition?(pre) -> describe_unevaluable("antecedent", pre)
+      not evaluable_condition?(post) -> describe_unevaluable("consequent", post)
+      true -> nil
+    end
+  end
+
+  defp evaluable_condition?([{:identifier, _, _}, {:operator, _, op}, {:atom, _, _}])
+       when op in [:==, :!=],
+       do: true
+
+  defp evaluable_condition?(_), do: false
+
+  defp describe_unevaluable(part, tokens) do
+    "the #{part} of this `proven` liveness is not a simple state condition the " <>
+      "system-tier checker can evaluate (only `field == :value` / `field != :value` " <>
+      "over per-agent enum state is supported — agent-qualified, compound, or " <>
+      "count-based conditions are not). Rewrite it as a single state comparison, " <>
+      "or declare the property `monitored` for runtime enforcement. " <>
+      "(got: #{inspect(Enum.map(tokens, fn t -> elem(t, 2) end))})"
+  end
+
+  # Reduce the per-invariant liveness results to a single verdict, violations
+  # first (a real defect outranks an unsupported-syntax refusal).
+  defp liveness_verdict(nil), do: :ok
+
+  defp liveness_verdict(%{results: results}) do
+    violation =
+      Enum.find_value(results, fn
+        {:violation, name, info} -> {:violation, name, Map.get(info, :states, [])}
+        _ -> nil
+      end)
+
+    unsupported =
+      Enum.find_value(results, fn
+        {:unsupported, name, reason} -> {:unsupported, name, reason}
+        _ -> nil
+      end)
+
+    violation || unsupported || :ok
+  end
+
+  defp liveness_verdict(_), do: :ok
 
   # Check if any terminal state (no outgoing edges) has an active obligation
   defp check_terminal_liveness(inv, parsed, adjacency, state_map) do
@@ -196,7 +273,7 @@ defmodule Vor.Explorer do
               fulfilled = eval_liveness_condition(parsed.postcondition, ps)
 
               if obligated and not fulfilled do
-                {:violation, inv.name, %{cycle_length: 1, description: "Terminal state with unfulfilled obligation"}}
+                {:violation, inv.name, %{cycle_length: 1, states: [ps], description: "Terminal state with unfulfilled obligation"}}
               end
           end
         end
@@ -223,7 +300,7 @@ defmodule Vor.Explorer do
           end)
 
         if has_obligation and not ever_fulfilled do
-          {:violation, inv.name, %{cycle_length: length(scc)}}
+          {:violation, inv.name, %{cycle_length: length(scc), states: Enum.map(scc_states, fn {_id, ps} -> ps end) |> Enum.reject(&is_nil/1)}}
         end
       end)
 
